@@ -225,4 +225,7 @@ Integrate audio playback to convert generated chord sequences into audible outpu
 Currently, this is a small experimental project inspired by MIT 6.S191 (after the second lecture).
 Some parts of the TensorFlow implementation were developed with LLM assistance, as the framework was new to me.
 
+After taking CS231n I am eagre to give this project new life and redoo full dataset (increase size by 10 - 100x) and traine it using transformer architecture for language model. I hope this will give huge boost for quality of the model
+
+
 Happy coding!
