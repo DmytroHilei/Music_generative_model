@@ -17,7 +17,7 @@ from model import MusicConfig, GPT
 # default config values designed to train a gpt2 (124M) on OpenWebText
 # I/O
 out_dir = 'checkpoints'
-eval_interval = 1000
+eval_interval = 500
 log_interval = 10
 eval_iters = 100
 eval_only = False
@@ -54,7 +54,7 @@ bias = False # do we use bias inside LayerNorm and Linear layers?
 
 # adamw optimizer
 learning_rate = 3e-4 # max learning rate
-max_iters = 35000 # total number of training iterations
+max_iters = 20000 # total number of training iterations
 weight_decay = 1e-1
 beta1 = 0.9
 beta2 = 0.95
@@ -64,7 +64,7 @@ grad_clip = 1.0 # clip gradients at this value, or disable if == 0.0
 # learning rate decay settings
 decay_lr = True # whether to decay the learning rate
 warmup_iters = 1000 # how many steps to warm up for
-lr_decay_iters = 35000 # should be ~= max_iters per Chinchilla
+lr_decay_iters = 20000 # should be ~= max_iters per Chinchilla
 min_lr = 3e-5 # minimum learning rate, should be ~= learning_rate/10 per Chinchilla
 
 
@@ -119,9 +119,9 @@ val_dataset   = MaestroDataset(csv_path, root_dir = root_dir, split='validation'
 
 
 train_loader = DataLoader(train_dataset, batch_size=batch_size,
-                          shuffle=True, collate_fn=collate_fn, num_workers=4)
+                          shuffle=True, collate_fn=collate_fn, num_workers=12, pin_memory=True)
 val_loader   = DataLoader(val_dataset, batch_size=batch_size,
-                          shuffle=False, collate_fn=collate_fn, num_workers=4)
+                          shuffle=False, collate_fn=collate_fn, num_workers=12, pin_memory=True)
 
 
 iter_num = 0
@@ -228,9 +228,9 @@ def estimate_loss():
     print(f"eval_iters: {eval_iters}")
 
     for split, loader in [("train", train_loader), ("val", val_loader)]:
-        losses = torch.zeros(eval_iters)
 
         actual_eval_iters = min(eval_iters, len(loader))
+        losses = torch.zeros(actual_eval_iters, device=device)
 
         loader_iter = iter(loader)
         for k in range(actual_eval_iters):
@@ -252,7 +252,7 @@ def estimate_loss():
                 loss_targets = Y
                 logits, loss = model(p, v, d, pos, targets=loss_targets)
             losses[k] = loss.item()
-        out[split] = losses.mean()
+        out[split] = losses.mean().item()
     model.train()
     return out
 
