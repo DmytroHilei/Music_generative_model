@@ -112,10 +112,10 @@ def random_subset(dataset, fraction):
 debug = False
 
 train_dataset = MaestroDataset(csv_path, root_dir = root_dir, split='train', block_size=block_size, debug=debug)
-train_dataset = random_subset(train_dataset, fraction=dataset_part)
+#train_dataset = random_subset(train_dataset, fraction=dataset_part)
 
 val_dataset   = MaestroDataset(csv_path, root_dir = root_dir, split='validation', block_size=block_size, debug=debug)
-val_dataset = random_subset(val_dataset, fraction=dataset_part)
+#val_dataset = random_subset(val_dataset, fraction=dataset_part)
 
 
 train_loader = DataLoader(train_dataset, batch_size=batch_size,
@@ -128,7 +128,10 @@ iter_num = 0
 best_val_loss = float('inf')
 
 model_args = dict(n_layer=n_layer, n_head=n_head, n_embd=n_embd, block_size=block_size,
-                  bias=bias, vocab_size=None, dropout=dropout)
+                  bias=bias, dropout=dropout,
+                  pitch_size=pitch_size, velocity_size=velocity_size,
+                  duration_size=duration_size, position_size=position_size)
+
 
 if init_from == 'scratch':
     print("Initializing a new model from scratch")
@@ -270,7 +273,7 @@ def get_lr(it):
 # logging
 if wandb_log and master_process:
     import wandb
-    wandb.init(project=wandb_project, name=wandb_run_name, config=MusicConfig)
+    wandb.init(project=wandb_project, name=wandb_run_name, config=gptconf.__dict__)
 
 # training loop
 X, Y, val_iter, train_iter = get_batch('train', train_iter, val_iter) # fetch the very first batch
@@ -349,8 +352,9 @@ for iter_num in pbar:
             mfu = raw_model.estimate_mfu(batch_size * gradient_accumulation_steps, dt)
             running_mfu = mfu if running_mfu == -1.0 else 0.9 * running_mfu + 0.1 * mfu
         print(f"iter {iter_num}: loss {lossf:.4f}, time {dt * 1000:.2f}ms, mfu {running_mfu * 100:.2f}%")"""
-    iter_num += 1
-    local_iter_num += 1
+
+    #iter_num += 1
+    #local_iter_num += 1
 
     """# termination conditions
     if iter_num > max_iters:
