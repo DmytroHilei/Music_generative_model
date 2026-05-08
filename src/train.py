@@ -27,7 +27,7 @@ init_from = 'scratch'
 # data
 csv_path = '../data/maestro-v3.0.0.csv'
 root_dir = '../data'
-batch_size = 64
+batch_size = 48
 block_size = 1024 # або 512 для локальної демки
 gradient_accumulation_steps = 4 # used to simulate larger batch sizes
 dataset_part=1.0
