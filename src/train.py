@@ -17,9 +17,9 @@ from model import MusicConfig, GPT
 # default config values designed to train a gpt2 (124M) on OpenWebText
 # I/O
 out_dir = 'checkpoints'
-eval_interval = 20
-log_interval = 1
-eval_iters = 200
+eval_interval = 500
+log_interval = 10
+eval_iters = 100
 eval_only = False
 always_save_checkpoint = True
 init_from = 'scratch'
@@ -27,16 +27,16 @@ init_from = 'scratch'
 # data
 csv_path = '../data/maestro-v3.0.0.csv'
 root_dir = '../data'
-batch_size = 6
-block_size = 512 # або 512 для локальної демки
-gradient_accumulation_steps = 5 * 8 # used to simulate larger batch sizes
-dataset_part=0.1
+batch_size = 32
+block_size = 1024 # або 512 для локальної демки
+gradient_accumulation_steps = 4 # used to simulate larger batch sizes
+dataset_part=1.0
 
 
 # model
 n_layer = 12
 n_head = 16
-n_embd = 512
+n_embd = 1024
 pitch_size = 128
 velocity_size = 32
 duration_size = 512   # max_duration_bin + 1
@@ -50,18 +50,24 @@ wandb_run_name = 'maestro-v1'
 
 dropout = 0.1 # for pretraining 0 is good, for finetuning try 0.1+
 bias = False # do we use bias inside LayerNorm and Linear layers?
+
+
 # adamw optimizer
-learning_rate = 2e-3 # max learning rate
-max_iters = 5000 # total number of training iterations
+learning_rate = 3e-4 # max learning rate
+max_iters = 50000 # total number of training iterations
 weight_decay = 1e-1
 beta1 = 0.9
 beta2 = 0.95
 grad_clip = 1.0 # clip gradients at this value, or disable if == 0.0
+
+
 # learning rate decay settings
 decay_lr = True # whether to decay the learning rate
-warmup_iters = 200 # how many steps to warm up for
-lr_decay_iters = 5000 # should be ~= max_iters per Chinchilla
-min_lr = 2e-4 # minimum learning rate, should be ~= learning_rate/10 per Chinchilla
+warmup_iters = 1000 # how many steps to warm up for
+lr_decay_iters = 50000 # should be ~= max_iters per Chinchilla
+min_lr = 3e-5 # minimum learning rate, should be ~= learning_rate/10 per Chinchilla
+
+
 # system
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 print(f"Device: {device}")
