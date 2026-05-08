@@ -54,7 +54,7 @@ bias = False # do we use bias inside LayerNorm and Linear layers?
 
 # adamw optimizer
 learning_rate = 3e-4 # max learning rate
-max_iters = 50000 # total number of training iterations
+max_iters = 35000 # total number of training iterations
 weight_decay = 1e-1
 beta1 = 0.9
 beta2 = 0.95
@@ -64,7 +64,7 @@ grad_clip = 1.0 # clip gradients at this value, or disable if == 0.0
 # learning rate decay settings
 decay_lr = True # whether to decay the learning rate
 warmup_iters = 1000 # how many steps to warm up for
-lr_decay_iters = 50000 # should be ~= max_iters per Chinchilla
+lr_decay_iters = 35000 # should be ~= max_iters per Chinchilla
 min_lr = 3e-5 # minimum learning rate, should be ~= learning_rate/10 per Chinchilla
 
 
