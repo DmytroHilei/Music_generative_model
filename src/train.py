@@ -223,9 +223,9 @@ def estimate_loss():
     out = {}
     model.eval()
 
-    """print(f"train loader batches: {len(train_loader)}")
+    print(f"train loader batches: {len(train_loader)}")
     print(f"val loader batches: {len(val_loader)}")
-    print(f"eval_iters: {eval_iters}")"""
+    print(f"eval_iters: {eval_iters}")
 
     for split, loader in [("train", train_loader), ("val", val_loader)]:
         losses = torch.zeros(eval_iters)
