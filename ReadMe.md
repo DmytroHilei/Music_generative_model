@@ -229,3 +229,114 @@ After taking CS231n I am eagre to give this project new life and redoo full data
 
 
 Happy coding!
+
+# 🎹 Piano Transformer
+
+A GPT-style autoregressive Transformer for symbolic music generation, trained on 200 hours of piano performances from the MAESTRO dataset.
+
+![Transformer Architecture](pictures/Transformer_architecture.png)
+*Figure 1 — GPT-style Transformer Decoder Architecture*
+
+---
+
+## Overview
+
+This project replaces a prior LSTM baseline with a Transformer decoder architecture, following the design principles of [minGPT](https://github.com/karpathy/minGPT) by Andrej Karpathy. The model learns to generate coherent piano music token-by-token in an autoregressive fashion, capturing long-range harmonic and rhythmic dependencies that sequential models struggle with.
+
+---
+
+## Dataset
+
+**200 hours of piano MIDI** (MAESTRO v3.0.0)
+
+Each note is encoded as a 4-dimensional token:
+
+| Dimension | Description |
+|-----------|-------------|
+| `pitch` | MIDI note number (0–127) |
+| `velocity` | Dynamic intensity (0–127) |
+| `duration` | Note length |
+| `position` | Onset time within bar |
+
+This representation allows the model to learn rhythm, harmony, and dynamics simultaneously.
+
+---
+
+## Architecture
+
+A **GPT-style autoregressive Transformer decoder** with causal self-attention — the model can only attend to past tokens, making it suitable for sequential generation.
+
+**Key components:**
+- Multi-head Flash Self-Attention with causal masking
+- Positional embeddings for sequence order awareness
+- Feed-forward sublayers with residual connections and layer normalisation
+- Autoregressive token-by-token decoding at inference
+
+---
+
+## Model Scale
+
+The initial 150M-parameter model severely overfit the dataset. Following the **10–20 tokens per parameter** rule of thumb, the model was scaled down to the target range.
+
+| Parameter | Value |
+|-----------|-------|
+| Dataset | 200 hours of piano MIDI |
+| Initial parameters | 150M *(deprecated — overfit)* |
+| **Target parameters** | **10M – 20M** |
+| Scaling rule | 10–20 tokens per parameter |
+| Hardware | RTX 5090 |
+| Architecture | GPT-style Transformer decoder |
+| Attention | Multi-head Flash Self-Attention |
+
+---
+
+## Results
+
+Compared to the LSTM baseline, the Transformer model produces noticeably more coherent output:
+
+- More consistent long-range musical structure
+- Richer harmonic progressions and chord variety
+- Better rhythmic regularity and dynamic variation
+- More realistic articulation and velocity contours
+
+---
+
+## Project Structure
+
+```
+.
+├── data/               # Dataset preprocessing and tokenisation
+├── model/              # Transformer model definition
+├── train.py            # Training loop
+├── generate.py         # Autoregressive inference
+├── assets/
+│   └── transformer_architecture.png
+└── README.md
+```
+
+---
+
+## Getting Started
+
+```bash
+# Install dependencies
+pip install -r requirements.txt
+
+# Preprocess dataset
+python data/preprocess.py --dataset maestro-v3.0.0
+
+# Train
+python train.py --config configs/base.yaml
+
+# Generate
+python generate.py --checkpoint checkpoints/best.pt --length 512
+```
+
+---
+
+## References
+
+- Vaswani et al. — [Attention Is All You Need](https://arxiv.org/abs/1706.03762) (2017)
+- Karpathy — [minGPT](https://github.com/karpathy/minGPT)
+- Hawthorne et al. — [MAESTRO Dataset](https://magenta.tensorflow.org/datasets/maestro)
+- Dao et al. — [FlashAttention](https://arxiv.org/abs/2205.14135) (2022)
