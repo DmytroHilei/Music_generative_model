@@ -334,7 +334,15 @@ python generate.py --checkpoint checkpoints/best.pt --length 512
 #I have also added giant midi dataset which you can prepare by this:
 
 python prepare_giant_midi.py --zip_file /path/to/giant_midi.zip --output_dir data/giant_midi
+
+#There is also now a possibility to finetune the model on your own dataset:
+python train_finetune.py #and you choose your dataset path and path for csv for the split
+
 ```
+
+Output was reasonable but far from top tier music generation models. I hope that with more data and a larger model, the quality will improve significantly.
+
+You can find example in generated_samples/ — the model captures basic harmonic patterns and rhythmic structures, but there is still room for improvement in terms of musicality and coherence.
 
 
 ---
