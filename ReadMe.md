@@ -330,9 +330,15 @@ python train.py --config configs/base.yaml
 
 # Generate
 python generate.py --checkpoint checkpoints/best.pt --length 512
+
+#I have also added giant midi dataset which you can prepare by this:
+
+python prepare_giant_midi.py --zip_file /path/to/giant_midi.zip --output_dir data/giant_midi
 ```
 
+
 ---
+
 
 ## References
 
