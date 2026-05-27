@@ -230,7 +230,7 @@ After taking CS231n I am eagre to give this project new life and redoo full data
 
 Happy coding!
 
-# 🎹 Piano Transformer
+# Piano Transformer
 
 A GPT-style autoregressive Transformer for symbolic music generation, trained on 200 hours of piano performances from the MAESTRO dataset.
 
