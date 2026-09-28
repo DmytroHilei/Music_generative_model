@@ -167,7 +167,10 @@ training mix.
 - Make one change per experiment. Log the wandb run id, git commit, config diff and per-head val CE below.
 - **Don't delete checkpoints, data, archives or wandb runs without asking.** Before any `rm -rf`, check what's inside.
   Once, the user moved the Aria archive into `data/aria/` right after a partial extraction had been deleted there.
-- Watch the disk: 96 GB partition, often under 10 GB free. Demucs stems are 350 MB/song. Checkpoints with Adam state are about 12 bytes/param.
+- Watch the disk: 96 GB partition, often under 10 GB free. **2026-09-28:** deleted the Aria archive (fully tokenized, 2 GB) and
+  replaced finished `checkpoints/{ab_*,ladder_S,M,L}/ckpt.pt` with verified bf16 `model_bf16.pt` (max rel err ≤ 3.8e-3 = bf16
+  precision). `config/ladder.py` sets `checkpoint_format='bf16'`, so ladder, ablation and iso runs are **not resumable**. `ladder_XL`
+  started before that and writes a full `ckpt.pt`: convert it with `export_bf16.py` once it's done. Demucs stems are 350 MB/song. Checkpoints with Adam state are about 12 bytes/param.
 - Launch at most one training job on the GPU at a time. Benchmark with the training paused (`kill -STOP` / `-CONT`).
 - Never edit a bash runner script while it is executing. Queue with a PID-wait trigger instead, and don't use `pgrep -f` with a
   pattern that also appears in the trigger's own command line: that bug blocked the ladder for about 10 min.
