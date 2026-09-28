@@ -52,10 +52,13 @@ class MaestroDataset(Dataset):
         eval_stride=None,
     ):
         """
-        csv_path:    one CSV or several separated by ',' (paths inside are relative to root_dir or absolute)
+        csv_path:    one or more sources separated by ',': a CSV (paths inside relative to root_dir or absolute),
+                     or 'store:<prefix>' = a prebuilt token store <prefix>_<split>/ (e.g. from data/prepare_aria.py)
         eval_stride: if set, the dataset is deterministic (no randomness, no augmentation): use it for validation
         """
-        self.csv_paths = [Path(p) for p in str(csv_path).split(',')]
+        sources = [s.strip() for s in str(csv_path).split(',') if s.strip()]
+        self.csv_paths = [Path(s) for s in sources if not s.startswith('store:')]
+        prebuilt = [Path(f"{s[len('store:'):]}_{split}") for s in sources if s.startswith('store:')]
         self.root_dir = Path(root_dir)
         self.split = split
         self.block_size = block_size
@@ -69,24 +72,39 @@ class MaestroDataset(Dataset):
         self.cache_dir = Path(cache_dir)
         self.eval_stride = eval_stride
 
-        self.midi_paths = self._load_midi_paths()
-        self.store_dir = self._build_store()
-        self._tokens = None  # memmap, opened lazily in each DataLoader worker
+        self.store_dirs = []
+        if self.csv_paths:
+            self.midi_paths = self._load_midi_paths()
+            self.store_dirs.append(self._build_store())
+        for store in prebuilt:
+            if not (store / "meta.json").exists():
+                raise FileNotFoundError(f"Prebuilt token store {store} missing or incomplete")
+            meta = json.loads((store / "meta.json").read_text())
+            print(f"Loaded tokenized {self.split}: {meta['n_files']:,} files, {meta['n_notes']:,} notes from {store}")
+            self.store_dirs.append(store)
+        self._tokens = None  # memmaps, opened lazily in each DataLoader worker
 
-        offsets = np.load(self.store_dir / "offsets.npy")
-        lengths = np.diff(offsets)
-        keep = lengths > self.block_size  # need block_size + 1 notes because targets are shifted by one
-        if not keep.any():
+        store_ids, starts, lengths = [], [], []
+        for i, store in enumerate(self.store_dirs):
+            offsets = np.load(store / "offsets.npy")
+            n = np.diff(offsets)
+            keep = n > self.block_size  # need block_size + 1 notes because targets are shifted by one
+            store_ids.append(np.full(int(keep.sum()), i, dtype=np.int32))
+            starts.append(offsets[:-1][keep])
+            lengths.append(n[keep])
+        self.store_ids, self.starts, self.lengths = map(np.concatenate, (store_ids, starts, lengths))
+        if len(self.lengths) == 0:
             raise ValueError("No MIDI sequences longer than block_size. Reduce block_size or check the data.")
-        self.starts = offsets[:-1][keep]
-        self.lengths = lengths[keep]
-        self.n_files = int(keep.sum())
+        self.n_files = len(self.lengths)
         # number of valid window starts per file, cumulative (for uniform sampling over all positions)
         self.cum_valid = np.cumsum(self.lengths - self.block_size)
 
         if eval_stride:
+            # (store, start) pairs; order = sources in the given order, files in store order
             self.windows = np.concatenate([
-                np.arange(s, s + n - self.block_size, eval_stride) for s, n in zip(self.starts, self.lengths)
+                np.stack([np.full(len(r), sid), r], axis=1)
+                for sid, s, n in zip(self.store_ids, self.starts, self.lengths)
+                for r in [np.arange(s, s + n - self.block_size, eval_stride)]
             ])
 
     # ------------------------------------------------------------------ storage
@@ -122,7 +140,7 @@ class MaestroDataset(Dataset):
             self.velocity_bins, self.time_resolution, self.max_duration_bin, self.max_delta_bin,
         ))
         digest = hashlib.sha1(key.encode()).hexdigest()[:16]
-        name = "+".join(p.stem for p in self.csv_paths)
+        name = "+".join(p.stem for p in self.csv_paths)  # unchanged for a single CSV -> old stores still match
         store = self.cache_dir / f"{name}_{self.split}_{digest}"
         if (store / "meta.json").exists():
             meta = json.loads((store / "meta.json").read_text())
@@ -154,8 +172,10 @@ class MaestroDataset(Dataset):
     @property
     def tokens(self):
         if self._tokens is None:
-            n = np.load(self.store_dir / "offsets.npy")[-1]
-            self._tokens = np.memmap(self.store_dir / "tokens.u16", dtype=np.uint16, mode="r", shape=(int(n), 4))
+            self._tokens = []
+            for store in self.store_dirs:
+                n = int(np.load(store / "offsets.npy")[-1])
+                self._tokens.append(np.memmap(store / "tokens.u16", dtype=np.uint16, mode="r", shape=(n, 4)))
         return self._tokens
 
     def __getstate__(self):
@@ -177,14 +197,16 @@ class MaestroDataset(Dataset):
 
     def __getitem__(self, idx):
         if self.eval_stride:
-            start = int(self.windows[idx])
+            store_id, start = (int(v) for v in self.windows[idx])
         else:
             pos = random.randrange(int(self.cum_valid[-1]))
             file_idx = int(np.searchsorted(self.cum_valid, pos, side="right"))
             prev = int(self.cum_valid[file_idx - 1]) if file_idx > 0 else 0
+            store_id = int(self.store_ids[file_idx])
             start = int(self.starts[file_idx]) + (pos - prev)
 
-        window = torch.from_numpy(self.tokens[start:start + self.block_size + 1].astype(np.int64))
+        tokens = self.tokens[store_id]
+        window = torch.from_numpy(tokens[start:start + self.block_size + 1].astype(np.int64))
         pitch, velocity, duration, delta_time = window.unbind(1)
 
         if self.augment and not self.eval_stride:
@@ -207,7 +229,8 @@ def tokenize_midi(midi_path, velocity_bins=32, time_resolution=0.02, max_duratio
     All non-drum instruments are merged, notes sorted by (start, pitch).
     delta_time = quantized onset difference to the previous note, duration = quantized note length.
     """
-    midi = pretty_midi.PrettyMIDI(str(midi_path))
+    # a path, or a file-like object (e.g. BytesIO read straight from a tar archive)
+    midi = pretty_midi.PrettyMIDI(str(midi_path) if isinstance(midi_path, (str, Path)) else midi_path)
 
     notes = []
 
