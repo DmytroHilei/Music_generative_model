@@ -229,16 +229,17 @@ class GPT(nn.Module):
         if targets is not None:
             p_tgt, v_tgt, d_tgt, pos_tgt = targets  # tuple з 4 тензорів
 
+            ls = 0.1  # label smoothing
             loss_p = F.cross_entropy(self.head_pitch(x).view(-1, self.config.pitch_size),
-                                     p_tgt.view(-1), ignore_index=-1)
+                                     p_tgt.view(-1), ignore_index=-1, label_smoothing=ls)
             loss_v = F.cross_entropy(self.head_velocity(x).view(-1, self.config.velocity_size),
-                                     v_tgt.view(-1), ignore_index=-1)
+                                     v_tgt.view(-1), ignore_index=-1, label_smoothing=ls)
             loss_d = F.cross_entropy(self.head_duration(x).view(-1, self.config.duration_size),
-                                     d_tgt.view(-1), ignore_index=-1)
+                                     d_tgt.view(-1), ignore_index=-1, label_smoothing=ls)
             loss_pos = F.cross_entropy(self.head_position(x).view(-1, self.config.position_size),
-                                       pos_tgt.view(-1), ignore_index=-1)
+                                       pos_tgt.view(-1), ignore_index=-1, label_smoothing=ls)
 
-            loss = loss_p + loss_v + loss_d + loss_pos  # можна з вагами
+            loss = loss_p + loss_v + loss_d + loss_pos
             logits = None
 
         else:
