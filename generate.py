@@ -84,21 +84,10 @@ def main():
 
     ckpt = torch.load(args.checkpoint, map_location=device)
     ma = ckpt.get("model_args", {})
-    config = MusicConfig(
-        block_size=ma.get("block_size", 512),
-        pitch_size=ma.get("pitch_size", 128),
-        velocity_size=ma.get("velocity_size", 32),
-        duration_size=ma.get("duration_size", 512),
-        delta_time_size=ma.get("delta_time_size", 512),
-        n_layer=ma.get("n_layer", 6),
-        n_head=ma.get("n_head", 8),
-        n_embd=ma.get("n_embd", 256),
-        dropout=0.0,
-        bias=ma.get("bias", False),
-        # checkpoints from before cascade heads have no such key and use independent heads
-        cascade_heads=ma.get("cascade_heads", False),
-        cascade_residual=ma.get("cascade_residual", False),
-    )
+    # every architecture field the checkpoint knows; keys it predates fall back to what old checkpoints used
+    fields = set(MusicConfig.__dataclass_fields__)
+    legacy = dict(cascade_heads=False, cascade_residual=False, n_embd=256)
+    config = MusicConfig(**{**legacy, **{k: v for k, v in ma.items() if k in fields}, 'dropout': 0.0})
 
     model = GPT(config)
     state_dict = ckpt["model"]

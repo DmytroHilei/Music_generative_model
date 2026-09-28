@@ -59,6 +59,12 @@ bias = False
 label_smoothing = 0.1
 cascade_heads = True
 cascade_residual = True
+pitch_head_blocks = 1
+pitch_head_mult = 1
+moe_experts = 0
+moe_top_k = 2
+moe_hidden_frac = 0.5
+moe_aux_weight = 0.01
 
 # wandb logging
 wandb_log = True
@@ -140,7 +146,8 @@ train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, co
 iter_num = 0
 best_val_loss = float('inf')
 arch_keys = ['n_layer', 'n_head', 'n_embd', 'block_size', 'bias', 'pitch_size', 'velocity_size',
-             'duration_size', 'delta_time_size', 'cascade_heads', 'cascade_residual']
+             'duration_size', 'delta_time_size', 'cascade_heads', 'cascade_residual',
+             'pitch_head_blocks', 'pitch_head_mult', 'moe_experts', 'moe_top_k', 'moe_hidden_frac', 'moe_aux_weight']
 # what checkpoints that predate a key actually used
 legacy_defaults = {'cascade_heads': False, 'cascade_residual': False}
 model_args = {k: globals()[k] for k in arch_keys}

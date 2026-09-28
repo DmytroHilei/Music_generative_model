@@ -36,6 +36,8 @@ RUNS = [
     ('ladder-L', 'ladder_L.log', '42M'),
     ('ladder-XL', 'ladder_XL.log', '65M'),
     ('ladder-L-fp8', 'ladder_L_fp8.log', '42M fp8'),
+    ('ladder-L-pitchhead', 'ladder_L_pitchhead.log', '43M'),
+    ('ladder-L-moe8', 'ladder_L_moe8.log', '117M/42M'),
 ]
 
 TQDM = re.compile(r'Training:\s+(\d+)%\|[^|]*\|\s*(\d+)/(\d+) \[([\d:]+)<([\d:?]+),\s*([\d.?]+)(it/s|s/it)')
@@ -76,8 +78,7 @@ def training_table():
         steps = STEP.findall(text)
         pct, cur, tot, _, eta, rate, unit = bars[-1] if bars else ('0', '0', '1', '', '?', '?', 'it/s')
         cur, tot = int(cur), int(tot)
-        is_running = any(label.replace('ladder-', 'ladder_').replace('-fp8', '_fp8').replace('ab-', 'ab_')
-                         .replace('cascade-v2', 'cascade_v2') in a for a in active)
+        is_running = any(Path(a).name == log[:-4] for a in active)
         done = steps and int(steps[-1][0]) >= tot - 1
         state = (Text('done', style='green') if done else Text('running', style='bold yellow') if is_running
                  else Text('stopped', style='red'))

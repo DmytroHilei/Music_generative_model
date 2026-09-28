@@ -84,6 +84,45 @@ class MLP(nn.Module):
         x = self.dropout(x)
         return x
 
+class MoEMLP(nn.Module):
+    """
+    Top-k routed mixture of expert FFNs (dropless: every token goes to its k experts, no capacity limit).
+    Experts are stored as stacked weights and run one after another on the tokens routed to them.
+    self.aux holds the load-balancing loss of the last forward (Switch Transformer: E * sum_i f_i * P_i).
+    """
+
+    def __init__(self, config):
+        super().__init__()
+        C, E = config.n_embd, config.moe_experts
+        H = int(4 * C * config.moe_hidden_frac)
+        self.top_k = config.moe_top_k
+        self.router = nn.Linear(C, E, bias=False)
+        self.w1 = nn.Parameter(torch.randn(E, C, H) * 0.02)
+        self.w2 = nn.Parameter(torch.randn(E, H, C) * 0.02 / math.sqrt(2 * config.n_layer))
+        self.dropout = nn.Dropout(config.dropout)
+        self.aux = None
+
+    def forward(self, x):
+        B, T, C = x.shape
+        flat = x.reshape(-1, C)
+        probs = F.softmax(self.router(flat).float(), dim=-1)              # (N, E)
+        gate, idx = probs.topk(self.top_k, dim=-1)                          # (N, k)
+        gate = (gate / gate.sum(-1, keepdim=True)).to(flat.dtype)
+        E = probs.size(-1)
+        # load balancing: fraction of routed slots per expert * mean router prob per expert
+        frac = torch.zeros(E, device=x.device).scatter_add_(0, idx.reshape(-1),
+                                                             torch.ones(idx.numel(), device=x.device))
+        self.aux = E * (frac / idx.numel() * probs.mean(0)).sum()
+        out = torch.zeros_like(flat)
+        for e in range(E):
+            tok, slot = (idx == e).nonzero(as_tuple=True)
+            if tok.numel() == 0:
+                continue
+            h = F.gelu(flat[tok] @ self.w1[e].to(flat.dtype)) @ self.w2[e].to(flat.dtype)
+            out.index_add_(0, tok, h * gate[tok, slot, None])
+        return self.dropout(out.reshape(B, T, C))
+
+
 class Block(nn.Module):
 
     def __init__(self, config):
@@ -91,7 +130,7 @@ class Block(nn.Module):
         self.ln_1 = LayerNorm(config.n_embd, bias=config.bias)
         self.attn = CausalSelfAttention(config)
         self.ln_2 = LayerNorm(config.n_embd, bias=config.bias)
-        self.mlp = MLP(config)
+        self.mlp = MoEMLP(config) if config.moe_experts else MLP(config)
 
     def forward(self, x):
         x = x + self.attn(self.ln_1(x))
@@ -121,6 +160,15 @@ class MusicConfig:
     # exactly the independent linear heads plus conditioning. False (v1): plain MLP heads (ab_cascade checkpoint).
     cascade_residual: bool = True
     cond_emb_init_std: float = 0.5  # v2 only: h after ln_f has ~unit scale, 0.02 made the conditioning invisible
+    # asymmetric heads (v2 only): the pitch head gains most from capacity, so it can get more/wider blocks
+    pitch_head_blocks: int = 1
+    pitch_head_mult: int = 1        # hidden width of the pitch head blocks = mult * n_embd
+    # mixture of experts in the transformer FFNs (0 = dense MLP). Expert hidden = 4*n_embd*moe_hidden_frac,
+    # with top_k=2 and frac=0.5 the active FFN compute equals the dense model.
+    moe_experts: int = 0
+    moe_top_k: int = 2
+    moe_hidden_frac: float = 0.5
+    moe_aux_weight: float = 0.01    # Switch-style load-balancing loss
 
 
 # order in which attributes of the next note are decided by CascadeHeads
@@ -133,17 +181,24 @@ class ResidualHead(nn.Module):
     """out(LN(z + MLP(LN(z)))): a direct linear path from z (like the independent heads) plus a small MLP
     that can mix in the conditioning non-linearly. c_proj gets the small residual init in GPT.__init__."""
 
-    def __init__(self, C, vocab, bias):
+    def __init__(self, C, vocab, bias, n_blocks=1, mult=1):
         super().__init__()
+        H = mult * C
         self.ln = LayerNorm(C, bias=bias)
-        self.c_fc = nn.Linear(C, C, bias=bias)
+        self.c_fc = nn.Linear(C, H, bias=bias)
         self.gelu = nn.GELU()
-        self.c_proj = nn.Linear(C, C, bias=bias)
+        self.c_proj = nn.Linear(H, C, bias=bias)
+        # further residual blocks (asymmetric heads); empty for the default single block -> old checkpoints load
+        self.extra = nn.ModuleList(nn.ModuleDict(dict(
+            ln=LayerNorm(C, bias=bias), c_fc=nn.Linear(C, H, bias=bias), c_proj=nn.Linear(H, C, bias=bias),
+        )) for _ in range(n_blocks - 1))
         self.ln_out = LayerNorm(C, bias=bias)
         self.out = nn.Linear(C, vocab, bias=False)
 
     def forward(self, z):
         z = z + self.c_proj(self.gelu(self.c_fc(self.ln(z))))
+        for blk in self.extra:
+            z = z + blk['c_proj'](self.gelu(blk['c_fc'](blk['ln'](z))))
         return self.out(self.ln_out(z))
 
 
@@ -166,7 +221,12 @@ class CascadeHeads(nn.Module):
         })
         self.residual = config.cascade_residual
         if self.residual:
-            self.heads = nn.ModuleDict({name: ResidualHead(C, sizes[name], config.bias) for name in CASCADE_ORDER})
+            self.heads = nn.ModuleDict({
+                name: ResidualHead(C, sizes[name], config.bias,
+                                   n_blocks=config.pitch_head_blocks if name == 'pitch' else 1,
+                                   mult=config.pitch_head_mult if name == 'pitch' else 1)
+                for name in CASCADE_ORDER
+            })
             return
         self.heads = nn.ModuleDict({
             name: nn.Sequential(
@@ -321,6 +381,10 @@ class GPT(nn.Module):
                 loss = loss + F.cross_entropy(lg, t, ignore_index=-1, label_smoothing=ls)
                 with torch.no_grad():
                     parts[name] = F.cross_entropy(lg.float(), t, ignore_index=-1)
+            if self.config.moe_experts:
+                aux = sum(b.mlp.aux for b in self.transformer.h) / len(self.transformer.h)
+                loss = loss + self.config.moe_aux_weight * aux
+                parts['moe_aux'] = aux.detach()
             return parts, loss
 
         else:
