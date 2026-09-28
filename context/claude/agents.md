@@ -169,7 +169,30 @@ A/B. Optional: weight EMA / checkpoint averaging, QK-LayerNorm. Model size from 
 7. Beat-based tokens (REMI-like) for the pop target, compared against the performance-timing tokens.
 8. Stage 2 multi-track: an instrument attribute in the cascade (dt → instrument → pitch → dur → vel), instrument-type experts,
    Lakh MIDI pretraining, Demucs stems transcribed per instrument (drums need a drum transcriber).
-9. Mamba/SSM: controlled comparison (same tokens, params and budget), mainly for long context. `mamba-ssm` on sm_120 may need a source build.
+9. Diffusion for arrangement/infilling: see "Diffusion idea". Start with masked discrete diffusion on our tokens.
+10. Mamba/SSM: controlled comparison (same tokens, params and budget), mainly for long context. `mamba-ssm` on sm_120 may need a source build.
+
+## Diffusion idea (discussed 2026-09-28, not started)
+
+Diffusion would **add** a capability (arrangement and editing) rather than replace the AR model. The natural time is after the 24 h
+pretraining and the Skryabin fine-tune, so there's a strong AR baseline to compare against.
+
+- **Audio diffusion** (Stable Audio, AudioLDM, MusicLDM): generates waveforms and skips MIDI. Out of scope: large models and data,
+  copyright and voice imitation issues, a different pipeline.
+- **Symbolic diffusion, the relevant family:** Polyffusion (piano-roll U-Net on POP909, 2023), whole-song hierarchical cascaded diffusion
+  (ICLR 2024), masked/discrete diffusion on tokens (MaskGIT / MDLM / SEDD style).
+- **Gains vs. AR:** native infilling and arrangement ("melody given → accompaniment", "regenerate bars 5–8"), better global structure
+  (the whole segment at once), control via conditioning + classifier-free guidance (a "Skryabin-ness" strength knob, chords, density).
+- **Costs:** grid/piano-roll representations lose our 20 ms performance timing and velocity nuance. No comparable likelihood, so
+  judgment by ear plus `eval_samples.py` stats. 20–1000 denoising steps per segment.
+- **Target use:** melody-conditioned **accompaniment generation**, the inverse of `audio_to_piano.py`: take a Skryabin-style vocal line
+  (already extracted by Demucs + basic-pitch) and generate the piano part under it.
+- **Options, cheapest first:**
+  1. **Masked discrete diffusion on our own compound tokens:** same transformer without the causal mask, trained to un-mask randomly
+     masked notes/attributes. It reuses the data stores, the heads idea and most of `train.py`. **Recommended first experiment.**
+  2. **Piano-roll diffusion (Polyffusion-style)** on beat-quantized data (Aria pop + reductions + POP909). Needs the beat-grid
+     representation (hypothesis 7).
+  3. **Hybrid / hierarchical:** diffusion plans the structure (bars, chords, melody outline) and the AR model renders the expressive notes.
 
 ## Working conventions for agents
 
