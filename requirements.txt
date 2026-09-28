@@ -1,0 +1,7 @@
+torch>=2.7.0
+numpy
+pandas
+pretty_midi
+tqdm
+wandb
+mido

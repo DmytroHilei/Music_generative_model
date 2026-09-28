@@ -1,0 +1,28 @@
+split,midi_filename
+train,midi/iryna-bilyk-skryabin-movchati-(meloua.com).mid
+train,midi/skryabin-govorili-i-kurili-(meloua.com).mid
+train,midi/skryabin-kolorova-(meloua.com).mid
+train,midi/skryabin-lyudi-yak-korabli-(meloua.com).mid
+train,midi/skryabin-mam-(meloua.com).mid
+train,midi/skryabin-more-nay-tsiliy-svit-propade-(meloua.com).mid
+train,midi/skryabin-ne-dumay-pro-zavtra-(meloua.com).mid
+train,midi/skryabin-sam-sobi-kraina-(meloua.com).mid
+train,midi/skryabin-shmata-(meloua.com).mid
+train,midi/skryabin-yurcash-suka-viyna-(meloua.com).mid
+train,midi/Скрябін - Випускний.mid
+train,midi/Скрябін - Загублений рай.mid
+train,midi/Скрябін - Зірка кіно.mid
+train,midi/Скрябін - Кинули.mid
+train,midi/Скрябін - Маршрутка.mid
+train,midi/Скрябін - Модна країна.mid
+train,midi/Скрябін - Місця щасливих людей.mid
+train,midi/Скрябін - Най буде дощ.mid
+train,midi/Скрябін - Нікому то не треба.mid
+train,midi/Скрябін - Остання сигарета.mid
+train,midi/Скрябін - Останній танець.mid
+train,midi/Скрябін - Сам собі країна.mid
+train,midi/Скрябін - Танець пінгвіна.mid
+validation,midi/skryabin-spi-sobi-sama-(meloua.com).mid
+validation,midi/Скрябін - Годинник.mid
+validation,midi/Скрябін - Лист до друга.mid
+validation,"midi/Скрябін, Gavrotone DM - Вибач.mid"
