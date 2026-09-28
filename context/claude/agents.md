@@ -163,7 +163,7 @@ A/B. Optional: weight EMA / checkpoint averaging, QK-LayerNorm. Model size from 
 
 1. Finish the ladder, then fit loss vs. N and decide the overnight model size (expect 60–115M, e.g. XL or 16L×640).
 2. ✅ fp8 + compile adopted for the long run (+0.02 nats, −14% to −20% time).
-3. ❌ Asymmetric pitch head rejected (+0.04). MoE (trunk FFN capacity): pending.
+3. ❌ Asymmetric pitch head rejected (+0.04). ❌ MoE rejected on this laptop (+0.10 per step, 2.5× slower). Scale the dense trunk.
 4. **Fine-tune stages:** Aria **pop+rock** subset (`prepare_aria.py --genres pop,rock` or filter `aria.csv`, about 77k files) as the middle
    domain → the Ukrainian reductions (song-level split, artist/style token, replay 10–30% pretraining data, LoRA or low LR).
 5. Better key detection (audio-based) for the minor-key filter. Dedupe covers of the same song across `Skryabin/` and `data/audio/Скрябін`.
@@ -238,6 +238,7 @@ pretraining and the Skryabin fine-tune, so there's a strong AR baseline to compa
 | 2026-09-28 | 9dv8hnzd (ab-cascade-v2) | f4ab505 | cascade v2 residual heads | 2.759 / **2.040** / **2.915** / **1.699** = **9.412** | now the default |
 | 2026-09-28 | ladder-S | bc8a5e0 | 6.1M, 100M tok, combined + Aria, dropout 0 | 2.735 / 2.082 / 2.919 / 1.703 = 9.438; Aria 8.613 | |
 | 2026-09-28 | ladder-M | bc8a5e0 | 20.2M (10L×384) | 2.428 / 2.030 / 2.826 / 1.607 = **8.891**; Aria **7.931** | −0.55 / −0.68 vs S |
+| 2026-09-29 | ladder-L-moe8 | 84a33ed | L with MoE FFN: 8 experts, top-2, hidden 2C (117M total / 42M active) | 2.349 / 2.010 / 2.785 / 1.581 = 8.724; Aria 7.695 | **negative**: +0.10 vs dense L *per step* and about 2.5× slower per step (about 62 min with boost). Ahead only at step 1000. Too few tokens per expert at 100M; unfused expert loop. Revisit only with far more tokens and fused kernels |
 | 2026-09-29 | ladder-L-pitchhead | 84a33ed | L + pitch head 2 blocks × 2 width (+1.6M) | 2.301 / 2.009 / 2.784 / 1.570 = 8.664; Aria 7.648 | **negative**: +0.04 vs L, and pitch itself got worse. Pitch gains come from trunk capacity (context), not the head. Keep the default heads |
 | 2026-09-29 | ladder-L-fp8 | 71bdf16 | L with `--fp8=True --compile=True` | 2.280 / 2.008 / 2.783 / 1.571 = 8.643; Aria 7.622 | **+0.02 (+0.27%) vs bf16 L, 14% less wall-clock** (34:08 vs 39:52, both contended). Use fp8+compile for the long run |
 | 2026-09-28 | ladder-XL | bc8a5e0 | 64.7M (12L×640) | 2.185 / 1.990 / 2.755 / 1.542 = **8.472**; Aria **7.399** | the power-law fit (α≈0.22) predicted 7.42. −0.32/doubling, same as M→L, so no extra flattening yet |
