@@ -41,6 +41,9 @@ RUNS = [
     ('iso-M', 'iso_M.log', '20M 400Mt'),
     ('iso-L', 'iso_L.log', '42M 194Mt'),
     ('iso-XL', 'iso_XL.log', '65M 125Mt'),
+    ('ladder-L-lr3e-4', 'ladder_L_lr3e-4.log', '42M'),
+    ('ladder-L-lr1e-3', 'ladder_L_lr1e-3.log', '42M'),
+    ('ladder-L-muon', 'ladder_L_muon.log', '42M muon'),
 ]
 
 TQDM = re.compile(r'Training:\s+(\d+)%\|[^|]*\|\s*(\d+)/(\d+) \[([\d:]+)<([\d:?]+),\s*([\d.?]+)(it/s|s/it)')
