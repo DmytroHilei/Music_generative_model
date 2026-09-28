@@ -44,8 +44,10 @@ Transcription extras (`piano_transcription_inference`, `librosa`, `demucs`) are 
   (`data/giantmidi/midi/surname_checked_midis/`, 7,236 files from the Google Drive release, only titles checked against
   composer surnames; split by composer: 6,761 train / 475 val). Total **7,723 train / 612 val**. The 177 MAESTRO
   `test` rows are ignored by the loader. GiantMIDI paths in the CSV are absolute. The old `giant_midis/` folder
-  is obsolete, and the old CSV is backed up at `data/cache/combined_old_backup.csv`.
-- Token budget with MAESTRO only: the old default of 122,880 tokens/iter × 30k iters would be about **650 epochs**. `train.py` prints
+  is obsolete. After tokenization: **7,301 train files longer than 512 notes, 31.3M train notes**, 1,200 fixed val
+  windows (200 batches). Tokenizing in parallel (24 procs) takes about 1 min, and cached loading takes seconds. The old CSV was lost (overwritten by the crashed prepare run), but nothing depends on it.
+- Token budget: the old default of 122,880 tokens/iter × 30k iters is about **118 epochs** of the combined set (about 650 of MAESTRO alone).
+  4 epochs ≈ 1k iters and 10 epochs ≈ 2.5k iters at the default batch. The old 5M model ran at about 0.47 s/iter, so about 20 min for 10 epochs. `train.py` prints
   "Planned epochs" at startup, so always check it.
 - Last pretrain run (wandb `lcqh7fm4`, 30k iters, about 4 h): loss 21.06 → 12.0 at 2k → 11.4 at 4.6k →
   **plateau at about 11.05 from about 20k onward, train ≈ val**. This is **underfitting / capacity-bound, not

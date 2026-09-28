@@ -1,5 +1,8 @@
+from concurrent.futures import ProcessPoolExecutor
+from functools import partial
 from pathlib import Path
 import hashlib
+import os
 import pickle
 import random
 
@@ -7,6 +10,7 @@ import pandas as pd
 import pretty_midi
 import torch
 from torch.utils.data import Dataset
+from tqdm import tqdm
 
 
 class MaestroDataset(Dataset):
@@ -147,7 +151,14 @@ class MaestroDataset(Dataset):
                 all_tokens = pickle.load(f)
             print(f"Loaded {len(all_tokens)} tokenized files from {cache_path}")
         else:
-            all_tokens = [self._load_tokens_from_path(p) for p in self.midi_paths]
+            parse = partial(_tokenize_to_numpy, velocity_bins=self.velocity_bins,
+                            time_resolution=self.time_resolution,
+                            max_duration_bin=self.max_duration_bin, max_delta_bin=self.max_delta_bin)
+            workers = min(len(self.midi_paths), os.cpu_count() or 1)
+            with ProcessPoolExecutor(max_workers=workers) as pool:
+                results = list(tqdm(pool.map(parse, self.midi_paths, chunksize=8), total=len(self.midi_paths),
+                                    desc=f"Tokenizing {self.split} ({workers} workers)"))
+            all_tokens = [None if r is None else tuple(torch.from_numpy(a) for a in r) for r in results]
             if cache_path is not None:
                 cache_path.parent.mkdir(parents=True, exist_ok=True)
                 with open(cache_path, "wb") as f:
@@ -267,6 +278,15 @@ def tokenize_midi(midi_path, velocity_bins=32, time_resolution=0.02, max_duratio
         torch.tensor(durations, dtype=torch.long),
         torch.tensor(delta_times, dtype=torch.long),
     )
+
+
+def _tokenize_to_numpy(midi_path, **kwargs):
+    # worker side of the parallel preload: numpy arrays pickle cheaply between processes, tensors don't
+    try:
+        tokens = tokenize_midi(midi_path, **kwargs)
+    except Exception as e:
+        raise RuntimeError(f"Failed to parse MIDI file: {midi_path}") from e
+    return None if tokens is None else tuple(t.numpy() for t in tokens)
 
 
 def quantize_time(time_sec, time_resolution, max_bin):
