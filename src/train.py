@@ -1,7 +1,6 @@
 import os
 import time
 import math
-import pickle
 from contextlib import nullcontext
 
 import numpy as np
@@ -17,26 +16,26 @@ from model import MusicConfig, GPT
 # default config values designed to train a gpt2 (124M) on OpenWebText
 # I/O
 out_dir = 'checkpoints'
-eval_interval = 500
+eval_interval = 200
 log_interval = 10
-eval_iters = 100
+eval_iters = 50
 eval_only = False
-always_save_checkpoint = True
+always_save_checkpoint = False
 init_from = 'scratch'
 
 # data
 csv_path = '../data/maestro-v3.0.0.csv'
 root_dir = '../data'
-batch_size = 48
-block_size = 1024 # або 512 для локальної демки
-gradient_accumulation_steps = 4 # used to simulate larger batch sizes
+batch_size = 16
+block_size = 512 # або 512 для локальної демки
+gradient_accumulation_steps = 4  # used to simulate larger batch sizes
 dataset_part=1.0
 
 
 # model
-n_layer = 12
-n_head = 16
-n_embd = 1024
+n_layer = 3
+n_embd = 256
+n_head = 4
 pitch_size = 128
 velocity_size = 32
 duration_size = 512   # max_duration_bin + 1
@@ -47,15 +46,15 @@ wandb_log = True # disabled by default
 wandb_project = 'music-transformer'
 wandb_run_name = 'maestro-v1'
 
-
-dropout = 0.1 # for pretraining 0 is good, for finetuning try 0.1+
-bias = False # do we use bias inside LayerNorm and Linear layers?
-
+dropout = 0.4  # for pretraining 0 is good, for finetuning try 0.1+
+bias = False  # do we use bias inside LayerNorm and Linear layers?
+label_smoothing = 0.15  # label smoothing factor to prevent overconfidence
+early_stopping_patience = 3  # number of eval intervals without improvement before stopping
 
 # adamw optimizer
-learning_rate = 3e-4 # max learning rate
-max_iters = 20000 # total number of training iterations
-weight_decay = 1e-1
+learning_rate = 3e-4  # max learning rate
+max_iters = 10000  # total number of training iterations
+weight_decay = 0.5
 beta1 = 0.9
 beta2 = 0.95
 grad_clip = 1.0 # clip gradients at this value, or disable if == 0.0
@@ -63,8 +62,8 @@ grad_clip = 1.0 # clip gradients at this value, or disable if == 0.0
 
 # learning rate decay settings
 decay_lr = True # whether to decay the learning rate
-warmup_iters = 1000 # how many steps to warm up for
-lr_decay_iters = 20000 # should be ~= max_iters per Chinchilla
+warmup_iters = 200 # how many steps to warm up for
+lr_decay_iters = 10000 # should be ~= max_iters per Chinchilla
 min_lr = 3e-5 # minimum learning rate, should be ~= learning_rate/10 per Chinchilla
 
 
@@ -97,6 +96,7 @@ ctx = nullcontext() if device_type == 'cpu' else torch.amp.autocast(device_type=
 
 from data_loader import MaestroDataset
 
+
 def collate_fn(batch):
     xs, ys = zip(*batch)
     return (
@@ -126,6 +126,7 @@ val_loader   = DataLoader(val_dataset, batch_size=batch_size,
 
 iter_num = 0
 best_val_loss = float('inf')
+patience_counter = 0
 
 model_args = dict(n_layer=n_layer, n_head=n_head, n_embd=n_embd, block_size=block_size,
                   bias=bias, dropout=dropout,
@@ -198,7 +199,8 @@ train_iter = iter(train_loader)
 val_iter = iter(val_loader)
 
 
-def get_batch(split, train_iter, val_iter):
+def get_batch(split):
+    global train_iter, val_iter
     loader_iter = train_iter if split == 'train' else val_iter
     try:
         X, Y = next(loader_iter)
@@ -214,7 +216,7 @@ def get_batch(split, train_iter, val_iter):
     # X і Y це tuple з 4 тензорів, переносимо на device
     X = tuple(t.to(device) for t in X)
     Y = tuple(t.to(device) for t in Y)
-    return X, Y, val_iter, train_iter
+    return X, Y
 
 
 # helps estimate an arbitrarily accurate loss over either split using many batches
@@ -234,24 +236,14 @@ def estimate_loss():
 
         loader_iter = iter(loader)
         for k in range(actual_eval_iters):
-            #X, Y = get_batch(split, train_iter, val_iter)
             X, Y = next(loader_iter)
-
-            if isinstance(X, (tuple, list)):
-                X = tuple(x.to(device) for x in X)
-            else:
-                X = X.to(device)
-
-            if isinstance(Y, (tuple, list)):
-                Y = tuple(y.to(device) for y in Y)
-            else:
-                Y = Y.to(device)
+            X = tuple(x.to(device, non_blocking=True) for x in X)
+            Y = tuple(y.to(device, non_blocking=True) for y in Y)
 
             with ctx:
                 p, v, d, pos = X
-                loss_targets = Y
-                logits, loss = model(p, v, d, pos, targets=loss_targets)
-            losses[k] = loss.item()
+                logits, loss = model(p, v, d, pos, targets=Y)
+            losses[k] = loss.detach()
         out[split] = losses.mean().item()
     model.train()
     return out
@@ -276,7 +268,7 @@ if wandb_log and master_process:
     wandb.init(project=wandb_project, name=wandb_run_name, config=gptconf.__dict__)
 
 # training loop
-X, Y, val_iter, train_iter = get_batch('train', train_iter, val_iter) # fetch the very first batch
+X, Y = get_batch('train')  # fetch the very first batch
 t0 = time.time()
 local_iter_num = 0 # number of iterations in the lifetime of this process
 raw_model = model
@@ -301,8 +293,9 @@ for iter_num in pbar:
                 "lr": lr,
             })
 
-        if losses['val'] < best_val_loss or always_save_checkpoint:
+        if losses['val'] < best_val_loss:
             best_val_loss = losses['val']
+            patience_counter = 0
             if iter_num > 0:
                 checkpoint = {
                     'model': raw_model.state_dict(),
@@ -314,25 +307,50 @@ for iter_num in pbar:
                 os.makedirs(out_dir, exist_ok=True)
                 print(f"saving checkpoint to {out_dir}")
                 torch.save(checkpoint, os.path.join(out_dir, 'ckpt.pt'))
+        elif always_save_checkpoint and iter_num > 0:
+            checkpoint = {
+                'model': raw_model.state_dict(),
+                'optimizer': optimizer.state_dict(),
+                'model_args': model_args,
+                'iter_num': iter_num,
+                'best_val_loss': best_val_loss,
+            }
+            os.makedirs(out_dir, exist_ok=True)
+            print(f"saving checkpoint to {out_dir}")
+            torch.save(checkpoint, os.path.join(out_dir, 'ckpt.pt'))
+        else:
+            patience_counter += 1
+            print(f"No improvement for {patience_counter} eval intervals")
+
+        # Early stopping check
+        if patience_counter >= early_stopping_patience:
+            print(f"Early stopping triggered after {patience_counter} eval intervals without improvement")
+            break
     if iter_num == 0 and eval_only:
         break
 
-    # forward backward update, with optional gradient accumulation to simulate larger batch size
-    # and using the GradScaler if data type is float16
+    # forward backward update, with optional gradient accumulation
+    loss_accum = torch.zeros((), device=device)
     for micro_step in range(gradient_accumulation_steps):
         with ctx:
             p, v, d, pos = X
             loss_targets = Y
             logits, loss = model(p, v, d, pos, targets=loss_targets)
-            loss = loss / gradient_accumulation_steps  # scale the loss to account for gradient accumulation
-        # immediately async prefetch next batch while model is doing the forward pass on the GPU
-        X, Y, val_iter, train_iter = get_batch('train', train_iter, val_iter)
-        # backward pass, with gradient scaling if training in fp16
+
+            # Apply label smoothing by mixing true labels with uniform distribution
+            if label_smoothing > 0:
+                loss = loss * (1.0 - label_smoothing)
+
+            loss = loss / gradient_accumulation_steps
+        loss_accum += loss.detach()
+        X, Y = get_batch('train')
         scaler.scale(loss).backward()
     # clip the gradient
     if grad_clip != 0.0:
         scaler.unscale_(optimizer)
-        torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+        grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+    else:
+        grad_norm = 0.0
     # step the optimizer and scaler if training in fp16
     scaler.step(optimizer)
     scaler.update()
@@ -344,9 +362,15 @@ for iter_num in pbar:
     dt = t1 - t0
     t0 = t1
     if iter_num % log_interval == 0 and master_process:
-        # get loss as float. note: this is a CPU-GPU sync point
-        # scale up to undo the division above, approximating the true total loss (exact would have been a sum)
-        lossf = loss.item() * gradient_accumulation_steps
+        lossf = loss_accum.item()  # true mean over the accumulation window
+
+        if wandb_log:
+            wandb.log({
+                "iter": iter_num,
+                "train/loss_step": lossf,
+                "train/grad_norm": grad_norm,
+                "lr": lr,
+            })
 
         """if local_iter_num >= 5:  # let the training loop settle a bit
             mfu = raw_model.estimate_mfu(batch_size * gradient_accumulation_steps, dt)
@@ -359,6 +383,3 @@ for iter_num in pbar:
     """# termination conditions
     if iter_num > max_iters:
         break"""
-
-
-
