@@ -1,0 +1,20 @@
+# One artist per line: YouTube search name. Lines starting with # are ignored.
+# Ukrainian pop-rock close to Skryabin; songs get filtered by minor key after transcription.
+Скрябін
+Океан Ельзи
+Святослав Вакарчук
+Бумбокс
+Друга Ріка
+Мертвий Півень
+Воплі Відоплясова
+Танок на Майдані Конго
+Плач Єремії
+С.К.А.Й.
+Антитіла
+Kozak System
+The Hardkiss
+Один в каное
+Жадан і Собаки
+Сергій Бабкін
+Тартак
+Motor'rolla
