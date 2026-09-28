@@ -38,6 +38,9 @@ RUNS = [
     ('ladder-L-fp8', 'ladder_L_fp8.log', '42M fp8'),
     ('ladder-L-pitchhead', 'ladder_L_pitchhead.log', '43M'),
     ('ladder-L-moe8', 'ladder_L_moe8.log', '117M/42M'),
+    ('iso-M', 'iso_M.log', '20M 400Mt'),
+    ('iso-L', 'iso_L.log', '42M 194Mt'),
+    ('iso-XL', 'iso_XL.log', '65M 125Mt'),
 ]
 
 TQDM = re.compile(r'Training:\s+(\d+)%\|[^|]*\|\s*(\d+)/(\d+) \[([\d:]+)<([\d:?]+),\s*([\d.?]+)(it/s|s/it)')
