@@ -32,6 +32,8 @@ eval_interval = 20
 eval_iters = 200          # max number of val batches per evaluation (fixed windows, same every time)
 eval_only = False
 always_save_checkpoint = False
+checkpoint_format = 'full'  # 'full' = fp32 weights + optimizer (resumable), 'bf16' = bf16 weights only (~6x smaller,
+                            # not resumable; fine for generation and for init_from='finetune')
 init_from = 'scratch'     # 'scratch' | 'resume' | 'finetune'
 init_ckpt = 'checkpoints/ckpt.pt'  # used by 'finetune'
 
@@ -292,15 +294,18 @@ for iter_num in pbar:
             best_val_loss = val['loss']
             if iter_num > 0:
                 os.makedirs(out_dir, exist_ok=True)
-                torch.save({
-                    'model': raw_model.state_dict(),
-                    'optimizer': optimizer.state_dict(),
-                    'model_args': model_args,
-                    'iter_num': iter_num,
-                    'best_val_loss': best_val_loss,
-                    'config': config,
-                }, os.path.join(out_dir, 'ckpt.pt'))
-                tqdm.write(f"saved checkpoint to {out_dir}")
+                ckpt = {'model_args': model_args, 'iter_num': iter_num, 'best_val_loss': best_val_loss,
+                        'config': config}
+                if checkpoint_format == 'bf16':
+                    ckpt['model'] = {k: v.to(torch.bfloat16) if v.is_floating_point() else v
+                                     for k, v in raw_model.state_dict().items()}
+                    name = 'model_bf16.pt'
+                else:
+                    ckpt['model'] = raw_model.state_dict()
+                    ckpt['optimizer'] = optimizer.state_dict()
+                    name = 'ckpt.pt'
+                torch.save(ckpt, os.path.join(out_dir, name))
+                tqdm.write(f"saved checkpoint to {os.path.join(out_dir, name)}")
     if iter_num == 0 and eval_only:
         break
 

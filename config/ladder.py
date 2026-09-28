@@ -19,3 +19,6 @@ label_smoothing = 0.0
 learning_rate = 6e-4
 min_lr = 6e-5
 seed = 1337
+
+# disk is tight (96 GB partition): save bf16 weights only, ladder/ablation runs are never resumed
+checkpoint_format = 'bf16'
