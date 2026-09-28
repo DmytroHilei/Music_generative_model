@@ -2,7 +2,8 @@
 # Main val = old MAESTRO+GiantMIDI val (comparable with the A/B runs), val2 = Aria val.
 #   S: --n_layer=6  --n_embd=256 --n_head=8   (~6M)
 #   M: --n_layer=10 --n_embd=384 --n_head=6   (~19M)
-#   L: --n_layer=12 --n_embd=512 --n_head=8   (~40M)
+#   L: --n_layer=12 --n_embd=512 --n_head=8   (~42M)
+#   XL: --n_layer=12 --n_embd=640 --n_head=10 (~65M)
 csv_path = 'data/combined.csv,store:data/cache/aria'
 val_csv_path = 'data/combined.csv'
 val2_csv_path = 'store:data/cache/aria'

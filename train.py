@@ -82,6 +82,8 @@ min_lr = 6e-5
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 dtype = 'bfloat16' if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else 'float16'
 compile = False
+fp8 = False               # torchao float8 training for the transformer matmuls; only pays off together with compile
+sdpa_backend = ''         # '' = PyTorch default, or 'flash' | 'cudnn' | 'efficient'
 seed = 1337
 # -----------------------------------------------------------------------------
 config_keys = [k for k, v in globals().items() if not k.startswith('_') and isinstance(v, (int, float, bool, str))]
@@ -171,6 +173,18 @@ if block_size < model.config.block_size:
     model_args['block_size'] = block_size
 model.to(device)
 
+# before the optimizer is built: fp8 conversion swaps the Linear modules
+if fp8:
+    from torchao.float8 import convert_to_float8_training
+    # only the transformer blocks: embeddings, heads and LayerNorms stay bf16/fp32
+    convert_to_float8_training(model.transformer.h)
+    if not compile:
+        print("WARNING: fp8 without compile is about 2x SLOWER (unfused scaling kernels)")
+if sdpa_backend:
+    from torch.nn.attention import SDPBackend, sdpa_kernel
+    backend = {'flash': SDPBackend.FLASH_ATTENTION, 'cudnn': SDPBackend.CUDNN_ATTENTION,
+               'efficient': SDPBackend.EFFICIENT_ATTENTION}[sdpa_backend]
+    sdpa_kernel(backend).__enter__()  # for the whole process
 scaler = torch.amp.GradScaler(device_type, enabled=(dtype == 'float16'))
 optimizer = model.configure_optimizers(weight_decay, learning_rate, (beta1, beta2), device_type)
 if init_from == 'resume':
