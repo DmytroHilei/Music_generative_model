@@ -64,8 +64,10 @@ training mix.
 - ТНМК needed the alias and now has 25.
 - About 17 videos failed: HTTP 403 or age-restricted. Age-restricted videos need browser cookies, which we deliberately don't use.
 - 27 hand-picked mp3s in `Skryabin/`.
-- **Piano reduction** (`logs/run_reduce.sh` → `data/finetune/<artist>/midi/`) is running: 133 songs done so far at about 24–30 s/song
-  while training shares the GPU.
+- **Piano reduction: DONE 2026-09-29 01:50.** **520 songs** (+3 test songs) in `data/finetune/<artist>/midi/`, 0 failures,
+  51 MB total. Key estimate: about 349 minor / 133 major (unverified estimator). Some artists have >25 songs because re-downloads of
+  failed songs picked other videos: **dedupe by song title** before building the fine-tune split. Also dedupe `skryabin_local`
+  against `Скрябін`.
 - Test songs with version history: `data/finetune/skryabin_test/{v1 (cluttered), v2 (decluttered), current (legato)}/`.
 - **User verdict:** "can recognize tracks by the piano version alone". The cluttered v1 sounded busy and v2 "too fast"
   (choppy), which the legato fix addressed ("sounds fine").
@@ -216,7 +218,10 @@ pretraining and the Skryabin fine-tune, so there's a strong AR baseline to compa
   precision). `config/ladder.py` sets `checkpoint_format='bf16'`, so ladder, ablation and iso runs are **not resumable**. `ladder_XL`
   started before that and wrote a full `ckpt.pt`, which was converted to bf16 after it finished (verified). Demucs stems are 350 MB/song. Checkpoints with Adam state are about 12 bytes/param.
 - Launch at most one training job on the GPU at a time. Benchmark with the training paused (`kill -STOP` / `-CONT`).
-- Never edit a bash runner script while it is executing. Queue with a PID-wait trigger instead, and don't use `pgrep -f` with a
+- Never edit a bash runner script while it is executing.
+- **`pgrep -f` self-match trap (hit twice on 2026-09-28):** a loop like `while pgrep -f X` also matches (a) a trigger whose own
+  command line contains X and (b) the *launching shell* if the runner script was written via a heredoc in the same command, because
+  the script text is in that shell's argv. Wait on a **PID** (`kill -0 $PID`) or a file marker instead. Queue with a PID-wait trigger instead, and don't use `pgrep -f` with a
   pattern that also appears in the trigger's own command line: that bug blocked the ladder for about 10 min.
 - Use `tqdm.write` for eval lines so logs stay parseable by `status.py`.
 - sudo needs a password, so hand such commands to the user (`! cmd`).
