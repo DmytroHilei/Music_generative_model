@@ -5,3 +5,5 @@ pretty_midi
 tqdm
 wandb
 mido
+rich
+torchao
