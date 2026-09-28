@@ -63,6 +63,19 @@ def song_title(video_title, artist):
     return rest or None
 
 
+def search_with_retry(artist, n, attempts=4):
+    """Network hiccups (DNS, timeouts) shouldn't kill a multi-hour run: retry with backoff, then skip the artist."""
+    for attempt in range(attempts):
+        try:
+            return search(artist, n)
+        except Exception as e:
+            wait = 30 * 2 ** attempt
+            print(f'  search failed ({type(e).__name__}), retry {attempt + 1}/{attempts} in {wait}s')
+            time.sleep(wait)
+    print(f'  SKIPPED {artist}: search kept failing')
+    return []
+
+
 def search(artist, n):
     opts = {'quiet': True, 'extract_flat': True, 'skip_download': True}
     found = {}
@@ -125,7 +138,7 @@ def main():
         if not done:
             writer.writeheader()
         for artist in artists:
-            chosen = select(search(artist, args.search_size), artist, args)
+            chosen = select(search_with_retry(artist, args.search_size), artist, args)
             print(f'\n{artist}: {len(chosen)} songs')
             for item in chosen:
                 status = 'have' if item['id'] in done else ('dry' if args.dry_run else 'get ')
