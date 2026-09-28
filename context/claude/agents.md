@@ -196,6 +196,12 @@ pretraining and the Skryabin fine-tune, so there's a strong AR baseline to compa
 
 ## Working conventions for agents
 
+- **Git remote:** `origin` = `github.com/DmytroHilei/Music_generative_model` (public). This project is branch **`transformer-v2`**
+  (local branch has the same name, so a plain `git push` works). `main` = the user's LSTM chord model + earlier transformer comparison,
+  `legacy-transformer` = history of the old `../MusicAutoregresiveTransformer` folder. **Never push to `main`, never force-push.
+  Don't create new GitHub repos**: the user wants everything in this one.
+- The README of `transformer-v2` will be rewritten later by the user. The local, git-ignored `README_TODO.md` lists what it should cover.
+
 - Make one change per experiment. Log the wandb run id, git commit, config diff and per-head val CE below.
 - **Don't delete checkpoints, data, archives or wandb runs without asking.** Before any `rm -rf`, check what's inside.
   Once, the user moved the Aria archive into `data/aria/` right after a partial extraction had been deleted there.
