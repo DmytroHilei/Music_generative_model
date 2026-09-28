@@ -39,6 +39,8 @@ init_ckpt = 'checkpoints/ckpt.pt'  # used by 'finetune'
 csv_path = 'data/combined.csv'
 root_dir = '.'
 cache_dir = 'data/cache'
+val_csv_path = ''         # main val set (checkpoint selection); '' = same sources as csv_path
+val2_csv_path = ''        # optional second val set, only logged as val2/* (e.g. keep the old set comparable)
 batch_size = 6
 block_size = 512
 gradient_accumulation_steps = 5 * 8  # used to simulate larger batch sizes
@@ -108,21 +110,28 @@ def collate_fn(batch):
     )
 
 
-# train: one random window per file per "epoch", with augmentation
+# train: random windows (uniform over all note positions of all files), with augmentation
 train_dataset = MaestroDataset(csv_path, root_dir=root_dir, split='train', block_size=block_size,
                                augment=True, cache_dir=cache_dir)
-# val: fixed non-overlapping windows, evenly thinned to at most eval_iters batches -> identical every eval / run
-val_dataset = MaestroDataset(csv_path, root_dir=root_dir, split='validation', block_size=block_size,
-                             cache_dir=cache_dir, eval_stride=block_size)
-max_val_windows = eval_iters * batch_size
-if len(val_dataset) > max_val_windows:
-    step = len(val_dataset) / max_val_windows
-    val_dataset = Subset(val_dataset, [int(i * step) for i in range(max_val_windows)])
+
+
+def make_val_loader(sources):
+    # fixed non-overlapping windows, evenly thinned to at most eval_iters batches -> identical every eval / run
+    ds = MaestroDataset(sources, root_dir=root_dir, split='validation', block_size=block_size,
+                        cache_dir=cache_dir, eval_stride=block_size)
+    max_val_windows = eval_iters * batch_size
+    if len(ds) > max_val_windows:
+        step = len(ds) / max_val_windows
+        ds = Subset(ds, [int(i * step) for i in range(max_val_windows)])
+    return DataLoader(ds, batch_size=batch_size, shuffle=False, collate_fn=collate_fn, num_workers=num_workers)
+
+
+val_loader = make_val_loader(val_csv_path or csv_path)
+val2_loader = make_val_loader(val2_csv_path) if val2_csv_path else None
+val_dataset = val_loader.dataset
 
 train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, collate_fn=collate_fn,
                           num_workers=num_workers, drop_last=True, persistent_workers=num_workers > 0)
-val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, collate_fn=collate_fn,
-                        num_workers=num_workers)
 
 # -----------------------------------------------------------------------------
 # model
@@ -185,11 +194,11 @@ def infinite_batches(loader):
 
 
 @torch.no_grad()
-def estimate_val_loss():
+def estimate_val_loss(loader):
     """Returns dict: 'loss' (optimized loss, with label smoothing) and 'ce/<head>' (true CE, nats)."""
     model.eval()
     sums, n = {}, 0
-    for X, Y in val_loader:
+    for X, Y in loader:
         X, Y = to_device(X), to_device(Y)
         with ctx:
             parts, loss = model(*X, targets=Y)
@@ -242,16 +251,19 @@ for iter_num in pbar:
         param_group['lr'] = lr
 
     if iter_num % eval_interval == 0 or iter_num == max_iters - 1:
-        val = estimate_val_loss()
+        val = estimate_val_loss(val_loader)
+        val2 = estimate_val_loss(val2_loader) if val2_loader else {}
         train = {k: (v / train_n).item() for k, v in train_sums.items()} if train_n else {}
         if train:
             train['ce/total'] = sum(train[f'ce/{name}'] for name in STREAM_ORDER)
         heads = " ".join(f"{name[:3]} {val[f'ce/{name}']:.3f}" for name in STREAM_ORDER)
         tqdm.write(f"step {iter_num}: train loss {train.get('loss', float('nan')):.4f}, "
-                   f"val loss {val['loss']:.4f} | val CE {val['ce/total']:.3f} ({heads})")
+                   f"val loss {val['loss']:.4f} | val CE {val['ce/total']:.3f} ({heads})"
+                   + (f" | val2 CE {val2['ce/total']:.3f}" if val2 else ""))
         if wandb_log:
             wandb.log({"iter": iter_num, "lr": lr,
                        **{f"val/{k}": v for k, v in val.items()},
+                       **{f"val2/{k}": v for k, v in val2.items()},
                        **{f"train/{k}": v for k, v in train.items()}})
         train_sums, train_n = {}, 0
 
