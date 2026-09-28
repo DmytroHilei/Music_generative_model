@@ -21,6 +21,8 @@ hours. Prefer models of roughly 5–30M params and bf16.
 | `train.py` | **Single** training script (pretrain + finetune). nanoGPT `configurator.py`: `python train.py config/<x>.py --key=value`. `init_from` = `scratch`, `resume` or `finetune` (weights only from `init_ckpt`; fresh optimizer, iter and best val). Logs `val/ce/<head>` + `train/ce/<head>` (CE without LS) and the planned number of epochs |
 | `config/` | `pretrain.py`, `finetune_skryabin.py`, `smoke.py` (about 1 min sanity run, stack it after another config) |
 | `train_finetune.py` | **Deprecated**, replaced by `train.py config/finetune_skryabin.py`. Delete it once the new path is confirmed |
+| `data/audio_to_piano.py` | Band mp3 to **piano reduction**: Demucs `htdemucs_6s` stems, then basic-pitch per part (vocals to monophonic melody, bass to monophonic bass, piano+guitar+other to capped harmony), merged into one piano track + `debug/*.parts.mid` + key estimate in `songs.csv`. Runs in **`.venv-audio`** |
+| `data/fetch_songs.py`, `data/artists.txt` | YouTube search per artist, then filter (duration, blocklist of live/cover/compilation words, title must contain artist), dedupe by song, download mp3 with yt-dlp. `--dry-run` only lists. Output `data/audio/<artist>/` + `songs.csv` |
 | `eval_samples.py` | Compares generated MIDI with real MIDI: per-feature histogram overlap (pitch, pitch class, velocity, duration, IOI, polyphony, interval) plus notes/s and pitch-class entropy |
 | `generate.py` | Samples from a checkpoint, writes MIDI, renders MP3 through fluidsynth + ffmpeg. `--prompt file.mid --prompt-notes 64` seeds with real notes. Polyphony and gap post-processing is now off by default (`--max-polyphony`, `--max-delta` to enable) |
 | `prepare_giantmidi.py` | Builds `data/combined.csv` (MAESTRO + GiantMIDI, GiantMIDI split by composer) |
@@ -34,7 +36,9 @@ hours. Prefer models of roughly 5–30M params and bf16.
 Environment: **`.venv/`** in the project root (created 2026-09-28 with `uv venv`, Python 3.12, torch 2.14.0+cu130).
 Verified on the RTX 5060 (sm_120): bf16 matmul, flash SDPA and fused AdamW all work.
 Use `.venv/bin/python` or `source .venv/bin/activate`. The system `python3` has no torch.
-Transcription extras (`piano_transcription_inference`, `librosa`, `demucs`) are not installed yet.
+Audio tools live in a **separate env `.venv-audio/`** (torch 2.14 cu130, torchaudio, demucs, basic-pitch 0.4 on
+**onnxruntime** installed with `--no-deps` because its TensorFlow pin has no Python 3.12 wheels, yt-dlp, librosa,
+piano_transcription_inference). Demucs + basic-pitch take about 20 s per song on the GPU.
 
 ## Current state (verified 2026-09-28)
 
@@ -62,7 +66,7 @@ Transcription extras (`piano_transcription_inference`, `librosa`, `demucs`) are 
 
 ## Known bugs / defects (fix these before any sweep)
 
-- **B1 (fix implemented 2026-09-28 as `CascadeHeads`, not yet trained or compared): next-note attributes are predicted independently.** All 4 heads read the same hidden state `h_t`, and
+- **B1 (FIXED 2026-09-28: CascadeHeads v2 = residual heads, the default. −0.41 nats/note vs independent, see log): next-note attributes are predicted independently.** All 4 heads read the same hidden state `h_t`, and
   `generate()` samples each one independently. P(pitch, dur, dt, vel | ctx) is modeled as a product of marginals,
   so the loss can't drop below the conditional-dependence gap, and samples mix incompatible attributes.
   This is the most likely reason the loss plateaus and generations sound incoherent.
@@ -79,7 +83,7 @@ Transcription extras (`piano_transcription_inference`, `librosa`, `demucs`) are 
   output. Judge raw samples first. Also, `n_embd` falls back to 512 while the model default is 256.
 - **B7: augmentation.** Pitch shift uses `clamp`, which bends out-of-range notes instead of dropping them or
   limiting the shift. There's no tempo augmentation (scale dt/dur ±10%) and no velocity augmentation.
-- **B8: fine-tune data is out of domain.** `Skryabin/midi` is *piano transcription of full band mixes* (vocals,
+- **B8 (in progress: `data/audio_to_piano.py`, first 3 songs rendered for listening in `data/finetune/skryabin_test/listen/`): fine-tune data is out of domain.** `Skryabin/midi` is *piano transcription of full band mixes* (vocals,
   guitars, drums, synths), which gives noisy MIDI full of ghost notes. That's a different distribution from both MAESTRO and the target.
 - **B9 (fixed 2026-09-28, `data/cache`): tokenization is re-parsed on every start.** It takes minutes, and every experiment pays for it again. Cache
   tokenized arrays (`.npy`/pickle keyed by the tokenizer config).
@@ -181,3 +185,19 @@ Private research use only. Don't redistribute downloaded audio or MIDI, and keep
 |---|---|---|---|---|---|
 | 2026-05-17 | lcqh7fm4 | none | baseline 6L×256, dropout 0.3, LS 0.1, 30k iters | only the total is logged: 11.06 | plateau from about 20k, train ≈ val. Unknown whether GiantMIDI was present |
 | 2026-09-28 | smoke | none | Phase 0 pipeline check, cascade heads, 30 iters, MAESTRO only | 4.14 / 2.98 / 3.26 / 2.81 | only verifies that pretrain → finetune → generate → eval_samples all run. Uniform-init CE = ln(vocab) as expected |
+| 2026-09-28 | bcuakmc7 (ab-cascade) | 1bc701b + config/ab_heads.py | cascade v1 (MLP heads), 4k iters × 30,720 tok (3.9 epochs), dropout 0.1, LS 0 | 3.056 / 2.054 / 2.964 / 1.719 = **9.793** | |
+| 2026-09-28 | 9dv8hnzd (ab-cascade-v2) | d5b38ae + v2 heads | cascade v2 residual heads, otherwise identical | 2.759 / **2.040** / **2.915** / **1.699** = **9.412** | best. Ahead from step 500 on. About 10% slower/iter, +0.27M params |
+| 2026-09-28 | a52uageu (ab-indep) | same | independent heads, otherwise identical | **2.751** / 2.279 / 3.083 / **1.712** = 9.824 | indep ahead until about step 1.2k. Pitch much better than cascade v1 |
+
+**A/B diagnosis (2026-09-28):** shuffling the conditioning inputs of ab-cascade raises val CE by 0.28 (pitch|dt),
+0.47 (dur) and 0.85 (vel), so the cascade *does* use the conditioning. But its pitch head *with* dt (3.07) is worse
+than the independent pitch head *without* it (2.75). Causes: (1) the head is a fresh MLP with no direct linear path, and
+(2) the condition embeddings stayed tiny (rms 0.03–0.15 vs about 1 for h: 0.02 init + weight decay + LayerNorm).
+→ v2 `ResidualHead`: `out(LN(z + MLP(LN(z))))`, z = h + cond, cond_emb init std 0.5, no weight decay on cond_emb,
+residual-style small init of `c_proj`. At init it equals independent heads + conditioning.
+**Result:** v2 = 9.412 (best). Pitch equals independent (dt doesn't help pitch beyond h), and vel/dur/dt keep the cascade
+gains. Train CE > val CE in all runs (dropout + augmentation), so still capacity-bound: scale the model next.
+
+**Skryabin piano reduction, first look (2026-09-28):** 3 songs, 13–15 notes/s vs 5.5–8.7 for the old full-mix
+transcription and about 7.7 for MAESTRO val. The harmony part is probably over-dense (pads and strums split into
+repeated notes). The key estimate said "major" for all 3, unverified. Waiting for the user's listening verdict.

@@ -117,12 +117,34 @@ class MusicConfig:
     # True: predict dt -> pitch -> duration -> velocity, each conditioned on the previous ones.
     # False: 4 independent heads (old checkpoints).
     cascade_heads: bool = True
+    # True (v2): residual heads, logits = out(LN(z + MLP(LN(z)))) with z = h + cond embeddings; at init this is
+    # exactly the independent linear heads plus conditioning. False (v1): plain MLP heads (ab_cascade checkpoint).
+    cascade_residual: bool = True
+    cond_emb_init_std: float = 0.5  # v2 only: h after ln_f has ~unit scale, 0.02 made the conditioning invisible
 
 
 # order in which attributes of the next note are decided by CascadeHeads
 CASCADE_ORDER = ('delta_time', 'pitch', 'duration', 'velocity')
 # order of the attribute streams everywhere else (inputs, targets, datasets)
 STREAM_ORDER = ('pitch', 'velocity', 'duration', 'delta_time')
+
+
+class ResidualHead(nn.Module):
+    """out(LN(z + MLP(LN(z)))): a direct linear path from z (like the independent heads) plus a small MLP
+    that can mix in the conditioning non-linearly. c_proj gets the small residual init in GPT.__init__."""
+
+    def __init__(self, C, vocab, bias):
+        super().__init__()
+        self.ln = LayerNorm(C, bias=bias)
+        self.c_fc = nn.Linear(C, C, bias=bias)
+        self.gelu = nn.GELU()
+        self.c_proj = nn.Linear(C, C, bias=bias)
+        self.ln_out = LayerNorm(C, bias=bias)
+        self.out = nn.Linear(C, vocab, bias=False)
+
+    def forward(self, z):
+        z = z + self.c_proj(self.gelu(self.c_fc(self.ln(z))))
+        return self.out(self.ln_out(z))
 
 
 class CascadeHeads(nn.Module):
@@ -142,6 +164,10 @@ class CascadeHeads(nn.Module):
         self.cond_emb = nn.ModuleDict({
             name: nn.Embedding(sizes[name], C) for name in CASCADE_ORDER[:-1]
         })
+        self.residual = config.cascade_residual
+        if self.residual:
+            self.heads = nn.ModuleDict({name: ResidualHead(C, sizes[name], config.bias) for name in CASCADE_ORDER})
+            return
         self.heads = nn.ModuleDict({
             name: nn.Sequential(
                 LayerNorm(C, bias=config.bias),
@@ -231,6 +257,9 @@ class GPT(nn.Module):
         for pn, p in self.named_parameters():
             if pn.endswith("c_proj.weight"):
                 torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * config.n_layer))
+        if config.cascade_heads and config.cascade_residual:
+            for emb in self.cascade.cond_emb.values():
+                torch.nn.init.normal_(emb.weight, mean=0.0, std=config.cond_emb_init_std)
 
     def get_num_params(self, non_embedding=True):
         """
@@ -314,8 +343,11 @@ class GPT(nn.Module):
         param_dict = {pn: p for pn, p in param_dict.items() if p.requires_grad}
         # create optim groups. Any parameters that is 2D will be weight decayed, otherwise no.
         # i.e. all weight tensors in matmuls + embeddings decay, all biases and layernorms don't.
-        decay_params = [p for n, p in param_dict.items() if p.dim() >= 2]
-        nodecay_params = [p for n, p in param_dict.items() if p.dim() < 2]
+        # v2 cascade: condition embeddings must stay at the scale of h, so no weight decay on them
+        def no_decay(n, p):
+            return p.dim() < 2 or (self.config.cascade_residual and 'cond_emb' in n)
+        decay_params = [p for n, p in param_dict.items() if not no_decay(n, p)]
+        nodecay_params = [p for n, p in param_dict.items() if no_decay(n, p)]
         optim_groups = [
             {'params': decay_params, 'weight_decay': weight_decay},
             {'params': nodecay_params, 'weight_decay': 0.0}

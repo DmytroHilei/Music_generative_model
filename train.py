@@ -56,6 +56,7 @@ dropout = 0.3
 bias = False
 label_smoothing = 0.1
 cascade_heads = True
+cascade_residual = True
 
 # wandb logging
 wandb_log = True
@@ -128,7 +129,9 @@ val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, colla
 iter_num = 0
 best_val_loss = float('inf')
 arch_keys = ['n_layer', 'n_head', 'n_embd', 'block_size', 'bias', 'pitch_size', 'velocity_size',
-             'duration_size', 'delta_time_size', 'cascade_heads']
+             'duration_size', 'delta_time_size', 'cascade_heads', 'cascade_residual']
+# what checkpoints that predate a key actually used
+legacy_defaults = {'cascade_heads': False, 'cascade_residual': False}
 model_args = {k: globals()[k] for k in arch_keys}
 checkpoint = None
 
@@ -137,9 +140,7 @@ if init_from in ('resume', 'finetune'):
     print(f"{init_from}: loading {ckpt_path}")
     checkpoint = torch.load(ckpt_path, map_location=device)
     for k in arch_keys:
-        # checkpoints from before cascade heads have no such key and used independent heads
-        default = False if k == 'cascade_heads' else model_args[k]
-        model_args[k] = checkpoint['model_args'].get(k, default)
+        model_args[k] = checkpoint['model_args'].get(k, legacy_defaults.get(k, model_args[k]))
 else:
     print("Initializing a new model from scratch")
 

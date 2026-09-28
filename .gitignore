@@ -18,3 +18,4 @@ Skryabin/midi/
 *.pt
 =2.7.0
 .~lock.*#
+logs/

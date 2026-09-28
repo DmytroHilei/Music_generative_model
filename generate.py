@@ -97,6 +97,7 @@ def main():
         bias=ma.get("bias", False),
         # checkpoints from before cascade heads have no such key and use independent heads
         cascade_heads=ma.get("cascade_heads", False),
+        cascade_residual=ma.get("cascade_residual", False),
     )
 
     model = GPT(config)
