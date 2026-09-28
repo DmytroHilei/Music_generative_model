@@ -18,6 +18,7 @@ Run with the audio env (not the training env):
 
 import argparse
 import csv
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -41,6 +42,8 @@ def parse_args():
     parser.add_argument('--output', required=True, help='output folder (midi/, debug/, stems/, songs.csv)')
     parser.add_argument('--limit', type=int, default=None, help='only process the first N files')
     parser.add_argument('--device', default='cuda')
+    parser.add_argument('--keep-stems', action='store_true',
+                        help='keep the Demucs wavs (~350 MB per song!); by default deleted after transcription')
     parser.add_argument('--harmony-max-poly', type=int, default=3, help='max harmony notes sounding together')
     parser.add_argument('--harmony-min-note-ms', type=float, default=100)
     parser.add_argument('--harmony-drop-quiet', type=float, default=0.3,
@@ -219,6 +222,9 @@ def reduce_song(audio_path, out_root, args):
     midi_path = out_root / 'midi' / f'{audio_path.stem}.mid'
     piano.write(str(midi_path))
     debug.write(str(out_root / 'debug' / f'{audio_path.stem}.parts.mid'))
+
+    if not args.keep_stems:
+        shutil.rmtree(stems['vocals'].parent, ignore_errors=True)
 
     tonic, mode, conf = estimate_key(piano.instruments[0].notes)
     return {
