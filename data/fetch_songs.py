@@ -52,35 +52,38 @@ def normalize(text):
     return re.sub(r'\s+', ' ', text).strip()
 
 
-def song_title(video_title, artist):
-    """'Скрябін - Місця щасливих людей (Official Video)' -> 'місця щасливих людей', or None if not this artist."""
-    norm_title, norm_artist = normalize(video_title), normalize(artist)
-    if norm_artist not in norm_title:
+def song_title(video_title, names):
+    """'Скрябін - Місця щасливих людей (Official Video)' -> 'місця щасливих людей', or None if not this artist.
+    names: the artist name and its aliases (e.g. 'Танок на Майдані Конго', 'ТНМК')."""
+    norm_title = normalize(video_title)
+    matched = [normalize(n) for n in names if normalize(n) in norm_title]
+    if not matched:
         return None
-    rest = norm_title.replace(norm_artist, ' ')
+    rest = norm_title.replace(max(matched, key=len), ' ')
     rest = re.sub(r'\bft\b.*|\bfeat\b.*', ' ', rest)
     rest = re.sub(r'\s+', ' ', rest).strip()
     return rest or None
 
 
-def search_with_retry(artist, n, attempts=4):
+def search_with_retry(names, n, attempts=4):
     """Network hiccups (DNS, timeouts) shouldn't kill a multi-hour run: retry with backoff, then skip the artist."""
     for attempt in range(attempts):
         try:
-            return search(artist, n)
+            return search(names, n)
         except Exception as e:
             wait = 30 * 2 ** attempt
             print(f'  search failed ({type(e).__name__}), retry {attempt + 1}/{attempts} in {wait}s')
             time.sleep(wait)
-    print(f'  SKIPPED {artist}: search kept failing')
+    print(f'  SKIPPED {names[0]}: search kept failing')
     return []
 
 
-def search(artist, n):
+def search(names, n):
     opts = {'quiet': True, 'extract_flat': True, 'skip_download': True}
     found = {}
+    queries = [q for name in names for q in (f'{name} official audio', f'{name} офіційне відео', f'{name} пісня')]
     with yt_dlp.YoutubeDL(opts) as ydl:
-        for query in (f'{artist} official audio', f'{artist} офіційне відео', f'{artist} пісня'):
+        for query in queries:
             info = ydl.extract_info(f'ytsearch{n}:{query}', download=False)
             for e in info.get('entries') or []:
                 if e and e.get('id'):
@@ -88,7 +91,7 @@ def search(artist, n):
     return list(found.values())
 
 
-def select(entries, artist, args):
+def select(entries, names, args):
     chosen, seen_titles = [], set()
     for e in entries:
         title = e.get('title') or ''
@@ -97,11 +100,11 @@ def select(entries, artist, args):
             continue
         if any(w in title.lower() for w in BAD_WORDS):
             continue
-        song = song_title(title, artist)
+        song = song_title(title, names)
         if not song or song in seen_titles:
             continue
         seen_titles.add(song)
-        chosen.append({'artist': artist, 'song': song, 'video_title': title, 'id': e['id'],
+        chosen.append({'artist': names[0], 'song': song, 'video_title': title, 'id': e['id'],
                        'url': f"https://www.youtube.com/watch?v={e['id']}", 'duration': duration})
         if len(chosen) >= args.per_artist:
             break
@@ -122,7 +125,8 @@ def download(item, out_dir):
 
 def main():
     args = parse_args()
-    artists = [line.strip() for line in open(args.artists, encoding='utf-8')
+    # one artist per line, aliases separated by '|': the first name is the folder / CSV name
+    artists = [[n.strip() for n in line.split('|')] for line in open(args.artists, encoding='utf-8')
                if line.strip() and not line.startswith('#')]
     out_root = Path(args.output)
     out_root.mkdir(parents=True, exist_ok=True)
@@ -137,8 +141,9 @@ def main():
         writer = csv.DictWriter(f, fieldnames=fields)
         if not done:
             writer.writeheader()
-        for artist in artists:
-            chosen = select(search_with_retry(artist, args.search_size), artist, args)
+        for names in artists:
+            artist = names[0]
+            chosen = select(search_with_retry(names, args.search_size), names, args)
             print(f'\n{artist}: {len(chosen)} songs')
             for item in chosen:
                 status = 'have' if item['id'] in done else ('dry' if args.dry_run else 'get ')
