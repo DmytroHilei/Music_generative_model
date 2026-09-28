@@ -98,7 +98,7 @@ training mix.
 |---|---|---|---|---|
 | S | 6.1M | 9.438 | 8.613 | 2.735 / 2.082 / 2.919 / 1.703 |
 | M | 20.2M | **8.891** | **7.931** | 2.428 / 2.030 / 2.826 / 1.607 |
-| L | 41.7M | running (step 2000: 9.158 / 8.267, M at step 2000 was 9.267 / 8.396) | | |
+| L | 41.7M | **8.623** | **7.601** | 2.265 / 2.006 / 2.782 / 1.569 |
 | XL | 64.7M (12L×640) | queued | | |
 
 - S → M: −0.55 old val / −0.68 Aria. More than half of it is **pitch** (−0.31), while velocity is nearly saturated (−0.05).
@@ -185,4 +185,4 @@ training mix.
 | 2026-09-28 | 9dv8hnzd (ab-cascade-v2) | f4ab505 | cascade v2 residual heads | 2.759 / **2.040** / **2.915** / **1.699** = **9.412** | now the default |
 | 2026-09-28 | ladder-S | bc8a5e0 | 6.1M, 100M tok, combined + Aria, dropout 0 | 2.735 / 2.082 / 2.919 / 1.703 = 9.438; Aria 8.613 | |
 | 2026-09-28 | ladder-M | bc8a5e0 | 20.2M (10L×384) | 2.428 / 2.030 / 2.826 / 1.607 = **8.891**; Aria **7.931** | −0.55 / −0.68 vs S |
-| 2026-09-28 | ladder-L | bc8a5e0 | 41.7M (12L×512) | running | step 2000: 9.158 / Aria 8.267 |
+| 2026-09-28 | ladder-L | bc8a5e0 | 41.7M (12L×512) | 2.265 / 2.006 / 2.782 / 1.569 = **8.623**; Aria **7.601** | −0.27 / −0.33 vs M. Per doubling (Aria): S→M −0.39, M→L −0.32. Fixed 100M tokens undertrain the bigger models, so the gains are underestimated |
