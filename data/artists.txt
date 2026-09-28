@@ -1,4 +1,4 @@
-# One artist per line: YouTube search name. Lines starting with # are ignored.
+# One artist per line: YouTube search name, aliases after |. Lines starting with # are ignored.
 # Ukrainian pop-rock close to Skryabin; songs get filtered by minor key after transcription.
 Скрябін
 Океан Ельзи
@@ -7,7 +7,7 @@
 Друга Ріка
 Мертвий Півень
 Воплі Відоплясова
-Танок на Майдані Конго
+Танок на Майдані Конго|ТНМК
 Плач Єремії
 С.К.А.Й.
 Антитіла
