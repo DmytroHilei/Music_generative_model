@@ -2,202 +2,187 @@
 
 Read this before touching the code. It records what the project is, what state it's in, what we know is
 wrong, and the ranked list of experiments. Update the **Experiment log** at the bottom after every run.
+Last full update: **2026-09-28 22:41**.
 
 ## Goal
 
-1. Pretrain a small autoregressive symbolic-music model on solo piano MIDI (MAESTRO v3 + GiantMIDI-Piano).
+1. Pretrain an autoregressive symbolic-music model on solo piano MIDI (MAESTRO v3 + GiantMIDI-Piano + **Aria-MIDI**).
 2. Fine-tune it to generate **piano arrangements in the style of Skryabin** (Скрябін, the Ukrainian
-   pop-rock band, not the composer): pop song structure, melody + chord accompaniment, on one piano.
+   pop-rock band, not the composer) and similar Ukrainian, mostly minor-key, pop-rock: melody + bass + chords on one piano.
+3. Later (agreed order): **multi-track** band arrangements (instrument attribute in the cascade, Lakh MIDI pretraining,
+   fine-tune on per-stem transcriptions), and a **Mamba/SSM** comparison.
 
-Constraints: **laptop only**. RTX 5060 Laptop (8 GB VRAM, Blackwell sm_120), 30 GB RAM, runs of at most a few
-hours. Prefer models of roughly 5–30M params and bf16.
+Constraints: **laptop only** for now. RTX 5060 Laptop (8 GB VRAM, Blackwell sm_120, 24 CPU threads), 30 GB RAM,
+runs of a few hours, overnight at most. A rented B200 was discussed as a possible later step (see "Scaling outlook").
 
 ## Repository layout
 
 | Path | What it is |
 |---|---|
-| `model.py` | nanoGPT-style decoder. `MusicEmbeddings` concatenates 4 embeddings (pitch/velocity/duration/delta_time, each `n_embd/4`), learned absolute positions. Output: `CascadeHeads` (default, `cascade_heads=True`), which predicts dt → pitch → duration → velocity with each head conditioned on the earlier ones. The legacy path is 4 independent linear heads (`cascade_heads=False`, needed for pre-2026-09-28 checkpoints). `forward(..., targets)` returns `(parts, loss)`: loss = sum of CEs with label smoothing (optimized), parts = per-head CE without LS (for logging) |
-| `data_loader.py` | `MaestroDataset` plus the module-level `tokenize_midi()`. Tokens are cached in `data/cache/*.pkl` (keyed by file list + tokenizer params). Missing files are skipped with a warning. `eval_stride=N` gives deterministic windows for validation. Time is quantized at 20 ms, clamped to 511 bins (~10.2 s). The train `__getitem__` returns **one random 512-note window per file** |
-| `train.py` | **Single** training script (pretrain + finetune). nanoGPT `configurator.py`: `python train.py config/<x>.py --key=value`. `init_from` = `scratch`, `resume` or `finetune` (weights only from `init_ckpt`; fresh optimizer, iter and best val). Logs `val/ce/<head>` + `train/ce/<head>` (CE without LS) and the planned number of epochs |
-| `config/` | `pretrain.py`, `finetune_skryabin.py`, `smoke.py` (about 1 min sanity run, stack it after another config) |
-| `train_finetune.py` | **Deprecated**, replaced by `train.py config/finetune_skryabin.py`. Delete it once the new path is confirmed |
-| `data/audio_to_piano.py` | Band mp3 to **piano reduction**: Demucs `htdemucs_6s` stems, then basic-pitch per part (vocals to monophonic melody, bass to monophonic bass, piano+guitar+other to capped harmony), merged into one piano track + `debug/*.parts.mid` + key estimate in `songs.csv`. Runs in **`.venv-audio`** |
-| `data/fetch_songs.py`, `data/artists.txt` | YouTube search per artist, then filter (duration, blocklist of live/cover/compilation words, title must contain artist), dedupe by song, download mp3 with yt-dlp. `--dry-run` only lists. Output `data/audio/<artist>/` + `songs.csv` |
-| `eval_samples.py` | Compares generated MIDI with real MIDI: per-feature histogram overlap (pitch, pitch class, velocity, duration, IOI, polyphony, interval) plus notes/s and pitch-class entropy |
-| `generate.py` | Samples from a checkpoint, writes MIDI, renders MP3 through fluidsynth + ffmpeg. `--prompt file.mid --prompt-notes 64` seeds with real notes. Polyphony and gap post-processing is now off by default (`--max-polyphony`, `--max-delta` to enable) |
-| `prepare_giantmidi.py` | Builds `data/combined.csv` (MAESTRO + GiantMIDI, GiantMIDI split by composer) |
-| `data/preprocess.py` | Downloads MAESTRO |
-| `data/mp3_to_midi.py` | Turns MP3s into MIDI with `piano_transcription_inference` (optionally Demucs first), then writes `skryabin.csv` |
-| `Skryabin/` | 27 MP3s of the band plus `midi/` transcriptions plus `skryabin.csv` |
-| `checkpoints/ckpt.pt` | Last pretrain (about 5.3M params, weights + Adam state is about 63 MB). `test.pt` (317 MB) is an older, larger experiment |
-| `checkpoints_skryabin/ckpt.pt` | Fine-tuned checkpoint, **possibly stale** (see bug B3) |
-| `=2.7.0` | Junk: pip output from an unquoted `pip install torch>=2.7.0`. Safe to delete |
+| `model.py` | nanoGPT-style decoder. `MusicEmbeddings` concatenates 4 embeddings (pitch/velocity/duration/delta_time, each `n_embd/4`), learned absolute positions, flash SDPA. **Compound tokens: 1 position = 1 note with all 4 attributes.** Output: `CascadeHeads` predicts **dt → pitch → duration → velocity**, each head conditioned on the earlier attributes (chain rule). v2 = `ResidualHead` `out(LN(z + MLP(LN(z))))` with z = h + cond embeddings (default, `cascade_residual=True`). v1 = plain MLP heads (`cascade_residual=False`, the `ab_cascade` checkpoint). Legacy = 4 independent heads (`cascade_heads=False`, pre-2026-09-28 checkpoints). Options: `pitch_head_blocks`/`pitch_head_mult` (asymmetric bigger pitch head), `moe_experts`/`moe_top_k`/`moe_hidden_frac`/`moe_aux_weight` (dropless top-k MoE FFN, `MoEMLP`). `forward(..., targets)` returns `(parts, loss)`: loss = optimized sum of CEs (+ MoE aux), parts = per-head CE without label smoothing |
+| `data_loader.py` | `MaestroDataset`: `csv_path` can combine CSVs and prebuilt stores (`'a.csv,store:data/cache/aria'`). Tokens live in a **memory-mapped flat store** per split (`data/cache/<name>_<split>_<hash>/tokens.u16`, shape (notes, 4) uint16, + `offsets.npy` + `meta.json`), built in parallel (24 procs). Train windows are sampled **uniformly over all note positions** (long files proportionally more often). `eval_stride` gives deterministic val windows. Broken or missing files are skipped. Transposition ±5 is limited so notes stay in 0..127. `tokenize_midi()` accepts paths or file-like objects. Time is quantized at 20 ms, clamped to 511 bins |
+| `train.py` | Single training script. nanoGPT `configurator.py`: `python train.py config/<x>.py --key=value`. `init_from` = scratch, resume or finetune. `val_csv_path` = main val (checkpoint selection), `val2_csv_path` = extra val logged as `val2/*`. Flags: `compile`, `fp8` (torchao float8 on the transformer blocks, converted **before** the optimizer is built), `sdpa_backend`. Prints "Planned epochs" at startup, so check it |
+| `config/` | `pretrain.py`, `finetune_skryabin.py`, `smoke.py` (stack after another config), `ab_heads.py` (4-epoch A/B of the head designs, 6M), `ladder.py` (scaling ladder, 100M tokens, MAESTRO+GiantMIDI+Aria) |
+| `generate.py` | Samples from a checkpoint, writes MIDI, renders MP3 (fluidsynth + ffmpeg). `--prompt file.mid --prompt-notes 64`. Post-processing is off by default. Builds the config from every checkpoint field (legacy defaults for old checkpoints) |
+| `eval_samples.py` | Generated vs. real MIDI: per-feature histogram overlap plus notes/s and pitch-class entropy |
+| `export_bf16.py` | Checkpoint → bf16 weights without optimizer state (74 → 12 MB for 6M). Loadable by `generate.py`, not resumable |
+| `bench.py` | GPU-side throughput benchmark on synthetic data: micro-batch × compile × SDPA backend × fp8, `--profile` for a kernel breakdown |
+| `status.py` | **Live dashboard** (`.venv/bin/python status.py`, `--once`): GPU/disk, every training run (state, progress, speed, ETA, val/Aria CE, per head), download and reduction progress. Read-only |
+| `prepare_giantmidi.py` | Builds `data/combined.csv` (MAESTRO + GiantMIDI, GiantMIDI split by composer). Fixed 2026-09-28: ignores the extra MAESTRO CSV columns |
+| `data/prepare_aria.py` | Tokenizes **Aria-MIDI straight from the .tar.gz** (no extraction) into stores `data/cache/<name>_{train,validation}`, 1% of recordings to val (by file_id), `--genres pop,rock` filter, metadata CSV `data/aria/<name>.csv` (file_id, segment, split, genre, composer, audio_score, n_notes) |
+| `data/fetch_songs.py`, `data/artists.txt` | YouTube search per artist (aliases with `|`, e.g. `Танок на Майдані Конго|ТНМК`), filters (duration 90–480 s, blocklist of live/cover/compilation/хіти words, title must contain the artist), dedupe by song, yt-dlp mp3 download, retry with backoff on network errors. Output `data/audio/<artist>/` + `data/audio/songs.csv`. Re-runs skip what's already downloaded |
+| `data/audio_to_piano.py` | Band mp3 → **piano reduction**: Demucs `htdemucs_6s` → basic-pitch per part: vocals → monophonic melody (merged re-triggers, legato), bass → monophonic bass (legato), piano+guitar+other → harmony (onset 0.6, frame 0.4, min 100 ms, merge re-triggers, drop the quietest 30%, max 3 notes at once). Writes `midi/`, `debug/*.parts.mid` (one track per part), `songs.csv` with a key estimate. **Stems are deleted after each song** (~350 MB/song) unless `--keep-stems`. Runs in `.venv-audio` |
+| `data/preprocess.py`, `data/mp3_to_midi.py` | MAESTRO download; the old full-mix piano transcription (superseded by `audio_to_piano.py`) |
+| `train_finetune.py` | **Deprecated**, replaced by `train.py config/finetune_skryabin.py` |
+| `logs/` (git-ignored) | Run logs plus runner scripts: `run_ab.sh`, `run_ladder.sh`, `run_fp8_L.sh`, `run_L_variants.sh`, `run_reduce.sh` |
 
-Environment: **`.venv/`** in the project root (created 2026-09-28 with `uv venv`, Python 3.12, torch 2.14.0+cu130).
-Verified on the RTX 5060 (sm_120): bf16 matmul, flash SDPA and fused AdamW all work.
-Use `.venv/bin/python` or `source .venv/bin/activate`. The system `python3` has no torch.
-Audio tools live in a **separate env `.venv-audio/`** (torch 2.14 cu130, torchaudio, demucs, basic-pitch 0.4 on
-**onnxruntime** installed with `--no-deps` because its TensorFlow pin has no Python 3.12 wheels, yt-dlp, librosa,
-piano_transcription_inference). Demucs + basic-pitch take about 20 s per song on the GPU.
+**Environments.**
+- `.venv/`: training. Python 3.12, torch 2.14.0+cu130, torchao 0.18, rich, wandb. The system `python3` has no torch.
+- `.venv-audio/`: audio. torch/torchaudio cu130, demucs, **basic-pitch 0.4 on onnxruntime** (installed `--no-deps`, because its
+  TensorFlow pin has no Python 3.12 wheels), yt-dlp, librosa, piano_transcription_inference.
+- Verified on sm_120: bf16 matmuls, flash SDPA, cuDNN attention, fused AdamW, torch.compile, torchao float8.
+- wandb project `music-transformer` (logged in via `~/.netrc`).
 
-## Current state (verified 2026-09-28)
+## Data (2026-09-28)
 
-- The project wasn't under git until 2026-09-28 (`git init` done, `.gitignore` excludes data, checkpoints,
-  wandb and audio). Nothing is committed yet.
-- **Data (2026-09-28):** `data/combined.csv` = MAESTRO v3 (962 train / 137 val) + **GiantMIDI curated subset**
-  (`data/giantmidi/midi/surname_checked_midis/`, 7,236 files from the Google Drive release, only titles checked against
-  composer surnames; split by composer: 6,761 train / 475 val). Total **7,723 train / 612 val**. The 177 MAESTRO
-  `test` rows are ignored by the loader. GiantMIDI paths in the CSV are absolute. The old `giant_midis/` folder
-  is obsolete. After tokenization: **7,301 train files longer than 512 notes, 31.3M train notes**, 1,200 fixed val
-  windows (200 batches). Tokenizing in parallel (24 procs) takes about 1 min, and cached loading takes seconds. The old CSV was lost (overwritten by the crashed prepare run), but nothing depends on it.
-- Token budget: the old default of 122,880 tokens/iter × 30k iters is about **118 epochs** of the combined set (about 650 of MAESTRO alone).
-  4 epochs ≈ 1k iters and 10 epochs ≈ 2.5k iters at the default batch. The old 5M model ran at about 0.47 s/iter, so about 20 min for 10 epochs. `train.py` prints
-  "Planned epochs" at startup, so always check it.
-- Last pretrain run (wandb `lcqh7fm4`, 30k iters, about 4 h): loss 21.06 → 12.0 at 2k → 11.4 at 4.6k →
-  **plateau at about 11.05 from about 20k onward, train ≈ val**. This is **underfitting / capacity-bound, not
-  overfitting**. The earlier overfitting was from older configs.
-- Several older runs (`izuwb57w`, `ecb075ie`, `a7jux28v`, …) show val loss far below train loss (for example 1.27 vs 8.4).
-  That's impossible for a healthy setup, so the val split or loss code was different or broken back then. Don't trust
-  those numbers.
-- Budget of the last run: 6 × 512 × 40 accumulation steps = 122,880 tokens/iter, so 30k iters ≈ 3.7B note-tokens. MAESTRO +
-  GiantMIDI hold about 45M notes (estimate, measure it), so that's roughly 80 passes. The data-constrained scaling result
-  (Muennighoff et al., 2023: up to about 4 epochs ≈ fresh data, returns fade quickly after that) says **most of that compute
-  was wasted**. Train on fewer tokens with a bigger model, or keep this budget with a much bigger model.
+| Source | Where | Train | Val | Notes |
+|---|---|---|---|---|
+| MAESTRO v3 | `data/20xx/` | 962 files | 137 | `combined.csv`. The 177 test rows are ignored |
+| GiantMIDI **curated** (surname-checked, Google Drive release) | `data/giantmidi/midi/surname_checked_midis/` | 6,761 | 475 | split by composer, absolute paths in the CSV |
+| → `data/combined.csv` store | `data/cache/combined_*` | 7,301 files > 512 notes, **31.3M notes** | 2.11M notes | tokenizes in about 1 min |
+| **Aria-MIDI deduped** (CC-BY-NC-SA 4.0, user accepted the disclaimer) | archive `data/aria/aria-midi-v1-deduped-ext.tar.gz` (2 GB, kept) → `data/cache/aria_{train,validation}` | 367,318 files, **550.8M notes** | 3,735 files, 5.7M notes | 0 failed files. Genres: classical 113k, pop 70k, soundtrack 55k, jazz 19k, **rock 6.7k**, none 94k |
+| Ladder training mix (`combined.csv,store:aria`) | | 338,982 files > 512 notes, **568M notes** | | Aria is about 95% of the notes |
 
-## Known bugs / defects (fix these before any sweep)
+**Validation sets.** `val` = the old MAESTRO+GiantMIDI val windows. They're **identical** to the A/B runs: the v2 checkpoint
+re-evaluates to exactly 9.412 after the storage rewrite. `val2` = Aria val. **Caution:** once training includes Aria, the old
+val is off-distribution (train ≈ Aria val, while old val is about 0.6–0.8 higher). Compare old-val numbers only within the same
+training mix.
 
-- **B1 (FIXED 2026-09-28: CascadeHeads v2 = residual heads, the default. −0.41 nats/note vs independent, see log): next-note attributes are predicted independently.** All 4 heads read the same hidden state `h_t`, and
-  `generate()` samples each one independently. P(pitch, dur, dt, vel | ctx) is modeled as a product of marginals,
-  so the loss can't drop below the conditional-dependence gap, and samples mix incompatible attributes.
-  This is the most likely reason the loss plateaus and generations sound incoherent.
-- **B2 (fixed 2026-09-28, per-head CE logged): a total loss with label smoothing hides what's going on.** Only the sum of 4 CEs with LS = 0.1 is logged.
-  LS over 512 classes adds a large constant floor. Log **per-head CE without label smoothing** (and bits per note).
-- **B3 (fixed 2026-09-28, `init_from='finetune'`): fine-tune keeps the pretraining `best_val_loss`.** `train_finetune.py` loads `best_val_loss` from the MAESTRO
-  checkpoint, so a Skryabin checkpoint is saved only if Skryabin val loss beats MAESTRO val loss. It also loads the
-  pretraining optimizer state. Reset both.
-- **B4 (fixed 2026-09-28, `eval_stride`): validation is mostly noise.** The val set has one random window per file. For Skryabin (about 4 val songs, batch 4),
-  `estimate_loss` evaluates about **one batch**. Use fixed, deterministic, strided windows that cover every val file.
-- **B5 (worked around 2026-09-28 with `--prompt`, BOS token still TODO): out-of-distribution generation seed.** Generation starts from `(pitch 0, vel 0, dur 10, dt 0)`. Pitch 0 never
-  appears in the data. Add a BOS token, or prompt with a real snippet.
-- **B6 (fixed 2026-09-28): `generate.py` post-processing hides the model's real output.** `max_polyphony=4` and `max_delta=0.5` alter the
-  output. Judge raw samples first. Also, `n_embd` falls back to 512 while the model default is 256.
-- **B7: augmentation.** Pitch shift uses `clamp`, which bends out-of-range notes instead of dropping them or
-  limiting the shift. There's no tempo augmentation (scale dt/dur ±10%) and no velocity augmentation.
-- **B8 (in progress: `data/audio_to_piano.py`, first 3 songs rendered for listening in `data/finetune/skryabin_test/listen/`): fine-tune data is out of domain.** `Skryabin/midi` is *piano transcription of full band mixes* (vocals,
-  guitars, drums, synths), which gives noisy MIDI full of ghost notes. That's a different distribution from both MAESTRO and the target.
-- **B9 (fixed 2026-09-28, `data/cache`): tokenization is re-parsed on every start.** It takes minutes, and every experiment pays for it again. Cache
-  tokenized arrays (`.npy`/pickle keyed by the tokenizer config).
-- Minor: `wandb.init(config=MusicConfig)` logs the class, not the run config. `train.py` and `train_finetune.py` are
-  about 95% duplicated, so merge them into one script with a config file or CLI.
+**Fine-tune audio (2026-09-28 22:41).**
+- 18 artists in `data/artists.txt`, **493 songs** downloaded, about 25 per artist. Motor'rolla found only 14.
+- ТНМК needed the alias and now has 25.
+- About 17 videos failed: HTTP 403 or age-restricted. Age-restricted videos need browser cookies, which we deliberately don't use.
+- 27 hand-picked mp3s in `Skryabin/`.
+- **Piano reduction** (`logs/run_reduce.sh` → `data/finetune/<artist>/midi/`) is running: 133 songs done so far at about 24–30 s/song
+  while training shares the GPU.
+- Test songs with version history: `data/finetune/skryabin_test/{v1 (cluttered), v2 (decluttered), current (legato)}/`.
+- **User verdict:** "can recognize tracks by the piano version alone". The cluttered v1 sounded busy and v2 "too fast"
+  (choppy), which the legato fix addressed ("sounds fine").
+- Key estimates came out "major" for all 3 test songs, **unverified**. The minor-key filter will need a better key detector.
 
-## Hypotheses, ranked
+## Known bugs / defects
 
-Expected gains are guesses. Verify each one with one change per run, against the same fixed val windows and
-per-head CE without label smoothing.
+- **B1 FIXED**: independent heads → CascadeHeads v2 (−0.41 nats/note vs independent at 4 epochs, see log).
+- **B2 FIXED**: per-head CE without label smoothing is logged (`val/ce/<head>`, `train/ce/<head>`).
+- **B3 FIXED**: `init_from='finetune'` resets optimizer, iter and best_val_loss.
+- **B4 FIXED**: deterministic strided val windows, evenly thinned to `eval_iters` batches.
+- **B5 worked around** with `--prompt` (BOS token still TODO).
+- **B6 FIXED**: post-processing in `generate.py` is off by default.
+- **B7 partly fixed**: the transposition no longer clamps. Tempo and velocity augmentation are still TODO.
+- **B8 in progress**: band-mix transcription replaced by the Demucs + basic-pitch piano reduction.
+- **B9 FIXED**: memory-mapped token stores.
+- Old data losses: the original `combined.csv` was overwritten by a crashed `prepare_giantmidi.py` run. It was rebuilt, so nothing depends on it.
 
-### Phase 0: infrastructure (no model change, needed for everything else)
-- One `train.py` with config via YAML or argparse, `--init-from scratch|resume|finetune`.
-- Cached tokenization, deterministic val windows, per-head CE logs, `git commit` before each run, and the run id
-  recorded here.
-- Fix B3–B6.
-- A small objective-eval script for generated samples: pitch-class histogram entropy, note density, polyphony,
-  IOI distribution, share of notes on the beat grid. Compare against the same stats on the val set.
+## Experiment findings (2026-09-28)
 
-### Phase 1: cheap wins and hyperparameter search (expect a few %, as you said)
-1. **Dropout 0.3 → 0.0–0.1** and label smoothing → 0. The model underfits (train ≈ val), so regularization only hurts it now.
-2. **Scale the model** within 8 GB: for example 8 layers × 512 wide (about 25M params), block 1024, batch tokens around 32–64k.
-   With about 45M notes, Chinchilla-style scaling points to 20–50M params.
-3. **Token budget of about 4 epochs** instead of about 80 passes. Use shorter runs and spend the compute on model size.
-4. LR sweep {3e-4, 6e-4, 1e-3} × warmup {300, 1000}. Try cosine with a 10% floor versus WSD (warmup-stable-decay).
-5. Tempo and velocity augmentation (B7).
-6. `torch.compile` and flash SDPA. Check that compile works on sm_120 with the installed torch.
+**1. Head design, 6M model, 4 epochs on MAESTRO+GiantMIDI (`config/ab_heads.py`).**
+- Cascade v2 (residual heads) 9.412 < cascade v1 9.793 < independent 9.824.
+- Shuffling the conditioning showed v1 *does* use it: +0.28 on pitch|dt, +0.47 on duration, +0.85 on velocity.
+- v1 lost on pitch because the fresh MLP head had no direct path and the condition embeddings stayed tiny (rms 0.03–0.15 vs about 1).
+  v2 fixed both: residual form, cond_emb init std 0.5, no weight decay on cond_emb.
+- In v2, pitch equals independent: knowing dt doesn't help pitch beyond h.
 
-### Phase 2: representation and architecture (where the real gains probably are)
-1. **Fix B1, factorized sequential heads.** Predict `dt → pitch | dt → dur | dt,pitch → vel | …`, feeding
-   the embedding of the (teacher-forced or sampled) earlier sub-token into the next head, as in the
-   Compound-Word Transformer (Hsiao et al., 2021). This is a small code change with probably the largest effect.
-2. **Flattened event tokens** as an alternative: REMI / MIDI-Like / Structured through `miditok`. Sequences get 3–4×
-   longer, but there's exact autoregressive factorization for free. Compare against (1) at equal compute.
-3. **Beat-based time grid for the pop target.** MAESTRO is performance timing with no beat info, but pop piano arrangements
-   are grid-based. REMI (bar/position tokens) fits the Skryabin goal far better. One option is to pretrain on
-   beat-quantized data (GiantMIDI + POP909 + Lakh-piano) instead of raw MAESTRO timing.
-4. **Relative positions**: RoPE (cheap) or ALiBi. Music Transformer (Huang et al., 2018) showed relative attention
-   matters for music. Also allows extrapolation to longer generations.
-5. **Tied input/output embeddings** per attribute, plus a BOS token and song-start conditioning.
-6. **SSM / Mamba.** An honest take: at 512–1024 context and about 25M params a transformer is fine, and Mamba mostly pays
-   off at **long context** (whole songs, 4k–16k events, especially with REMI tokens). Try it as a controlled ablation
-   *after* 1–3: same tokenizer, same param count, same token budget. The risk is that `mamba-ssm` CUDA kernels on Blackwell
-   sm_120 may need a source build. Fallbacks: a pure-PyTorch Mamba-2 (slow), or a hybrid (for example 1 attention layer per
-   4 Mamba layers). Worth doing mainly as a learning exercise and for long-form structure (verse/chorus repetition).
+**2. Scaling ladder**: 100M tokens (0.2 epoch of 568M notes), dropout 0, LS 0, lr 6e-4 cosine, block 512, eager bf16.
 
-### Phase 3: fine-tuning on small data
-- Fine-tune on **clean pop piano** data first (POP909, Pop1K7), then on Skryabin-like data.
-- Use LoRA, or freeze the lower layers, plus low LR (1e-5–5e-5), plus **replay** (mix 10–30% pretraining data) to avoid
-  collapse or memorization on about 30 songs.
-- Early-stop on a song-level held-out split. With under 50 songs, use k-fold, because a single split is noise.
-- Style conditioning: an artist/genre token (for example `<ukr-pop>`, `<skryabin>`) so the whole pool of similar songs can train
-  together and the target style is chosen at sampling time.
+| run | params | old val CE | Aria val CE | pitch / vel / dur / dt (old val) |
+|---|---|---|---|---|
+| S | 6.1M | 9.438 | 8.613 | 2.735 / 2.082 / 2.919 / 1.703 |
+| M | 20.2M | **8.891** | **7.931** | 2.428 / 2.030 / 2.826 / 1.607 |
+| L | 41.7M | running (step 2000: 9.158 / 8.267, M at step 2000 was 9.267 / 8.396) | | |
+| XL | 64.7M (12L×640) | queued | | |
 
-## Fine-tune data acquisition plan (approved: public MIDI + audio + karaoke MIDI)
+- S → M: −0.55 old val / −0.68 Aria. More than half of it is **pitch** (−0.31), while velocity is nearly saturated (−0.05).
+  Clearly capacity-bound, so scale.
+- S on the Aria mix reaches 9.438 on the old val. The A/B v2 run, trained only on that data at 125M tokens, got 9.412. So Aria transfers well.
 
-Private research use only. Don't redistribute downloaded audio or MIDI, and keep it out of git (see `.gitignore`).
+**3. Performance on sm_120 (`bench.py`, L model, synthetic data, ladder paused with SIGSTOP).**
+- Kernel time: **GEMM 77%** (`cutlass_80_tensorop_bf16_s16816gemm`, 64×64 tiles: Ampere-style mma.sync, expected for bf16 on
+  consumer Blackwell, which has no wgmma/tcgen05), flash attention about 9%, elementwise 17%, LayerNorm 5%, CE + optimizer < 1%.
+- The 6M model is launch/CPU-bound: GPU at 54 W, Python at 91% CPU. The 42M model is compute-bound at about 16 TFLOP/s useful.
 
-1. **Public MIDI (clean, do this first)**
-   - **POP909**: 909 pop songs as piano arrangements (melody/bridge/piano tracks). The closest public match to the "pop
-     piano arrangement" target.
-   - **Pop1K7**: about 1.7k piano covers of pop songs transcribed from YouTube (from the CP-Transformer paper).
-   - **Lakh MIDI (LMD-matched)**: multi-track. Collapse the non-drum tracks into a piano reduction. Filter by the Million
-     Song Dataset artist tags for rock/pop, and Eastern-European artists where they exist.
-   - **Aria-MIDI** (2025, about 1M transcribed piano recordings with metadata) if it's reachable: filter for pop covers.
-2. **Audio → MIDI, fixing B8**: transcribe **piano covers** of songs instead of band mixes.
-   `piano_transcription_inference` is accurate on solo piano and poor on full mixes.
-   - `yt-dlp` search queries: `"<song title> скрябін piano cover"`, `"<song> фортепіано"`, `"<song> piano tutorial"`.
-   - Artist list for similar style: Скрябін, Океан Ельзи, Бумбокс, Друга Ріка, Мертвий Півень, Воплі Відоплясова,
-     Танок на Майдані Конго, Плач Єремії, С.К.А.Й., Антитіла, Kozak System, Тартак, The Hardkiss, Kalush (check fit).
-   - Quality filters: duration 1–8 min. Reject audio that isn't piano, using a CLAP zero-shot "solo piano" score or the
-     transcription's note density and pitch-range heuristics. Deduplicate by song.
-   - Similarity ranking: embed candidates with CLAP or MERT (audio) or a MIDI embedding, and rank by distance to the
-     centroid of the real Skryabin songs. Keep the top-N and log the scores in a CSV so the choice can be reviewed.
-3. **Karaoke / "мінусовки" MIDI**: real multi-track arrangements of the actual Ukrainian songs. Scrape politely
-   (rate limit, respect robots.txt), then reduce to piano: melody track, chord tracks folded into the piano range,
-   bass kept, drums removed.
-4. Output: `data/finetune/<source>/*.mid` plus one CSV with columns `split,midi_filename,source,artist,song,score`. Split by
-   **song**, never by window, so covers of the same song never end up in both train and val.
+| config (L, tokens/s) | micro 12 | micro 30 |
+|---|---|---|
+| eager bf16 (micro 6 = 62.6k) | 61.0k | 55.5k |
+| + compile | 64.6k | 62.3k |
+| + compile + cuDNN attention | 66.1k | 62.8k |
+| fp8 eager | 31.0k | 28.5k (unfused casts, don't) |
+| **fp8 + compile** | 69.9k | **75.1k (+20%, −25% memory)** |
+
+- Attention isn't worth optimizing at context 512. It will matter at 1024+.
+- FP8 gains should grow with width. Its quality check is queued (ladder-L-fp8).
+- Checkpoints: fp32 master weights + fp32 Adam, with bf16 autocast compute. Pure bf16 weights would lose updates, so don't.
+  Use `export_bf16.py` for storage and inference.
+
+## Scaling outlook (rules of thumb, computed 2026-09-28)
+
+- Laptop: about 1.6–1.9·10¹³ useful FLOP/s. Chinchilla-optimal N = √(C/120): 4 h → about 47M, 8 h → about 66M, 24 h → about 115M,
+  1 week → about 300M.
+- **Data ceiling:** 582M unique notes × about 4 useful passes → about 115M params. More data (Aria pruned, about 1.2B notes) raises it to about 250M.
+- VRAM ceiling: 16 bytes/param → about 250–300M realistic with activations.
+- **Practical laptop sweet spot: 60–115M.**
+- One B200 for a week: about 5·10²⁰ (bf16) to 1·10²¹ (fp8) FLOPs → about 2–3B params compute-optimal. But all public symbolic music
+  (order-of-magnitude estimate 5–10B notes) supports only about 1–2B. GPT-3 175B is about 300–600× more compute, needs 2.8 TB of training
+  state, and needs about 100–500× more music data than exists, so it's not feasible. Published SOTA symbolic models are 0.6–1B
+  (Aria, Anticipatory Music Transformer). Suggested path: laptop ladder → a 1–2 day B200 run at about 300–500M → a week-long run only if
+  scaling holds. Missing for that: FSDP (multi-GPU only), gradient checkpointing, WSD schedule.
+
+## Queue (2026-09-28 22:41; `status.py` shows it live)
+
+| # | Run | Log | Purpose |
+|---|---|---|---|
+| 1 | ladder-L 42M | `logs/ladder_L.log` | scaling (running, slowed to about 1–2 it/s by the reduction sharing the GPU) |
+| 2 | ladder-XL 65M | `logs/ladder_XL.log` | scaling |
+| 3 | ladder-L-fp8 (`--fp8=True --compile=True`) | `logs/ladder_L_fp8.log` | fp8 quality vs. bf16 L. The speed comparison is noisy because of contention; trust `bench.py` for speed |
+| 4 | ladder-L-pitchhead (`--pitch_head_blocks=2 --pitch_head_mult=2`, 43.3M) | `logs/ladder_L_pitchhead.log` | capacity where the ladder says it pays (pitch) |
+| 5 | ladder-L-moe8 (`--moe_experts=8 --moe_top_k=2`, 117M total / about 42M active) | `logs/ladder_L_moe8.log` | learned MoE. Compare per step **and** per wall-clock hour (eager, python loop over experts, expect about neutral per hour on this GPU) |
+| — | piano reduction of all downloaded songs | `logs/reduce.log` | ETA about 01:00–01:30. ТНМК songs may need one more `logs/run_reduce.sh` pass afterwards |
+
+## Hypotheses / next steps, ranked
+
+1. Finish the ladder, then fit loss vs. N and decide the overnight model size (expect 60–115M, e.g. XL or 16L×640).
+2. Adopt fp8 + compile if ladder-L-fp8 matches bf16 L quality.
+3. Asymmetric heads / MoE: decide from runs 4 and 5.
+4. **Fine-tune stages:** Aria **pop+rock** subset (`prepare_aria.py --genres pop,rock` or filter `aria.csv`, about 77k files) as the middle
+   domain → the Ukrainian reductions (song-level split, artist/style token, replay 10–30% pretraining data, LoRA or low LR).
+5. Better key detection (audio-based) for the minor-key filter. Dedupe covers of the same song across `Skryabin/` and `data/audio/Скрябін`.
+6. Context 1024 + RoPE (attention becomes relevant, test cuDNN attention again). Tempo and velocity augmentation (B7). BOS token (B5).
+7. Beat-based tokens (REMI-like) for the pop target, compared against the performance-timing tokens.
+8. Stage 2 multi-track: an instrument attribute in the cascade (dt → instrument → pitch → dur → vel), instrument-type experts,
+   Lakh MIDI pretraining, Demucs stems transcribed per instrument (drums need a drum transcriber).
+9. Mamba/SSM: controlled comparison (same tokens, params and budget), mainly for long context. `mamba-ssm` on sm_120 may need a source build.
 
 ## Working conventions for agents
 
-- Make one change per experiment. Log the wandb run id, git commit, config diff and the per-head val CE in the log below.
-- Don't delete checkpoints, data or wandb runs without asking.
-- Long runs belong to the user. Launch at most one background training at a time (8 GB VRAM) and write a short
-  smoke run (`max_iters` about 50) before any long run.
-- Keep the nanoGPT style of the existing code. Comments may be in Ukrainian or English.
+- Make one change per experiment. Log the wandb run id, git commit, config diff and per-head val CE below.
+- **Don't delete checkpoints, data, archives or wandb runs without asking.** Before any `rm -rf`, check what's inside.
+  Once, the user moved the Aria archive into `data/aria/` right after a partial extraction had been deleted there.
+- Watch the disk: 96 GB partition, often under 10 GB free. Demucs stems are 350 MB/song. Checkpoints with Adam state are about 12 bytes/param.
+- Launch at most one training job on the GPU at a time. Benchmark with the training paused (`kill -STOP` / `-CONT`).
+- Never edit a bash runner script while it is executing. Queue with a PID-wait trigger instead, and don't use `pgrep -f` with a
+  pattern that also appears in the trigger's own command line: that bug blocked the ladder for about 10 min.
+- Use `tqdm.write` for eval lines so logs stay parseable by `status.py`.
+- sudo needs a password, so hand such commands to the user (`! cmd`).
 - Don't commit data, checkpoints, audio or wandb dirs.
-
-## Open questions
-
-- Where is the Python env with torch? (Record it here.)
-- MAESTRO pretraining versus beat-based pop pretraining: decide after the Phase 2.3 comparison.
-- Is the Pop1K7 / Aria-MIDI download still available? Check before relying on it.
 
 ## Experiment log
 
-| Date | Run id | Commit | Change | Val CE per head (p/v/d/dt) | Notes |
+| Date | Run id | Commit | Change | Val CE per head (p/v/d/dt) = total | Notes |
 |---|---|---|---|---|---|
-| 2026-05-17 | lcqh7fm4 | none | baseline 6L×256, dropout 0.3, LS 0.1, 30k iters | only the total is logged: 11.06 | plateau from about 20k, train ≈ val. Unknown whether GiantMIDI was present |
-| 2026-09-28 | smoke | none | Phase 0 pipeline check, cascade heads, 30 iters, MAESTRO only | 4.14 / 2.98 / 3.26 / 2.81 | only verifies that pretrain → finetune → generate → eval_samples all run. Uniform-init CE = ln(vocab) as expected |
-| 2026-09-28 | bcuakmc7 (ab-cascade) | 1bc701b + config/ab_heads.py | cascade v1 (MLP heads), 4k iters × 30,720 tok (3.9 epochs), dropout 0.1, LS 0 | 3.056 / 2.054 / 2.964 / 1.719 = **9.793** | |
-| 2026-09-28 | 9dv8hnzd (ab-cascade-v2) | d5b38ae + v2 heads | cascade v2 residual heads, otherwise identical | 2.759 / **2.040** / **2.915** / **1.699** = **9.412** | best. Ahead from step 500 on. About 10% slower/iter, +0.27M params |
-| 2026-09-28 | a52uageu (ab-indep) | same | independent heads, otherwise identical | **2.751** / 2.279 / 3.083 / **1.712** = 9.824 | indep ahead until about step 1.2k. Pitch much better than cascade v1 |
-
-**A/B diagnosis (2026-09-28):** shuffling the conditioning inputs of ab-cascade raises val CE by 0.28 (pitch|dt),
-0.47 (dur) and 0.85 (vel), so the cascade *does* use the conditioning. But its pitch head *with* dt (3.07) is worse
-than the independent pitch head *without* it (2.75). Causes: (1) the head is a fresh MLP with no direct linear path, and
-(2) the condition embeddings stayed tiny (rms 0.03–0.15 vs about 1 for h: 0.02 init + weight decay + LayerNorm).
-→ v2 `ResidualHead`: `out(LN(z + MLP(LN(z))))`, z = h + cond, cond_emb init std 0.5, no weight decay on cond_emb,
-residual-style small init of `c_proj`. At init it equals independent heads + conditioning.
-**Result:** v2 = 9.412 (best). Pitch equals independent (dt doesn't help pitch beyond h), and vel/dur/dt keep the cascade
-gains. Train CE > val CE in all runs (dropout + augmentation), so still capacity-bound: scale the model next.
-
-**Skryabin piano reduction, first look (2026-09-28):** 3 songs, 13–15 notes/s vs 5.5–8.7 for the old full-mix
-transcription and about 7.7 for MAESTRO val. The harmony part is probably over-dense (pads and strums split into
-repeated notes). The key estimate said "major" for all 3, unverified. Waiting for the user's listening verdict.
+| 2026-05-17 | lcqh7fm4 | none | old baseline 6L×256, dropout 0.3, LS 0.1, 30k iters | total with LS only: 11.06 | plateau, train ≈ val |
+| 2026-09-28 | smoke | — | Phase 0 pipeline check | — | init CE = ln(vocab) |
+| 2026-09-28 | a52uageu (ab-indep) | d5b38ae | independent heads, 6M, 4k × 30,720 tok, dropout 0.1, LS 0 | **2.751** / 2.279 / 3.083 / 1.712 = 9.824 | |
+| 2026-09-28 | bcuakmc7 (ab-cascade) | d5b38ae | cascade v1 (MLP heads) | 3.056 / 2.054 / 2.964 / 1.719 = 9.793 | pitch head worse despite dt |
+| 2026-09-28 | 9dv8hnzd (ab-cascade-v2) | f4ab505 | cascade v2 residual heads | 2.759 / **2.040** / **2.915** / **1.699** = **9.412** | now the default |
+| 2026-09-28 | ladder-S | bc8a5e0 | 6.1M, 100M tok, combined + Aria, dropout 0 | 2.735 / 2.082 / 2.919 / 1.703 = 9.438; Aria 8.613 | |
+| 2026-09-28 | ladder-M | bc8a5e0 | 20.2M (10L×384) | 2.428 / 2.030 / 2.826 / 1.607 = **8.891**; Aria **7.931** | −0.55 / −0.68 vs S |
+| 2026-09-28 | ladder-L | bc8a5e0 | 41.7M (12L×512) | running | step 2000: 9.158 / Aria 8.267 |
