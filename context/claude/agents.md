@@ -100,7 +100,7 @@ training mix.
 | S | 6.1M | 9.438 | 8.613 | 2.735 / 2.082 / 2.919 / 1.703 |
 | M | 20.2M | **8.891** | **7.931** | 2.428 / 2.030 / 2.826 / 1.607 |
 | L | 41.7M | **8.623** | **7.601** | 2.265 / 2.006 / 2.782 / 1.569 |
-| XL | 64.7M (12L×640) | queued | | |
+| XL | 64.7M (12L×640) | **8.472** | **7.399** | 2.185 / 1.990 / 2.755 / 1.542 |
 
 - S → M: −0.55 old val / −0.68 Aria. More than half of it is **pitch** (−0.31), while velocity is nearly saturated (−0.05).
   Clearly capacity-bound, so scale.
@@ -179,7 +179,7 @@ A/B. Optional: weight EMA / checkpoint averaging, QK-LayerNorm. Model size from 
 - Watch the disk: 96 GB partition, often under 10 GB free. **2026-09-28:** deleted the Aria archive (fully tokenized, 2 GB) and
   replaced finished `checkpoints/{ab_*,ladder_S,M,L}/ckpt.pt` with verified bf16 `model_bf16.pt` (max rel err ≤ 3.8e-3 = bf16
   precision). `config/ladder.py` sets `checkpoint_format='bf16'`, so ladder, ablation and iso runs are **not resumable**. `ladder_XL`
-  started before that and writes a full `ckpt.pt`: convert it with `export_bf16.py` once it's done. Demucs stems are 350 MB/song. Checkpoints with Adam state are about 12 bytes/param.
+  started before that and wrote a full `ckpt.pt`, which was converted to bf16 after it finished (verified). Demucs stems are 350 MB/song. Checkpoints with Adam state are about 12 bytes/param.
 - Launch at most one training job on the GPU at a time. Benchmark with the training paused (`kill -STOP` / `-CONT`).
 - Never edit a bash runner script while it is executing. Queue with a PID-wait trigger instead, and don't use `pgrep -f` with a
   pattern that also appears in the trigger's own command line: that bug blocked the ladder for about 10 min.
@@ -198,4 +198,5 @@ A/B. Optional: weight EMA / checkpoint averaging, QK-LayerNorm. Model size from 
 | 2026-09-28 | 9dv8hnzd (ab-cascade-v2) | f4ab505 | cascade v2 residual heads | 2.759 / **2.040** / **2.915** / **1.699** = **9.412** | now the default |
 | 2026-09-28 | ladder-S | bc8a5e0 | 6.1M, 100M tok, combined + Aria, dropout 0 | 2.735 / 2.082 / 2.919 / 1.703 = 9.438; Aria 8.613 | |
 | 2026-09-28 | ladder-M | bc8a5e0 | 20.2M (10L×384) | 2.428 / 2.030 / 2.826 / 1.607 = **8.891**; Aria **7.931** | −0.55 / −0.68 vs S |
+| 2026-09-28 | ladder-XL | bc8a5e0 | 64.7M (12L×640) | 2.185 / 1.990 / 2.755 / 1.542 = **8.472**; Aria **7.399** | the power-law fit (α≈0.22) predicted 7.42. −0.32/doubling, same as M→L, so no extra flattening yet |
 | 2026-09-28 | ladder-L | bc8a5e0 | 41.7M (12L×512) | 2.265 / 2.006 / 2.782 / 1.569 = **8.623**; Aria **7.601** | −0.27 / −0.33 vs M. Per doubling (Aria): S→M −0.39, M→L −0.32. Fixed 100M tokens undertrain the bigger models, so the gains are underestimated |
