@@ -2,10 +2,11 @@ from concurrent.futures import ProcessPoolExecutor
 from functools import partial
 from pathlib import Path
 import hashlib
+import json
 import os
-import pickle
 import random
 
+import numpy as np
 import pandas as pd
 import pretty_midi
 import torch
@@ -15,13 +16,20 @@ from tqdm import tqdm
 
 class MaestroDataset(Dataset):
     """
-    Dataset for MAESTRO MIDI files.
+    Dataset of MIDI files listed in one or more CSVs (columns: split, midi_filename).
 
     Each note is represented by 4 token streams:
         pitch:      MIDI pitch, 0..127
         velocity:   quantized velocity, 0..velocity_bins-1
         duration:   quantized note duration
         delta_time: quantized time shift from previous note start
+
+    Tokenized notes of all files are stored once in a flat on-disk array (cache_dir/<name>/tokens.u16,
+    shape (total_notes, 4) uint16) plus per-file offsets, and memory-mapped, so datasets much larger than RAM work.
+
+    Train mode: every item is a random window, with the start drawn uniformly over all valid positions of all
+    files (long files are sampled proportionally more often than short fragments).
+    Eval mode (eval_stride): deterministic windows every eval_stride notes of every file.
 
     Output:
         x = (pitch, velocity, duration, delta_time)
@@ -39,18 +47,15 @@ class MaestroDataset(Dataset):
         max_duration_bin=511,
         max_delta_bin=511,
         debug=False,
-        preload=True,
         augment=False,
         cache_dir="data/cache",
         eval_stride=None,
     ):
         """
-        cache_dir:   tokenized files are pickled here (keyed by file list + tokenizer params), None = no cache
-        eval_stride: if set, the dataset becomes deterministic: items are all windows of block_size+1 notes
-                     taken every eval_stride notes from every file (no randomness, no augmentation).
-                     Use it for validation so val loss is comparable between runs.
+        csv_path:    one CSV or several separated by ',' (paths inside are relative to root_dir or absolute)
+        eval_stride: if set, the dataset is deterministic (no randomness, no augmentation): use it for validation
         """
-        self.csv_path = Path(csv_path)
+        self.csv_paths = [Path(p) for p in str(csv_path).split(',')]
         self.root_dir = Path(root_dir)
         self.split = split
         self.block_size = block_size
@@ -59,181 +64,141 @@ class MaestroDataset(Dataset):
         self.time_resolution = time_resolution
         self.max_duration_bin = max_duration_bin
         self.max_delta_bin = max_delta_bin
-        self.preload = preload
         self.debug = debug
         self.augment = augment
-        self.cache_dir = Path(cache_dir) if cache_dir else None
+        self.cache_dir = Path(cache_dir)
         self.eval_stride = eval_stride
 
         self.midi_paths = self._load_midi_paths()
+        self.store_dir = self._build_store()
+        self._tokens = None  # memmap, opened lazily in each DataLoader worker
 
-        if preload or eval_stride:
-            self.data = self._preload_data()
-        else:
-            self.data = None
+        offsets = np.load(self.store_dir / "offsets.npy")
+        lengths = np.diff(offsets)
+        keep = lengths > self.block_size  # need block_size + 1 notes because targets are shifted by one
+        if not keep.any():
+            raise ValueError("No MIDI sequences longer than block_size. Reduce block_size or check the data.")
+        self.starts = offsets[:-1][keep]
+        self.lengths = lengths[keep]
+        self.n_files = int(keep.sum())
+        # number of valid window starts per file, cumulative (for uniform sampling over all positions)
+        self.cum_valid = np.cumsum(self.lengths - self.block_size)
 
         if eval_stride:
-            self.windows = [
-                (i, start)
-                for i, tokens in enumerate(self.data)
-                for start in range(0, len(tokens[0]) - self.block_size, eval_stride)
-            ]
+            self.windows = np.concatenate([
+                np.arange(s, s + n - self.block_size, eval_stride) for s, n in zip(self.starts, self.lengths)
+            ])
 
-    def num_notes(self):
-        return sum(len(t[0]) for t in self.data) if self.data is not None else None
-
-    def __len__(self):
-        if self.eval_stride:
-            return len(self.windows)
-        if self.preload:
-            return len(self.data)
-        return len(self.midi_paths)
-
-    def __getitem__(self, idx):
-        if self.eval_stride:
-            i, start = self.windows[idx]
-            return self._split_xy(tuple(t[start:start + self.block_size + 1] for t in self.data[i]))
-        if self.preload:
-            tokens = self.data[idx]
-        else:
-            tokens = self._load_tokens_from_path(self.midi_paths[idx])
-
-        return self._sample_block(tokens)
+    # ------------------------------------------------------------------ storage
 
     def _load_midi_paths(self):
-        if not self.csv_path.exists():
-            raise FileNotFoundError(f"CSV file not found: {self.csv_path}")
-        debug = self.debug
+        paths = []
+        for csv_path in self.csv_paths:
+            if not csv_path.exists():
+                raise FileNotFoundError(f"CSV file not found: {csv_path}")
+            df = pd.read_csv(csv_path)
+            if "split" not in df.columns or "midi_filename" not in df.columns:
+                raise ValueError(f"{csv_path} must contain 'split' and 'midi_filename' columns.")
+            df = df[df["split"] == self.split]
+            if self.debug:
+                df = df.head(5)
+            paths += [self.root_dir / f for f in df["midi_filename"]]
 
-        df = pd.read_csv(self.csv_path)
-
-        if "split" not in df.columns:
-            raise ValueError("CSV must contain a 'split' column.")
-
-        if "midi_filename" not in df.columns:
-            raise ValueError("CSV must contain a 'midi_filename' column.")
-
-        df = df[df["split"] == self.split].reset_index(drop=True)
-
-        if debug:
-            df = df.head(5)
-
-        if len(df) == 0:
+        if len(paths) == 0:
             raise ValueError(f"No MIDI files found for split='{self.split}'.")
 
-        midi_paths = [
-            self.root_dir / filename
-            for filename in df["midi_filename"]
-        ]
-
-        missing = [path for path in midi_paths if not path.exists()]
+        missing = [p for p in paths if not p.exists()]
         if missing:
-            print(f"WARNING [{self.split}]: {len(missing)}/{len(midi_paths)} MIDI files are missing "
+            print(f"WARNING [{self.split}]: {len(missing)}/{len(paths)} MIDI files are missing "
                   f"and will be skipped (first: {missing[0]})")
-            midi_paths = [path for path in midi_paths if path.exists()]
-            if not midi_paths:
+            paths = [p for p in paths if p.exists()]
+            if not paths:
                 raise FileNotFoundError(f"All MIDI files for split='{self.split}' are missing.")
+        return paths
 
-        return midi_paths
-
-    def _cache_path(self):
+    def _build_store(self):
         key = repr((
             [str(p) for p in self.midi_paths],
             self.velocity_bins, self.time_resolution, self.max_duration_bin, self.max_delta_bin,
         ))
         digest = hashlib.sha1(key.encode()).hexdigest()[:16]
-        return self.cache_dir / f"{self.csv_path.stem}_{self.split}_{digest}.pkl"
+        name = "+".join(p.stem for p in self.csv_paths)
+        store = self.cache_dir / f"{name}_{self.split}_{digest}"
+        if (store / "meta.json").exists():
+            meta = json.loads((store / "meta.json").read_text())
+            print(f"Loaded tokenized {self.split}: {meta['n_files']:,} files, {meta['n_notes']:,} notes from {store}")
+            return store
 
-    def _preload_data(self):
-        cache_path = self._cache_path() if self.cache_dir else None
-        if cache_path is not None and cache_path.exists():
-            with open(cache_path, "rb") as f:
-                all_tokens = pickle.load(f)
-            print(f"Loaded {len(all_tokens)} tokenized files from {cache_path}")
+        store.mkdir(parents=True, exist_ok=True)
+        parse = partial(_tokenize_to_array, velocity_bins=self.velocity_bins,
+                        time_resolution=self.time_resolution,
+                        max_duration_bin=self.max_duration_bin, max_delta_bin=self.max_delta_bin)
+        workers = min(len(self.midi_paths), os.cpu_count() or 1)
+        offsets, n_notes, n_failed = [0], 0, 0
+        # streamed to disk in order, so memory stays flat no matter how large the dataset is
+        with open(store / "tokens.u16", "wb") as f, ProcessPoolExecutor(max_workers=workers) as pool:
+            for arr in tqdm(pool.map(parse, self.midi_paths, chunksize=16), total=len(self.midi_paths),
+                            desc=f"Tokenizing {self.split} ({workers} workers)"):
+                if arr is None:
+                    n_failed += 1
+                else:
+                    f.write(arr.tobytes())
+                    n_notes += len(arr)
+                offsets.append(n_notes)
+        np.save(store / "offsets.npy", np.array(offsets, dtype=np.int64))
+        meta = dict(n_files=len(self.midi_paths), n_notes=n_notes, n_empty_or_failed=n_failed)
+        (store / "meta.json").write_text(json.dumps(meta))  # written last = store is complete
+        print(f"Tokenized {self.split}: {n_notes:,} notes, {n_failed} empty/broken files skipped -> {store}")
+        return store
+
+    @property
+    def tokens(self):
+        if self._tokens is None:
+            n = np.load(self.store_dir / "offsets.npy")[-1]
+            self._tokens = np.memmap(self.store_dir / "tokens.u16", dtype=np.uint16, mode="r", shape=(int(n), 4))
+        return self._tokens
+
+    def __getstate__(self):
+        # never pickle the memmap into DataLoader workers, each worker opens its own
+        state = self.__dict__.copy()
+        state["_tokens"] = None
+        return state
+
+    # ------------------------------------------------------------------ sampling
+
+    def num_notes(self):
+        return int(self.lengths.sum())
+
+    def __len__(self):
+        if self.eval_stride:
+            return len(self.windows)
+        # one "epoch" = as many windows as fit without overlap; items are random anyway
+        return max(1, int(self.lengths.sum()) // self.block_size)
+
+    def __getitem__(self, idx):
+        if self.eval_stride:
+            start = int(self.windows[idx])
         else:
-            parse = partial(_tokenize_to_numpy, velocity_bins=self.velocity_bins,
-                            time_resolution=self.time_resolution,
-                            max_duration_bin=self.max_duration_bin, max_delta_bin=self.max_delta_bin)
-            workers = min(len(self.midi_paths), os.cpu_count() or 1)
-            with ProcessPoolExecutor(max_workers=workers) as pool:
-                results = list(tqdm(pool.map(parse, self.midi_paths, chunksize=8), total=len(self.midi_paths),
-                                    desc=f"Tokenizing {self.split} ({workers} workers)"))
-            all_tokens = [None if r is None else tuple(torch.from_numpy(a) for a in r) for r in results]
-            if cache_path is not None:
-                cache_path.parent.mkdir(parents=True, exist_ok=True)
-                with open(cache_path, "wb") as f:
-                    pickle.dump(all_tokens, f)
-                print(f"Cached {len(all_tokens)} tokenized files to {cache_path}")
+            pos = random.randrange(int(self.cum_valid[-1]))
+            file_idx = int(np.searchsorted(self.cum_valid, pos, side="right"))
+            prev = int(self.cum_valid[file_idx - 1]) if file_idx > 0 else 0
+            start = int(self.starts[file_idx]) + (pos - prev)
 
-        data = []
+        window = torch.from_numpy(self.tokens[start:start + self.block_size + 1].astype(np.int64))
+        pitch, velocity, duration, delta_time = window.unbind(1)
 
-        for tokens in all_tokens:
-            if tokens is None:
-                continue
-
-            pitch, velocity, duration, delta_time = tokens
-
-            # Need block_size + 1 because targets are shifted by one token
-            if len(pitch) > self.block_size:
-                data.append(tokens)
-
-        if len(data) == 0:
-            raise ValueError(
-                "No valid MIDI sequences found. "
-                "Try reducing block_size or checking MIDI parsing."
-            )
-
-        return data
-
-    def _load_tokens_from_path(self, midi_path):
-        try:
-            return self._parse_midi_delta_time(midi_path)
-        except Exception as e:
-            raise RuntimeError(f"Failed to parse MIDI file: {midi_path}") from e
-
-    def _sample_block(self, tokens):
-        pitch, velocity, duration, delta_time = tokens
-
-        if len(pitch) <= self.block_size:
-            raise ValueError(
-                f"Sequence too short: length={len(pitch)}, block_size={self.block_size}"
-            )
-
-        start = random.randint(0, len(pitch) - self.block_size - 1)
-        end = start + self.block_size + 1
-
-        pitch = pitch[start:end]
-        velocity = velocity[start:end]
-        duration = duration[start:end]
-        delta_time = delta_time[start:end]
-
-        if self.augment:
-            shift = random.randint(-5, 5)
-            pitch = torch.clamp(pitch + shift, 0, 127)
+        if self.augment and not self.eval_stride:
+            # transpose by up to ±5 semitones, limited so no note leaves 0..127 (clamping would bend them)
+            lo, hi = int(pitch.min()), int(pitch.max())
+            shift = random.randint(max(-5, -lo), min(5, 127 - hi))
+            pitch = pitch + shift
 
         return self._split_xy((pitch, velocity, duration, delta_time))
 
     def _split_xy(self, tokens):
-        pitch, velocity, duration, delta_time = tokens
-        x = (
-            pitch[:-1],
-            velocity[:-1],
-            duration[:-1],
-            delta_time[:-1],
-        )
-
-        y = (
-            pitch[1:],
-            velocity[1:],
-            duration[1:],
-            delta_time[1:],
-        )
-
+        x = tuple(t[:-1] for t in tokens)
+        y = tuple(t[1:] for t in tokens)
         return x, y
-
-    def _parse_midi_delta_time(self, midi_path):
-        return tokenize_midi(midi_path, self.velocity_bins, self.time_resolution,
-                             self.max_duration_bin, self.max_delta_bin)
 
 
 def tokenize_midi(midi_path, velocity_bins=32, time_resolution=0.02, max_duration_bin=511, max_delta_bin=511):
@@ -280,13 +245,14 @@ def tokenize_midi(midi_path, velocity_bins=32, time_resolution=0.02, max_duratio
     )
 
 
-def _tokenize_to_numpy(midi_path, **kwargs):
-    # worker side of the parallel preload: numpy arrays pickle cheaply between processes, tensors don't
+def _tokenize_to_array(midi_path, **kwargs):
+    # worker side of the parallel preload: returns (n_notes, 4) uint16 in STREAM order, None if empty/broken.
+    # Broken files are skipped instead of failing: large crawled datasets always contain a few.
     try:
         tokens = tokenize_midi(midi_path, **kwargs)
-    except Exception as e:
-        raise RuntimeError(f"Failed to parse MIDI file: {midi_path}") from e
-    return None if tokens is None else tuple(t.numpy() for t in tokens)
+    except Exception:
+        return None
+    return None if tokens is None else np.stack([t.numpy() for t in tokens], axis=1).astype(np.uint16)
 
 
 def quantize_time(time_sec, time_resolution, max_bin):

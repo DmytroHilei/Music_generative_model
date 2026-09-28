@@ -223,7 +223,7 @@ if wandb_log:
 n_params = sum(p.numel() for p in raw_model.parameters())
 n_train_notes = train_dataset.num_notes()
 print(f"Model parameters : {n_params:,} ({n_params / 1e6:.2f}M)")
-print(f"Train files      : {len(train_dataset):,}  ({n_train_notes:,} notes)")
+print(f"Train files      : {train_dataset.n_files:,}  ({n_train_notes:,} notes)")
 print(f"Val windows      : {len(val_dataset):,}  ({len(val_loader):,} batches)")
 print(f"Tokens per iter  : {tokens_per_iter:,}")
 print(f"Planned epochs   : {tokens_per_iter * (max_iters - iter_num) / n_train_notes:.1f} (notes seen / unique notes)")
