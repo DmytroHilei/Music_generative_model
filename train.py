@@ -74,6 +74,8 @@ wandb_project = 'music-transformer'
 wandb_run_name = 'maestro-v1'
 
 # adamw optimizer
+optimizer_name = 'adamw'   # 'adamw' | 'muon' (Muon for transformer-block matrices, AdamW for the rest; same lr/wd)
+muon_momentum = 0.95
 learning_rate = 6e-4
 max_iters = 30000
 weight_decay = 1e-1
@@ -195,7 +197,12 @@ if sdpa_backend:
                'efficient': SDPBackend.EFFICIENT_ATTENTION}[sdpa_backend]
     sdpa_kernel(backend).__enter__()  # for the whole process
 scaler = torch.amp.GradScaler(device_type, enabled=(dtype == 'float16'))
-optimizer = model.configure_optimizers(weight_decay, learning_rate, (beta1, beta2), device_type)
+if optimizer_name == 'muon':
+    from optim import build_muon_optimizer
+    optimizer = build_muon_optimizer(model, weight_decay, learning_rate, (beta1, beta2), device_type,
+                                     momentum=muon_momentum)
+else:
+    optimizer = model.configure_optimizers(weight_decay, learning_rate, (beta1, beta2), device_type)
 if init_from == 'resume':
     optimizer.load_state_dict(checkpoint['optimizer'])
 checkpoint = None  # free up memory
