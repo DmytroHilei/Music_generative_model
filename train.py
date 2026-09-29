@@ -91,8 +91,8 @@ min_lr = 6e-5
 # system
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 dtype = 'bfloat16' if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else 'float16'
-compile = False
-fp8 = False               # torchao float8 training for the transformer matmuls; only pays off together with compile
+compile = True
+fp8 = True                # torchao float8 training for the transformer matmuls; only pays off together with compile
 sdpa_backend = ''         # '' = PyTorch default, or 'flash' | 'cudnn' | 'efficient'
 seed = 1337
 # -----------------------------------------------------------------------------
@@ -185,6 +185,9 @@ if block_size < model.config.block_size:
 model.to(device)
 
 # before the optimizer is built: fp8 conversion swaps the Linear modules
+if fp8 and not (device_type == 'cuda' and torch.cuda.get_device_capability() >= (8, 9)):
+    print("fp8 needs an sm_89+ GPU, falling back to bf16")
+    fp8 = False
 if fp8:
     from torchao.float8 import convert_to_float8_training
     # only the transformer blocks: embeddings, heads and LayerNorms stay bf16/fp32
