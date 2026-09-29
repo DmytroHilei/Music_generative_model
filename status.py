@@ -48,7 +48,6 @@ RUNS = [
     ('iso-S-muon', 'iso_S_muon.log', '6M 1.33Bt'),
     ('iso-M-muon', 'iso_M_muon.log', '20M 400Mt'),
     ('iso-L-muon', 'iso_L_muon.log', '42M 194Mt'),
-    ('iso-XL-muon', 'iso_XL_muon.log', '65M 125Mt'),
 ]
 
 TQDM = re.compile(r'Training:\s+(\d+)%\|[^|]*\|\s*(\d+)/(\d+) \[([\d:]+)<([\d:?]+),\s*([\d.?]+)(it/s|s/it)')
