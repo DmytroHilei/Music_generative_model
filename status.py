@@ -44,6 +44,9 @@ RUNS = [
     ('ladder-L-lr3e-4', 'ladder_L_lr3e-4.log', '42M'),
     ('ladder-L-lr1e-3', 'ladder_L_lr1e-3.log', '42M'),
     ('ladder-L-muon', 'ladder_L_muon.log', '42M muon'),
+    ('ladder-L-muon-lr1e-3', 'ladder_L_muon_lr1e-3.log', '42M muon'),
+    ('iso-S-muon', 'iso_S_muon.log', '6M 1.33Bt'),
+    ('iso-M-muon', 'iso_M_muon.log', '20M 400Mt'),
 ]
 
 TQDM = re.compile(r'Training:\s+(\d+)%\|[^|]*\|\s*(\d+)/(\d+) \[([\d:]+)<([\d:?]+),\s*([\d.?]+)(it/s|s/it)')
@@ -114,9 +117,11 @@ def pipeline_table():
             per_artist = Counter(row['artist'] for row in csv.DictReader(f))
     artists = [line.split('|')[0].strip() for line in open(ROOT / 'data/artists.txt', encoding='utf-8')
                if line.strip() and not line.startswith('#')]
-    done_artists = sum(1 for a in artists if per_artist.get(a, 0) >= 20)
+    fetch_running = running('data/fetch_songs.py')
+    # an artist counts as done when it has songs and no download is running (some bands have < 25 uploads)
+    done_artists = sum(1 for a in artists if per_artist.get(a, 0) >= (20 if fetch_running else 1))
     dl_state = Text('running', style='bold yellow') if running('data/fetch_songs.py') else Text('idle', style='dim')
-    missing = [a for a in artists if per_artist.get(a, 0) < 20]
+    missing = [a for a in artists if per_artist.get(a, 0) < (20 if fetch_running else 1)]
     t.add_row('download', dl_state, ProgressBar(total=len(artists), completed=done_artists),
               f'{sum(per_artist.values())} songs', f"{done_artists}/{len(artists)} artists; "
               f"left: {', '.join(missing[:4])}{'…' if len(missing) > 4 else ''}")
@@ -124,7 +129,7 @@ def pipeline_table():
     # reduction
     audio = [p for p in (ROOT / 'data/audio').glob('*/*.mp3') if p.parent.name != 'skryabin_test']
     audio += list((ROOT / 'Skryabin').glob('*.mp3'))
-    reduced = list((ROOT / 'data/finetune').glob('*/midi/*.mid'))
+    reduced = [p for p in (ROOT / 'data/finetune').glob('*/midi/*.mid') if p.parts[-3] != 'skryabin_test']
     red_state = Text('running', style='bold yellow') if running('run_reduce.sh') else Text('idle', style='dim')
     rate = ''
     recent = [p.stat().st_mtime for p in reduced if time.time() - p.stat().st_mtime < 900]
