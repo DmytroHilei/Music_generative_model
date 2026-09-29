@@ -181,6 +181,17 @@ EMA timescale of about 20–25% of the run. 64k–128k tokens/step (optionally r
 9. Diffusion for arrangement/infilling: see "Diffusion idea". Start with masked discrete diffusion on our tokens.
 10. Mamba/SSM: controlled comparison (same tokens, params and budget), mainly for long context. `mamba-ssm` on sm_120 may need a source build.
 
+## Architecture options (2026-09-30)
+
+Full table with effects, costs, papers and **the user's verdict/notes columns**: `context/claude/architecture.md`.
+Don't overwrite the user's columns there; record test results in the experiment log and update the status column.
+Summary of the agent's suggested order:
+1. Next pretraining run: RoPE + RMSNorm + SwiGLU + QK-norm, start/end tokens, conditioning tokens (genre/artist/density), context 1024.
+2. Fine-tune: context extension to 2048+ (PI/YaRN), style token, Anticipatory-Music-Transformer-style melody → accompaniment.
+3. Only if long-form structure still fails: learned memory tokens (RMT/AutoCompressors) or Museformer bar attention.
+4. Research: hybrid SSM / linear attention (flash-linear-attention is Triton, likely easier on sm_120 than mamba-ssm), masked diffusion.
+Tested and rejected: MoE FFN, bigger pitch head. Speed work (not architecture) lives in `context/claude/optimizations.md`.
+
 ## Diffusion idea (discussed 2026-09-28, not started)
 
 Diffusion would **add** a capability (arrangement and editing) rather than replace the AR model. The natural time is after the 24 h
