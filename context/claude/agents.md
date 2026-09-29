@@ -206,8 +206,8 @@ pretraining and the Skryabin fine-tune, so there's a strong AR baseline to compa
   (local branch has the same name, so a plain `git push` works). `transformer-v2` is the **GitHub default branch** and, since 2026-09-29, holds
   everything: the old projects were merged in (history kept, unrelated histories) as `legacy/lstm/` (from `main`: the user's
   LSTM chord model + earlier transformer comparison) and `legacy/transformer/` (from `legacy-transformer`: the old
-  `../MusicAutoregresiveTransformer` folder). Those branches stay on GitHub unchanged; `master` is a stale copy of
-  `transformer-v2` (ends at a35669c) with nothing of its own. **Never push to `main`, never force-push.
+  `../MusicAutoregresiveTransformer` folder). The old branches (`main`, `legacy-transformer`, `master`) were
+  deleted on 2026-09-29 at the user's request: `transformer-v2` is the only branch, and their commits live on in its history. **Never force-push.
   Don't create new GitHub repos**: the user wants everything in this one.
 - The README of `transformer-v2` will be rewritten later by the user. The local, git-ignored `README_TODO.md` lists what it should cover.
 
