@@ -43,7 +43,9 @@ class CausalSelfAttention(nn.Module):
             self.register_buffer("bias", torch.tril(torch.ones(config.block_size, config.block_size))
                                         .view(1, 1, config.block_size, config.block_size))
 
-    def forward(self, x):
+    def forward(self, x, cache=None):
+        """cache (inference only): dict per layer, filled with 'k'/'v' of all positions so far. With a cache, x is
+        either a prefill (empty cache) or one new position that attends to everything cached."""
         B, T, C = x.size() # batch size, sequence length, embedding dimensionality (n_embd)
 
         # calculate query, key, values for all heads in batch and move head forward to be the batch dim
@@ -51,15 +53,24 @@ class CausalSelfAttention(nn.Module):
         k = k.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
         q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
         v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
+        causal = True
+        if cache is not None:
+            if 'k' in cache:
+                assert T == 1, "a cached step feeds one position at a time"
+                k = torch.cat([cache['k'], k], dim=2)
+                v = torch.cat([cache['v'], v], dim=2)
+                causal = False  # the single new query may see every cached key
+            cache['k'], cache['v'] = k, v
 
         # causal self-attention; Self-attend: (B, nh, T, hs) x (B, nh, hs, T) -> (B, nh, T, T)
         if self.flash:
             # efficient attention using Flash Attention CUDA kernels
-            y = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=self.dropout if self.training else 0, is_causal=True)
+            y = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=self.dropout if self.training else 0, is_causal=causal)
         else:
             # manual implementation of attention
             att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
-            att = att.masked_fill(self.bias[:,:,:T,:T] == 0, float('-inf'))
+            if causal:
+                att = att.masked_fill(self.bias[:,:,:T,:T] == 0, float('-inf'))
             att = F.softmax(att, dim=-1)
             att = self.attn_dropout(att)
             y = att @ v # (B, nh, T, T) x (B, nh, T, hs) -> (B, nh, T, hs)
@@ -132,8 +143,8 @@ class Block(nn.Module):
         self.ln_2 = LayerNorm(config.n_embd, bias=config.bias)
         self.mlp = MoEMLP(config) if config.moe_experts else MLP(config)
 
-    def forward(self, x):
-        x = x + self.attn(self.ln_1(x))
+    def forward(self, x, cache=None):
+        x = x + self.attn(self.ln_1(x), cache)
         x = x + self.mlp(self.ln_2(x))
         return x
 
@@ -341,16 +352,16 @@ class GPT(nn.Module):
         elif isinstance(module, nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
-    def _encode(self, pitch, velocity, duration, delta_time):
+    def _encode(self, pitch, velocity, duration, delta_time, caches=None, pos_offset=0):
         device = pitch.device
         b, t = pitch.size()
-        assert t <= self.config.block_size
-        seq_pos = torch.arange(0, t, dtype=torch.long, device=device)
+        assert pos_offset + t <= self.config.block_size
+        seq_pos = torch.arange(pos_offset, pos_offset + t, dtype=torch.long, device=device)
         tok_emb = self.transformer.music_embeddings(pitch, velocity, duration, delta_time)
         pos_emb = self.transformer.wpe(seq_pos)
         x = self.transformer.drop(tok_emb + pos_emb)
-        for block in self.transformer.h:
-            x = block(x)
+        for i, block in enumerate(self.transformer.h):
+            x = block(x, caches[i] if caches is not None else None)
         return self.transformer.ln_f(x)
 
     def _head_logits(self, x, targets=None):
@@ -429,7 +440,20 @@ class GPT(nn.Module):
 
         return optimizer
     @torch.no_grad()
-    def generate(self, pitch, velocity, duration, delta_time, max_new_tokens, temperature=0.85, top_k=None):
+    def generate(self, pitch, velocity, duration, delta_time, max_new_tokens, temperature=0.85, top_k=None,
+                 anchor=0, slide=None):
+        """
+        Sampling with a KV cache: each new note costs one position through the model, not a full re-run.
+        Positions are learned up to block_size, so the window can't roll one note at a time with a cache (every
+        cached position would shift). When the cache is full it is rebuilt from a shorter window, making room
+        for `slide` new notes (default block_size // 4, so the context stays between 3/4 and all of block_size).
+        anchor > 0 (optional, off by default): the first `anchor` notes of the sequence (e.g. the prompt's theme)
+        stay pinned at the start of every rebuilt window, in front of the most recent notes.
+        """
+        L = self.config.block_size
+        slide = slide or L // 4
+        assert 0 <= anchor and anchor + slide < L, "need anchor + slide < block_size"
+        streams = [pitch, velocity, duration, delta_time]
 
         def sample(logits):  # (B, 1, vocab) → (B, 1)
             logits = logits[:, -1, :] / temperature
@@ -438,23 +462,31 @@ class GPT(nn.Module):
                 logits[logits < v[:, [-1]]] = -float('Inf')
             return torch.multinomial(F.softmax(logits, dim=-1), num_samples=1)
 
-        for _ in range(max_new_tokens):
-            p  = pitch[:, -self.config.block_size:]
-            v  = velocity[:, -self.config.block_size:]
-            d  = duration[:, -self.config.block_size:]
-            dt = delta_time[:, -self.config.block_size:]
+        def prefill():
+            """New cache from the current window; returns the hidden state of its last position."""
+            n = streams[0].size(1)
+            if n <= L:
+                window = streams
+            else:
+                recent = L - slide - anchor
+                window = [torch.cat([s[:, :anchor], s[:, -recent:]], dim=1) for s in streams]
+            caches = [{} for _ in self.transformer.h]
+            return caches, self._encode(*window, caches=caches)[:, [-1], :]
 
-            h = self._encode(p, v, d, dt)[:, [-1], :]  # (B, 1, n_embd)
-
+        caches, h = prefill()
+        for i in range(max_new_tokens):
             if self.config.cascade_heads:
                 nxt = self.cascade.sample(h, sample)
             else:
                 nxt = {name: sample(lg) for name, lg in self._head_logits(h).items()}
-            p_next, v_next, d_next, dt_next = (nxt[name] for name in STREAM_ORDER)
+            new = [nxt[name] for name in STREAM_ORDER]
+            streams = [torch.cat([s, t], dim=1) for s, t in zip(streams, new)]
+            if i == max_new_tokens - 1:
+                break
+            cached = caches[0]['k'].size(2)
+            if cached < L:
+                h = self._encode(*new, caches=caches, pos_offset=cached)
+            else:
+                caches, h = prefill()
 
-            pitch      = torch.cat([pitch,      p_next],  dim=1)
-            velocity   = torch.cat([velocity,   v_next],  dim=1)
-            duration   = torch.cat([duration,   d_next],  dim=1)
-            delta_time = torch.cat([delta_time, dt_next], dim=1)
-
-        return pitch, velocity, duration, delta_time
+        return tuple(streams)

@@ -49,6 +49,11 @@ def parse_args():
     parser.add_argument("--prompt-notes", type=int, default=64)
     parser.add_argument("--keep-prompt", action="store_true",
                         help="Include the prompt notes in the output MIDI")
+    parser.add_argument("--anchor", type=int, default=0,
+                        help="optional, off by default: pin the first N notes (e.g. the prompt's theme) at the start "
+                             "of the context once generation runs past the 512-note window")
+    parser.add_argument("--slide", type=int, default=None,
+                        help="notes dropped per KV-cache rebuild past the window (default block_size // 4)")
     parser.add_argument("--max-polyphony", type=int, default=None,
                         help="Post-processing: max simultaneous notes per time slot (default: off, raw model output)")
     parser.add_argument("--max-delta", type=float, default=None,
@@ -203,6 +208,8 @@ def generate_one(model, config, args, pieces, seed, out, device):
             max_new_tokens=args.max_new_tokens,
             temperature=args.temperature,
             top_k=args.top_k,
+            anchor=args.anchor,
+            slide=args.slide,
         )
 
     # drop the seed / prompt unless --keep-prompt
