@@ -9,6 +9,7 @@ import pandas as pd
 import pretty_midi
 import torch
 
+from jobstatus import JobStatus
 from model import GPT, MusicConfig
 from data_loader import tokenize_midi
 
@@ -52,6 +53,11 @@ def parse_args():
     parser.add_argument("--anchor", type=int, default=0,
                         help="optional, off by default: pin the first N notes (e.g. the prompt's theme) at the start "
                              "of the context once generation runs past the 512-note window")
+    parser.add_argument("--density", type=str, default=None,
+                        help="optional: steer notes per second without retraining. A number (e.g. 5) or 'prompt' = "
+                             "match the prompt's own density. Only the delta_time head is biased")
+    parser.add_argument("--dt-bias", type=float, default=0.0,
+                        help="fixed bias toward longer gaps (> 0 = calmer); with --density it's the starting value")
     parser.add_argument("--slide", type=int, default=None,
                         help="notes dropped per KV-cache rebuild past the window (default block_size // 4)")
     parser.add_argument("--max-polyphony", type=int, default=None,
@@ -164,14 +170,19 @@ def main():
 
     print(f"Checkpoint: {resolve_checkpoint(args.checkpoint)} (iter {ckpt.get('iter_num', '?')}), device {device}")
     out_base = Path(args.output)
+    job = JobStatus('generate', args.num_samples * args.max_new_tokens, f'{out_base.name} on {device}')
     for i in range(args.num_samples):
         seed = args.seed + i
         torch.manual_seed(seed)
         out = out_base if args.num_samples == 1 else out_base.with_name(f"{out_base.stem}_{i + 1}{out_base.suffix}")
-        generate_one(model, config, args, pieces, seed, out, device)
+        base = i * args.max_new_tokens
+        progress = lambda n, base=base, out=out: job.update(
+            base + n, f'{out.name} ({i + 1}/{args.num_samples}) on {device}')
+        generate_one(model, config, args, pieces, seed, out, device, progress)
+    job.finish(f'{args.num_samples} sample(s) → {out_base.parent}')
 
 
-def generate_one(model, config, args, pieces, seed, out, device):
+def generate_one(model, config, args, pieces, seed, out, device, progress=None):
     a, b = args.prompt_start, args.prompt_start + args.prompt_notes
     if pieces:
         rng = random.Random(seed)
@@ -199,6 +210,14 @@ def generate_one(model, config, args, pieces, seed, out, device):
         duration   = torch.full((1, 1), 10, dtype=torch.long, device=device)
         delta_time = torch.zeros((1, 1), dtype=torch.long, device=device)
     has_prompt = bool(pieces or args.prompt)
+    target_nps = None
+    if args.density == "prompt":
+        if not has_prompt or pitch.size(1) < 2:
+            raise SystemExit("--density prompt needs a prompt")
+        target_nps = pitch.size(1) / max(1e-3, delta_time[0, 1:].sum().item() * 0.02)
+        print(f"Density target: {target_nps:.1f} notes/s (from the prompt)")
+    elif args.density:
+        target_nps = float(args.density)
     n_prompt = 0 if args.keep_prompt and has_prompt else pitch.size(1)
 
     print(f"Generating {args.max_new_tokens} tokens on {device} (seed {seed})...")
@@ -210,6 +229,9 @@ def generate_one(model, config, args, pieces, seed, out, device):
             top_k=args.top_k,
             anchor=args.anchor,
             slide=args.slide,
+            progress=progress,
+            dt_bias=args.dt_bias,
+            target_nps=target_nps,
         )
 
     # drop the seed / prompt unless --keep-prompt
