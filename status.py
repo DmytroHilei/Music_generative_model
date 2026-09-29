@@ -10,6 +10,7 @@ the running jobs.
 
 import argparse
 import csv
+import os
 import re
 import shutil
 import subprocess
@@ -77,9 +78,13 @@ def training_table():
                     ('val CE', {'justify': 'right'}), ('aria CE', {'justify': 'right'}),
                     ('pit/vel/dur/dt', {'justify': 'right'})]:
         t.add_column(col, **kw)
-    active = [line.split('--out_dir=')[-1].split()[0] for line in
-              subprocess.run(['pgrep', '-af', 'train.py'], capture_output=True, text=True).stdout.splitlines()
-              if '--out_dir=' in line]
+    # a run is live if some train.py process has its stdout on that log (works for --out_dir and config-file runs)
+    active = set()
+    for pid in subprocess.run(['pgrep', '-f', 'python train.py'], capture_output=True, text=True).stdout.split():
+        try:
+            active.add(Path(os.readlink(f'/proc/{pid}/fd/1')).name)
+        except OSError:
+            pass
     for label, log, params in RUNS:
         text = tail_text(LOGS / log)
         if not text or not text.strip():
@@ -89,7 +94,7 @@ def training_table():
         steps = STEP.findall(text)
         pct, cur, tot, _, eta, rate, unit = bars[-1] if bars else ('0', '0', '1', '', '?', '?', 'it/s')
         cur, tot = int(cur), int(tot)
-        is_running = any(Path(a).name == log[:-4] for a in active)
+        is_running = log in active
         done = steps and int(steps[-1][0]) >= tot - 1
         state = (Text('done', style='green') if done else Text('running', style='bold yellow') if is_running
                  else Text('stopped', style='red'))
