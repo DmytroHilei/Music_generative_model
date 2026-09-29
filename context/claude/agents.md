@@ -150,7 +150,7 @@ training mix.
 | 5 | ladder-L-moe8 (`--moe_experts=8 --moe_top_k=2`, 117M total / about 42M active) | `logs/ladder_L_moe8.log` | learned MoE. Compare per step **and** per wall-clock hour (eager, python loop over experts, expect about neutral per hour on this GPU) |
 | 6 | iso-FLOP at C ≈ 4.85e16: iso-M (20M, 400M tok, 13,020 it), iso-L (42M, 194M tok, 6,315 it), iso-XL (65M, 125M tok, 4,070 it), compile on | `logs/iso_*.log`, runner `logs/run_isoflop.sh` | which size wins at equal compute → overnight model size |
 | 7 | ladder-L-lr3e-4, ladder-L-lr1e-3, ladder-L-muon (`optimizer_name=muon`, Moonlight-scaled Muon for block matrices + AdamW rest, same lr/wd) | `logs/ladder_L_{lr3e-4,lr1e-3,muon}.log`, runner `logs/run_opt.sh` | best peak LR, and Muon vs AdamW (baseline ladder-L = AdamW 6e-4). Compare Muon per step **and** per hour: smoke on 6M was 12.85 vs 13.28 val after 60 steps but about 2× slower per step |
-| 8 | ladder-L-muon-lr1e-3, iso-S-muon and iso-M-muon done. With Muon, M (20M) beats S (6M) by 0.17 Aria at iso-FLOP, so the optimum stays at M or larger. Next: iso-L-muon (42M) to bracket the optimum | `logs/iso_{S,M}_muon.log` | does Muon shift the iso-FLOP size optimum |
+| 8 | ladder-L-muon-lr1e-3, iso-S-muon and iso-M-muon done. With Muon, M (20M) beats S (6M) by 0.17 Aria at iso-FLOP, so the optimum stays at M or larger. **iso-L-muon → iso-XL-muon running** (fp8, `logs/run_iso_muon_LXL.sh`, started 16:54, ~1 h total) | `logs/iso_{S,M}_muon.log` | does Muon shift the iso-FLOP size optimum |
 | — | piano reduction of all downloaded songs | `logs/reduce.log` | ETA about 01:00–01:30. ТНМК songs may need one more `logs/run_reduce.sh` pass afterwards |
 
 ## Plan for the 24 h run (agreed direction, 2026-09-28)
