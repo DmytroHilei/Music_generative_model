@@ -35,6 +35,7 @@ always_save_checkpoint = False
 checkpoint_format = 'full'  # 'full' = fp32 weights + optimizer (resumable), 'bf16' = bf16 weights only (~6x smaller,
                             # not resumable; fine for generation and for init_from='finetune')
 init_from = 'scratch'     # 'scratch' | 'resume' | 'finetune'
+ckpt_interval_min = 0.0    # >0: also write a full resumable out_dir/ckpt.pt every N minutes and at the end (atomic)
 init_ckpt = 'checkpoints/ckpt.pt'  # used by 'finetune'
 
 # data
@@ -84,6 +85,8 @@ beta2 = 0.95
 grad_clip = 1.0
 # learning rate decay settings
 decay_lr = True
+lr_schedule = 'cosine'    # 'cosine' | 'wsd' (warmup, constant, then 1-sqrt cooldown to min_lr over the last cooldown_frac)
+cooldown_frac = 0.2
 warmup_iters = 300
 lr_decay_iters = 30000
 min_lr = 6e-5
@@ -149,6 +152,7 @@ train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, co
 # model
 iter_num = 0
 best_val_loss = float('inf')
+wandb_run_id = None
 arch_keys = ['n_layer', 'n_head', 'n_embd', 'block_size', 'bias', 'pitch_size', 'velocity_size',
              'duration_size', 'delta_time_size', 'cascade_heads', 'cascade_residual',
              'pitch_head_blocks', 'pitch_head_mult', 'moe_experts', 'moe_top_k', 'moe_hidden_frac', 'moe_aux_weight']
@@ -178,6 +182,10 @@ if checkpoint is not None:
     if init_from == 'resume':
         iter_num = checkpoint['iter_num']
         best_val_loss = checkpoint['best_val_loss']
+        wandb_run_id = checkpoint.get('wandb_run_id')
+        # different data windows after a restart instead of replaying the ones from the start
+        torch.manual_seed(seed + iter_num)
+        random.seed(seed + iter_num)
 
 if block_size < model.config.block_size:
     model.crop_block_size(block_size)
@@ -249,6 +257,13 @@ def get_lr(it):
     # 1) linear warmup
     if it < warmup_iters:
         return learning_rate * (it + 1) / (warmup_iters + 1)
+    if lr_schedule == 'wsd':
+        # Hägele et al. 2024: constant LR, then a (1 - sqrt) cooldown; matches or beats cosine at equal compute
+        cooldown_start = lr_decay_iters - int(cooldown_frac * lr_decay_iters)
+        if it < cooldown_start:
+            return learning_rate
+        progress = min(1.0, (it - cooldown_start) / max(1, lr_decay_iters - cooldown_start))
+        return min_lr + (1 - math.sqrt(progress)) * (learning_rate - min_lr)
     # 2) after decay, min learning rate
     if it > lr_decay_iters:
         return min_lr
@@ -260,7 +275,24 @@ def get_lr(it):
 
 if wandb_log:
     import wandb
-    wandb.init(project=wandb_project, name=wandb_run_name, config=config)
+    if init_from == 'resume' and wandb_run_id:
+        wandb.init(project=wandb_project, id=wandb_run_id, resume='allow', config=config)
+    else:
+        wandb.init(project=wandb_project, name=wandb_run_name, config=config)
+    wandb_run_id = wandb.run.id
+else:
+    wandb_run_id = None
+
+
+def save_resumable(it):
+    """Full state to out_dir/ckpt.pt; `it` = the next iteration to run. tmp + rename, so a crash mid-save keeps the old file."""
+    os.makedirs(out_dir, exist_ok=True)
+    path = os.path.join(out_dir, 'ckpt.pt')
+    torch.save({'model_args': model_args, 'iter_num': it, 'best_val_loss': best_val_loss, 'config': config,
+                'model': raw_model.state_dict(), 'optimizer': optimizer.state_dict(),
+                'wandb_run_id': wandb_run_id}, path + '.tmp')
+    os.replace(path + '.tmp', path)
+    tqdm.write(f"saved resumable checkpoint at iter {it} to {path}")
 
 n_params = sum(p.numel() for p in raw_model.parameters())
 n_train_notes = train_dataset.num_notes()
@@ -276,6 +308,7 @@ batches = infinite_batches(train_loader)
 X, Y = next(batches)
 train_sums, train_n = {}, 0  # running train metrics since the last eval (with dropout + augmentation)
 t0 = time.time()
+last_resumable = time.time()
 
 pbar = tqdm(range(iter_num, max_iters), desc="Training", initial=iter_num, total=max_iters)
 for iter_num in pbar:
@@ -305,7 +338,7 @@ for iter_num in pbar:
             if iter_num > 0:
                 os.makedirs(out_dir, exist_ok=True)
                 ckpt = {'model_args': model_args, 'iter_num': iter_num, 'best_val_loss': best_val_loss,
-                        'config': config}
+                        'config': config, 'wandb_run_id': wandb_run_id}
                 if checkpoint_format == 'bf16':
                     ckpt['model'] = {k: v.to(torch.bfloat16) if v.is_floating_point() else v
                                      for k, v in raw_model.state_dict().items()}
@@ -314,6 +347,8 @@ for iter_num in pbar:
                     ckpt['model'] = raw_model.state_dict()
                     ckpt['optimizer'] = optimizer.state_dict()
                     name = 'ckpt.pt'
+                if name == 'ckpt.pt' and ckpt_interval_min > 0:
+                    name = 'best.pt'  # ckpt.pt is the periodic resume state, don't roll it back to an older iter
                 torch.save(ckpt, os.path.join(out_dir, name))
                 tqdm.write(f"saved checkpoint to {os.path.join(out_dir, name)}")
     if iter_num == 0 and eval_only:
@@ -336,6 +371,10 @@ for iter_num in pbar:
     scaler.step(optimizer)
     scaler.update()
     optimizer.zero_grad(set_to_none=True)
+
+    if ckpt_interval_min > 0 and (time.time() - last_resumable > 60 * ckpt_interval_min or iter_num == max_iters - 1):
+        save_resumable(iter_num + 1)
+        last_resumable = time.time()
 
     t1 = time.time()
     pbar.set_postfix(loss=f"{train_sums['loss'] / train_n:.3f}", lr=f"{lr:.1e}", ms=f"{(t1 - t0) * 1000:.0f}")
