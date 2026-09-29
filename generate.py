@@ -1,5 +1,6 @@
 import argparse
 import random
+import time
 import shutil
 import subprocess
 from pathlib import Path
@@ -23,7 +24,14 @@ def parse_args():
                         help="checkpoint file, or a run directory (uses model_bf16.pt, else best.pt, else ckpt.pt)")
     parser.add_argument("--output", type=str, default="generated.mid",
                         help="output MIDI; with --num-samples > 1 a _<i> suffix is added")
-    parser.add_argument("--num-samples", type=int, default=1, help="samples to generate, seeds seed, seed+1, ...")
+    parser.add_argument("--num-samples", type=int, default=1, help="samples to generate")
+    parser.add_argument("--batch-size", type=int, default=None,
+                        help="samples generated together in one batch (default: all of them). A batch costs about "
+                             "as much as one sample on GPU. Batch k uses seed + k, so results depend on the batching")
+    parser.add_argument("--dtype", choices=["auto", "fp32", "bf16"], default="auto",
+                        help="auto = bf16 on CUDA, fp32 on CPU")
+    parser.add_argument("--no-cuda-graph", action="store_true",
+                        help="decode eagerly on CUDA instead of replaying a captured CUDA graph (same notes)")
     parser.add_argument("--device", choices=["auto", "cpu", "cuda"], default="auto",
                         help="'cpu' keeps the GPU free for a running training job")
     parser.add_argument("--threads", type=int, default=None, help="CPU threads (default: torch default = all cores)")
@@ -166,61 +174,76 @@ def main():
         if k.startswith("_orig_mod."):
             state_dict[k[len("_orig_mod."):]] = state_dict.pop(k)
     model.load_state_dict(state_dict)
-    model.eval().to(device)
+    dtype = {"fp32": torch.float32, "bf16": torch.bfloat16}.get(args.dtype, torch.bfloat16 if device == "cuda"
+                                                                 else torch.float32)
+    model.eval().to(device=device, dtype=dtype)
 
-    print(f"Checkpoint: {resolve_checkpoint(args.checkpoint)} (iter {ckpt.get('iter_num', '?')}), device {device}")
+    print(f"Checkpoint: {resolve_checkpoint(args.checkpoint)} (iter {ckpt.get('iter_num', '?')}), "
+          f"device {device}, {str(dtype).replace('torch.', '')}")
     out_base = Path(args.output)
+    names = [out_base if args.num_samples == 1 else out_base.with_name(f"{out_base.stem}_{i + 1}{out_base.suffix}")
+             for i in range(args.num_samples)]
+    bs = args.batch_size or args.num_samples
     job = JobStatus('generate', args.num_samples * args.max_new_tokens, f'{out_base.name} on {device}')
-    for i in range(args.num_samples):
-        seed = args.seed + i
-        torch.manual_seed(seed)
-        out = out_base if args.num_samples == 1 else out_base.with_name(f"{out_base.stem}_{i + 1}{out_base.suffix}")
-        base = i * args.max_new_tokens
-        progress = lambda n, base=base, out=out: job.update(
-            base + n, f'{out.name} ({i + 1}/{args.num_samples}) on {device}')
-        generate_one(model, config, args, pieces, seed, out, device, progress)
+    for k, first in enumerate(range(0, args.num_samples, bs)):
+        rows = names[first:first + bs]
+        seed = args.seed + k
+        progress = lambda n, first=first, rows=rows: job.update(
+            first * args.max_new_tokens + n * len(rows),
+            f'{rows[0].name}..{rows[-1].name} (batch of {len(rows)}) on {device}')
+        generate_batch(model, config, args, pieces, seed, rows, device, progress)
     job.finish(f'{args.num_samples} sample(s) → {out_base.parent}')
 
 
-def generate_one(model, config, args, pieces, seed, out, device, progress=None):
+def prompt_rows(config, args, pieces, seed, n_rows, device):
+    """(pitch, velocity, duration, delta_time) each (n_rows, T), one prompt per row, and a label per row."""
     a, b = args.prompt_start, args.prompt_start + args.prompt_notes
     if pieces:
         rng = random.Random(seed)
-        while True:
-            idx = args.val_index if args.val_index is not None else rng.randrange(len(pieces))
-            label, load = pieces[idx]
-            toks = load()
-            if len(toks) >= b or args.val_index is not None:
-                break  # random pick: retry pieces shorter than the prompt
-        toks = torch.from_numpy(toks[a:b]).long().to(device)
-        pitch, velocity, duration, delta_time = (toks[:, j].unsqueeze(0) for j in range(4))
-        print(f"Prompt: notes {a}-{a + pitch.size(1)} of val piece #{idx}: {label}")
-    elif args.prompt:
+        rows, labels = [], []
+        for _ in range(n_rows):
+            while True:
+                idx = args.val_index if args.val_index is not None else rng.randrange(len(pieces))
+                label, load = pieces[idx]
+                toks = load()
+                if len(toks) >= b or args.val_index is not None:
+                    break  # random pick: retry pieces shorter than the prompt
+            rows.append(torch.from_numpy(toks[a:b]).long())
+            labels.append(f"notes {a}-{a + len(rows[-1])} of val piece #{idx}: {label}")
+        n = min(len(r) for r in rows)  # rows must share a length; only a fixed short --val-index can differ
+        toks = torch.stack([r[:n] for r in rows]).to(device)
+        return tuple(toks[:, :, j] for j in range(4)), labels
+    if args.prompt:
         tokens = tokenize_midi(args.prompt, velocity_bins=config.velocity_size,
                                max_duration_bin=config.duration_size - 1,
                                max_delta_bin=config.delta_time_size - 1)
-        pitch, velocity, duration, delta_time = (
-            t[a:b].unsqueeze(0).to(device) for t in tokens
-        )
-        print(f"Prompt: notes {a}-{a + pitch.size(1)} of {args.prompt}")
-    else:
-        # single-token seed (silent note)
-        pitch      = torch.zeros((1, 1), dtype=torch.long, device=device)
-        velocity   = torch.zeros((1, 1), dtype=torch.long, device=device)
-        duration   = torch.full((1, 1), 10, dtype=torch.long, device=device)
-        delta_time = torch.zeros((1, 1), dtype=torch.long, device=device)
+        streams = tuple(t[a:b].unsqueeze(0).expand(n_rows, -1).contiguous().to(device) for t in tokens)
+        return streams, [f"notes {a}-{a + streams[0].size(1)} of {args.prompt}"] * n_rows
+    # single-token seed (silent note)
+    z = lambda fill: torch.full((n_rows, 1), fill, dtype=torch.long, device=device)
+    return (z(0), z(0), z(10), z(0)), [None] * n_rows
+
+
+def generate_batch(model, config, args, pieces, seed, outs, device, progress=None):
+    torch.manual_seed(seed)
+    (pitch, velocity, duration, delta_time), labels = prompt_rows(config, args, pieces, seed, len(outs), device)
+    for out, label in zip(outs, labels):
+        if label:
+            print(f"Prompt for {out.name}: {label}")
     has_prompt = bool(pieces or args.prompt)
     target_nps = None
     if args.density == "prompt":
         if not has_prompt or pitch.size(1) < 2:
             raise SystemExit("--density prompt needs a prompt")
-        target_nps = pitch.size(1) / max(1e-3, delta_time[0, 1:].sum().item() * 0.02)
-        print(f"Density target: {target_nps:.1f} notes/s (from the prompt)")
+        secs = delta_time[:, 1:].sum(dim=1).float().clamp(min=1) * 0.02
+        target_nps = (pitch.size(1) / secs).tolist()
+        print("Density target (from the prompts): " + ", ".join(f"{t:.1f}" for t in target_nps) + " notes/s")
     elif args.density:
         target_nps = float(args.density)
     n_prompt = 0 if args.keep_prompt and has_prompt else pitch.size(1)
 
-    print(f"Generating {args.max_new_tokens} tokens on {device} (seed {seed})...")
+    print(f"Generating {args.max_new_tokens} notes x {len(outs)} rows on {device} (seed {seed})...")
+    t0 = time.time()
     with torch.no_grad():
         pitch, velocity, duration, delta_time = model.generate(
             pitch, velocity, duration, delta_time,
@@ -232,24 +255,20 @@ def generate_one(model, config, args, pieces, seed, out, device, progress=None):
             progress=progress,
             dt_bias=args.dt_bias,
             target_nps=target_nps,
+            cuda_graph=not args.no_cuda_graph,
         )
+    streams = [t.cpu() for t in (pitch, velocity, duration, delta_time)]
+    print(f"  {len(outs) * args.max_new_tokens / (time.time() - t0):.0f} notes/s")
 
-    # drop the seed / prompt unless --keep-prompt
-    midi = tokens_to_midi(
-        pitch[0, n_prompt:].cpu().tolist(),
-        velocity[0, n_prompt:].cpu().tolist(),
-        duration[0, n_prompt:].cpu().tolist(),
-        delta_time[0, n_prompt:].cpu().tolist(),
-        max_polyphony=args.max_polyphony,
-        max_delta=args.max_delta,
-    )
-
-    out.parent.mkdir(parents=True, exist_ok=True)
-    midi.write(str(out))
-    print(f"Saved MIDI → {out}")
-
-    if not args.no_mp3:
-        _render_mp3(out, args.soundfont)
+    for r, out in enumerate(outs):
+        # drop the seed / prompt unless --keep-prompt
+        midi = tokens_to_midi(*(s[r, n_prompt:].tolist() for s in streams),
+                              max_polyphony=args.max_polyphony, max_delta=args.max_delta)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        midi.write(str(out))
+        print(f"Saved MIDI → {out}")
+        if not args.no_mp3:
+            _render_mp3(out, args.soundfont)
 
 
 def _render_mp3(midi_path: Path, soundfont: str) -> None:

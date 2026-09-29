@@ -43,9 +43,10 @@ class CausalSelfAttention(nn.Module):
             self.register_buffer("bias", torch.tril(torch.ones(config.block_size, config.block_size))
                                         .view(1, 1, config.block_size, config.block_size))
 
-    def forward(self, x, cache=None):
-        """cache (inference only): dict per layer, filled with 'k'/'v' of all positions so far. With a cache, x is
-        either a prefill (empty cache) or one new position that attends to everything cached."""
+    def forward(self, x, cache=None, layer=0):
+        """cache (inference only): a KVCache with preallocated k/v buffers. x is either a prefill from position 0
+        (T > 1, causal) or one new position at cache.pos that attends to positions <= cache.pos (T == 1).
+        Shapes never change, so the one-position step can be captured in a CUDA graph."""
         B, T, C = x.size() # batch size, sequence length, embedding dimensionality (n_embd)
 
         # calculate query, key, values for all heads in batch and move head forward to be the batch dim
@@ -53,24 +54,28 @@ class CausalSelfAttention(nn.Module):
         k = k.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
         q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
         v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
-        causal = True
+        causal, mask = True, None
         if cache is not None:
-            if 'k' in cache:
-                assert T == 1, "a cached step feeds one position at a time"
-                k = torch.cat([cache['k'], k], dim=2)
-                v = torch.cat([cache['v'], v], dim=2)
-                causal = False  # the single new query may see every cached key
-            cache['k'], cache['v'] = k, v
+            ck, cv = cache.k[layer], cache.v[layer]
+            if T > 1:
+                ck[:, :, :T] = k
+                cv[:, :, :T] = v
+            else:
+                ck.index_copy_(2, cache.pos, k)
+                cv.index_copy_(2, cache.pos, v)
+                k, v, causal, mask = ck, cv, False, cache.mask  # attend to every filled position
 
         # causal self-attention; Self-attend: (B, nh, T, hs) x (B, nh, hs, T) -> (B, nh, T, T)
         if self.flash:
             # efficient attention using Flash Attention CUDA kernels
-            y = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=self.dropout if self.training else 0, is_causal=causal)
+            y = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=mask, dropout_p=self.dropout if self.training else 0, is_causal=causal)
         else:
             # manual implementation of attention
             att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
             if causal:
                 att = att.masked_fill(self.bias[:,:,:T,:T] == 0, float('-inf'))
+            elif mask is not None:
+                att = att.masked_fill(~mask, float('-inf'))
             att = F.softmax(att, dim=-1)
             att = self.attn_dropout(att)
             y = att @ v # (B, nh, T, T) x (B, nh, T, hs) -> (B, nh, T, hs)
@@ -143,8 +148,8 @@ class Block(nn.Module):
         self.ln_2 = LayerNorm(config.n_embd, bias=config.bias)
         self.mlp = MoEMLP(config) if config.moe_experts else MLP(config)
 
-    def forward(self, x, cache=None):
-        x = x + self.attn(self.ln_1(x), cache)
+    def forward(self, x, cache=None, layer=0):
+        x = x + self.attn(self.ln_1(x), cache, layer)
         x = x + self.mlp(self.ln_2(x))
         return x
 
@@ -297,6 +302,19 @@ class MusicEmbeddings(nn.Module):
         return x
 
 
+class KVCache:
+    """Preallocated keys/values for all layers (inference). pos = position of the next single-note step (a device
+    tensor, so a captured CUDA graph reads it at replay time); mask = which cache slots that step may attend to."""
+
+    def __init__(self, n_layer, batch, n_head, block_size, head_size, device, dtype):
+        shape = (n_layer, batch, n_head, block_size, head_size)
+        self.k = torch.zeros(shape, device=device, dtype=dtype)
+        self.v = torch.zeros(shape, device=device, dtype=dtype)
+        self.pos = torch.zeros(1, dtype=torch.long, device=device)
+        self.slots = torch.arange(block_size, device=device)
+        self.mask = torch.zeros(1, 1, 1, block_size, dtype=torch.bool, device=device)
+
+
 class GPT(nn.Module):
     def __init__(self, config):
         super().__init__()
@@ -352,16 +370,21 @@ class GPT(nn.Module):
         elif isinstance(module, nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
-    def _encode(self, pitch, velocity, duration, delta_time, caches=None, pos_offset=0):
+    def _encode(self, pitch, velocity, duration, delta_time, cache=None):
+        """cache=None: plain forward. With a KVCache: T > 1 = prefill from position 0, T == 1 = one step at cache.pos."""
         device = pitch.device
         b, t = pitch.size()
-        assert pos_offset + t <= self.config.block_size
-        seq_pos = torch.arange(pos_offset, pos_offset + t, dtype=torch.long, device=device)
+        assert t <= self.config.block_size
+        if cache is not None and t == 1:
+            seq_pos = cache.pos
+            cache.mask.copy_((cache.slots <= cache.pos).view(1, 1, 1, -1))
+        else:
+            seq_pos = torch.arange(0, t, dtype=torch.long, device=device)
         tok_emb = self.transformer.music_embeddings(pitch, velocity, duration, delta_time)
         pos_emb = self.transformer.wpe(seq_pos)
         x = self.transformer.drop(tok_emb + pos_emb)
         for i, block in enumerate(self.transformer.h):
-            x = block(x, caches[i] if caches is not None else None)
+            x = block(x, cache, i)
         return self.transformer.ln_f(x)
 
     def _head_logits(self, x, targets=None):
@@ -441,72 +464,118 @@ class GPT(nn.Module):
         return optimizer
     @torch.no_grad()
     def generate(self, pitch, velocity, duration, delta_time, max_new_tokens, temperature=0.85, top_k=None,
-                 anchor=0, slide=None, progress=None, dt_bias=0.0, target_nps=None, dt_seconds=0.02):
+                 anchor=0, slide=None, progress=None, dt_bias=0.0, target_nps=None, dt_seconds=0.02,
+                 cuda_graph=True):
         """
-        Sampling with a KV cache: each new note costs one position through the model, not a full re-run.
+        Batched sampling (B rows, same prompt length) with a preallocated KV cache: each new note costs one position
+        through the model, not a full re-run. On CUDA the one-note transformer step is captured once as a CUDA graph
+        and replayed (cuda_graph=True), which removes the per-kernel launch cost that dominates small-batch decode.
         Positions are learned up to block_size, so the window can't roll one note at a time with a cache (every
-        cached position would shift). When the cache is full it is rebuilt from a shorter window, making room
+        cached position would shift). When the cache is full it is refilled from a shorter window, making room
         for `slide` new notes (default block_size // 4, so the context stays between 3/4 and all of block_size).
         anchor > 0 (optional, off by default): the first `anchor` notes of the sequence (e.g. the prompt's theme)
-        stay pinned at the start of every rebuilt window, in front of the most recent notes.
+        stay pinned at the start of every refilled window, in front of the most recent notes.
         progress: optional callback(n_generated) after every note (e.g. a jobstatus.JobStatus update).
         Density control (no retraining; only the delta_time head is touched, every other choice stays the model's):
           dt_bias: fixed logit bias b * log(max(bin, 1)) on delta_time; b > 0 favours longer gaps = fewer notes/s.
-          target_nps: notes per second to track. A controller nudges the bias after every note from the running
-            density of the last 64 notes, starting at dt_bias. dt_seconds = seconds per delta_time bin.
+          target_nps: notes per second to track (a float, or one per row). A controller nudges each row's bias after
+            every note from the density of its last 64 notes, starting at dt_bias. dt_seconds = seconds per bin.
+        Nothing here syncs the GPU with the CPU inside the loop.
         """
         L = self.config.block_size
         slide = slide or L // 4
         assert 0 <= anchor and anchor + slide < L, "need anchor + slide < block_size"
-        streams = [pitch, velocity, duration, delta_time]
+        device = pitch.device
+        B, n0 = pitch.shape
+        total = n0 + max_new_tokens
+        # output buffers, filled in place (no growing torch.cat)
+        out = [torch.zeros(B, total, dtype=torch.long, device=device) for _ in range(4)]
+        for o, s in zip(out, (pitch, velocity, duration, delta_time)):
+            o[:, :n0] = s
 
-        bias = [float(dt_bias)]
         # log(bin), with bins 0 and 1 unbiased: longer gaps get likelier, but "same onset" (bin 0 = chord notes)
         # keeps its odds against the shortest gap, so chords aren't broken up into arpeggios
         dt_shape = torch.log(torch.arange(self.config.delta_time_size, dtype=torch.float32,
-                                          device=pitch.device).clamp(min=1))
+                                          device=device).clamp(min=1))
+        bias = torch.full((B, 1), float(dt_bias), device=device)
+        target = None
+        if target_nps is not None:
+            target = torch.as_tensor(target_nps, dtype=torch.float32, device=device).reshape(-1, 1).expand(B, 1)
 
         def sample(logits, name=None):  # (B, 1, vocab) → (B, 1)
-            logits = logits[:, -1, :] / temperature
-            if name == 'delta_time' and bias[0] != 0.0:
-                logits = logits + bias[0] * dt_shape.to(logits.dtype)
+            logits = logits[:, -1, :].float() / temperature
+            if name == 'delta_time' and (dt_bias != 0.0 or target is not None):
+                logits = logits + bias * dt_shape
             if top_k is not None:
                 v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
                 logits[logits < v[:, [-1]]] = -float('Inf')
             return torch.multinomial(F.softmax(logits, dim=-1), num_samples=1)
 
-        def prefill():
-            """New cache from the current window; returns the hidden state of its last position."""
-            n = streams[0].size(1)
+        dtype = next(self.parameters()).dtype
+        C = self.config.n_embd
+        cache = KVCache(self.config.n_layer, B, self.config.n_head, L, C // self.config.n_head, device, dtype)
+
+        def prefill(n):
+            """Refill the cache from the window ending at note n; returns (last hidden state, cache fill)."""
             if n <= L:
-                window = streams
+                window = [o[:, :n] for o in out]
             else:
                 recent = L - slide - anchor
-                window = [torch.cat([s[:, :anchor], s[:, -recent:]], dim=1) for s in streams]
-            caches = [{} for _ in self.transformer.h]
-            return caches, self._encode(*window, caches=caches)[:, [-1], :]
+                window = [torch.cat([o[:, :anchor], o[:, n - recent:n]], dim=1) for o in out]
+            w = window[0].size(1)
+            if w == 1:
+                cache.pos.fill_(0)  # a 1-note window goes through the single-step path at slot 0
+            return self._encode(*window, cache=cache)[:, [-1], :], w
 
-        caches, h = prefill()
+        # the one-note step: static inputs -> static output, optionally captured as a CUDA graph
+        step_in = [torch.zeros(B, 1, dtype=torch.long, device=device) for _ in range(4)]
+        graph = None
+        if cuda_graph and device.type == 'cuda':
+            stream = torch.cuda.Stream()
+            stream.wait_stream(torch.cuda.current_stream())
+            with torch.cuda.stream(stream):  # warm-up outside the graph (allocator, kernel selection)
+                for _ in range(2):
+                    self._encode(*step_in, cache=cache)
+            torch.cuda.current_stream().wait_stream(stream)
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph):
+                step_out = self._encode(*step_in, cache=cache)
+            # the warm-up and capture wrote junk into slot 0; prefill below overwrites every slot it uses
+
+        def step(new, pos):
+            for buf, t in zip(step_in, new):
+                buf.copy_(t)
+            cache.pos.fill_(pos)
+            if graph is not None:
+                graph.replay()
+                return step_out
+            return self._encode(*step_in, cache=cache)
+
+        h, filled = prefill(n0)
         for i in range(max_new_tokens):
             if self.config.cascade_heads:
                 nxt = self.cascade.sample(h, sample)
             else:
                 nxt = {name: sample(lg, name) for name, lg in self._head_logits(h).items()}
             new = [nxt[name] for name in STREAM_ORDER]
-            streams = [torch.cat([s, t], dim=1) for s, t in zip(streams, new)]
-            if target_nps:
-                # integral controller on log density (batch mean), bias kept in [-2, 6]
-                recent = streams[3][:, -64:].float().sum(dim=1).mean().item() * dt_seconds
-                nps = 1e3 if recent == 0 else min(streams[3].size(1), 64) / recent
-                bias[0] = min(6.0, max(-2.0, bias[0] + 0.05 * math.log(max(nps, 1e-3) / target_nps)))
+            n = n0 + i
+            for o, t in zip(out, new):
+                o[:, n:n + 1] = t
+            n += 1
+            if target is not None:
+                # per-row integral controller on log density, bias kept in [-2, 6]; stays on the GPU
+                w = min(n, 64)
+                secs = out[3][:, n - w:n].sum(dim=1, keepdim=True).float() * dt_seconds
+                nps = torch.where(secs > 0, w / secs.clamp(min=1e-6), torch.full_like(secs, 1e3))
+                bias.add_(0.05 * torch.log(nps.clamp(min=1e-3) / target)).clamp_(-2.0, 6.0)
             if progress is not None:
                 progress(i + 1)
             if i == max_new_tokens - 1:
                 break
-            cached = caches[0]['k'].size(2)
-            if cached < L:
-                h = self._encode(*new, caches=caches, pos_offset=cached)
+            if filled < L:
+                h = step(new, filled)
+                filled += 1
             else:
-                caches, h = prefill()
+                h, filled = prefill(n)
 
-        return tuple(streams)
+        return tuple(out)
