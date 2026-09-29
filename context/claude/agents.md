@@ -156,8 +156,7 @@ training mix.
 
 WSD schedule (constant LR, then decay to about 0 over the last about 15%) instead of cosine. Resumable checkpoints every about 30 min
 (`checkpoint_format='full'`). Grad-norm logging plus loss-spike skipping. No weight decay on embeddings and norms. Keep lr·wd with an
-EMA timescale of about 20–25% of the run. 64k–128k tokens/step (optionally ramped). Peak LR and optimizer from the queued sweep and the Muon
-A/B. Optional: weight EMA / checkpoint averaging, QK-LayerNorm. Model size from the iso-FLOP result, expected 60–115M.
+EMA timescale of about 20–25% of the run. 64k–128k tokens/step (optionally ramped). **Muon** (Moonlight-scaled) + AdamW for embeddings/heads, lr 6e-4 (maybe 1e-3, to check), fp8 + compile, dense trunk. Optional: weight EMA / checkpoint averaging, QK-LayerNorm. Model size from the iso-FLOP result, expected 60–115M.
 
 ## Hypotheses / next steps, ranked
 
@@ -165,6 +164,8 @@ A/B. Optional: weight EMA / checkpoint averaging, QK-LayerNorm. Model size from 
    needs ≥ 20 tokens/param. Size the 24 h run by tokens: about 2–3e18 FLOPs with boost → **about 70–100M params** at ≥ 20 tok/param
    (lower if an iso-S run shows the optimum is below M). The fixed-token ladder alone overstated the value of size.
 2. ✅ fp8 + compile adopted for the long run (+0.02 nats, −14% to −20% time).
+2b. ✅ **Muon adopted** (−0.54 Aria at L, about 2× token efficiency, +6% time/step). LR: AdamW flat at 6e-4 to 1e-3, 3e-4 too low.
+    Optional: check a higher LR for Muon (Moonlight scaling, e.g. 1e-3) before the 24 h run.
 3. ❌ Asymmetric pitch head rejected (+0.04). ❌ MoE rejected on this laptop (+0.10 per step, 2.5× slower). Scale the dense trunk.
 4. **Fine-tune stages:** Aria **pop+rock** subset (`prepare_aria.py --genres pop,rock` or filter `aria.csv`, about 77k files) as the middle
    domain → the Ukrainian reductions (song-level split, artist/style token, replay 10–30% pretraining data, LoRA or low LR).
@@ -240,6 +241,9 @@ pretraining and the Skryabin fine-tune, so there's a strong AR baseline to compa
 | 2026-09-28 | 9dv8hnzd (ab-cascade-v2) | f4ab505 | cascade v2 residual heads | 2.759 / **2.040** / **2.915** / **1.699** = **9.412** | now the default |
 | 2026-09-28 | ladder-S | bc8a5e0 | 6.1M, 100M tok, combined + Aria, dropout 0 | 2.735 / 2.082 / 2.919 / 1.703 = 9.438; Aria 8.613 | |
 | 2026-09-28 | ladder-M | bc8a5e0 | 20.2M (10L×384) | 2.428 / 2.030 / 2.826 / 1.607 = **8.891**; Aria **7.931** | −0.55 / −0.68 vs S |
+| 2026-09-29 | ladder-L-muon | 7c38542 | L with `optimizer_name=muon` (Moonlight-scaled, lr 6e-4, wd 0.1) | 1.974 / 1.978 / 2.713 / 1.497 = **8.162**; Aria **7.061** | **−0.54 Aria vs best AdamW**, only about 6% slower/step (25:41 vs 24:18). About 2× token efficiency (≈ AdamW iso-L at 194M tokens). **Adopt** |
+| 2026-09-29 | ladder-L-lr1e-3 | 7c38542 | L, AdamW lr 1e-3 (min 1e-4) | 2.286 / 1.999 / 2.777 / 1.564 = 8.626; Aria 7.598 | = lr 6e-4: flat optimum at ≥ 6e-4 |
+| 2026-09-29 | ladder-L-lr3e-4 | 7c38542 | L, AdamW lr 3e-4 (min 3e-5) | 2.376 / 2.042 / 2.838 / 1.615 = 8.871; Aria 7.920 | +0.32: too low |
 | 2026-09-29 | iso-M | 6497c76 | 20.2M, 400M tokens (13,020 it), compile, C≈4.85e16 | 1.905 / 1.940 / 2.667 / 1.438 = **7.949**; Aria **6.770** | **best model so far**. Beats ladder-XL (7.399) at similar compute |
 | 2026-09-29 | iso-L | 6497c76 | 41.7M, 194M tokens (6,315 it) | 1.988 / 1.956 / 2.691 / 1.468 = 8.104; Aria 6.954 | +0.18 vs iso-M |
 | 2026-09-29 | iso-XL | 6497c76 | 64.7M, 125M tokens (4,070 it) | 2.082 / 1.974 / 2.724 / 1.505 = 8.286; Aria 7.175 | +0.41 vs iso-M. Loss rises with size at fixed compute, so the optimum is ≤ 20M at C≈4.85e16 (≥ 20 tokens/param) |
