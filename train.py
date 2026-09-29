@@ -16,6 +16,7 @@ import os
 import time
 import math
 import random
+import sys
 from contextlib import nullcontext
 
 import torch
@@ -102,6 +103,7 @@ seed = 1337
 config_keys = [k for k, v in globals().items() if not k.startswith('_') and isinstance(v, (int, float, bool, str))]
 exec(open('configurator.py').read())  # overrides from command line or config file
 config = {k: globals()[k] for k in config_keys}  # logged to wandb and saved in checkpoints
+sys.stdout.reconfigure(line_buffering=True)  # eval lines reach a redirected log at once, not when an 8 KB buffer fills
 # -----------------------------------------------------------------------------
 
 print(f"Device: {device}")
