@@ -150,7 +150,7 @@ training mix.
 | 5 | ladder-L-moe8 (`--moe_experts=8 --moe_top_k=2`, 117M total / about 42M active) | `logs/ladder_L_moe8.log` | learned MoE. Compare per step **and** per wall-clock hour (eager, python loop over experts, expect about neutral per hour on this GPU) |
 | 6 | iso-FLOP at C ≈ 4.85e16: iso-M (20M, 400M tok, 13,020 it), iso-L (42M, 194M tok, 6,315 it), iso-XL (65M, 125M tok, 4,070 it), compile on | `logs/iso_*.log`, runner `logs/run_isoflop.sh` | which size wins at equal compute → overnight model size |
 | 7 | ladder-L-lr3e-4, ladder-L-lr1e-3, ladder-L-muon (`optimizer_name=muon`, Moonlight-scaled Muon for block matrices + AdamW rest, same lr/wd) | `logs/ladder_L_{lr3e-4,lr1e-3,muon}.log`, runner `logs/run_opt.sh` | best peak LR, and Muon vs AdamW (baseline ladder-L = AdamW 6e-4). Compare Muon per step **and** per hour: smoke on 6M was 12.85 vs 13.28 val after 60 steps but about 2× slower per step |
-| 8 | ladder-L-muon-lr1e-3 (iso-S-muon / iso-M-muon **cancelled by the user 2026-09-29**; the runner was killed, the LR run allowed to finish) | `logs/ladder_L_muon_lr1e-3.log`, `logs/iso_{S,M}_muon.log`, runner `logs/run_muon_checks.sh` | Muon LR, and does Muon shift the iso-FLOP size optimum (compare S vs M, both Muon) |
+| 8 | ladder-L-muon-lr1e-3 done. **iso-S-muon** (6M, 1.33B tok, 43,300 it, Muon lr 1e-3, compile) started on the user's request; iso-M-muon not run. Its only same-compute comparison is iso-M (AdamW 6e-4), so an optimizer change is mixed in | `logs/ladder_L_muon_lr1e-3.log`, `logs/iso_{S,M}_muon.log`, runner `logs/run_muon_checks.sh` | Muon LR, and does Muon shift the iso-FLOP size optimum (compare S vs M, both Muon) |
 | — | piano reduction of all downloaded songs | `logs/reduce.log` | ETA about 01:00–01:30. ТНМК songs may need one more `logs/run_reduce.sh` pass afterwards |
 
 ## Plan for the 24 h run (agreed direction, 2026-09-28)
@@ -242,6 +242,7 @@ pretraining and the Skryabin fine-tune, so there's a strong AR baseline to compa
 | 2026-09-28 | 9dv8hnzd (ab-cascade-v2) | f4ab505 | cascade v2 residual heads | 2.759 / **2.040** / **2.915** / **1.699** = **9.412** | now the default |
 | 2026-09-28 | ladder-S | bc8a5e0 | 6.1M, 100M tok, combined + Aria, dropout 0 | 2.735 / 2.082 / 2.919 / 1.703 = 9.438; Aria 8.613 | |
 | 2026-09-28 | ladder-M | bc8a5e0 | 20.2M (10L×384) | 2.428 / 2.030 / 2.826 / 1.607 = **8.891**; Aria **7.931** | −0.55 / −0.68 vs S |
+| 2026-09-29 | ladder-L-muon-lr1e-3 | d6c63c5 | L, Muon, lr 1e-3 (min 1e-4) | 1.913 / 1.961 / 2.684 / 1.473 = **8.032**; Aria **6.898** | **−0.16 vs Muon 6e-4**: Muon wants a higher LR (AdamW was flat 6e-4..1e-3). **New default: Muon lr 1e-3** |
 | 2026-09-29 | ladder-L-muon | 7c38542 | L with `optimizer_name=muon` (Moonlight-scaled, lr 6e-4, wd 0.1) | 1.974 / 1.978 / 2.713 / 1.497 = **8.162**; Aria **7.061** | **−0.54 Aria vs best AdamW**, only about 6% slower/step (25:41 vs 24:18). About 2× token efficiency (≈ AdamW iso-L at 194M tokens). **Adopt** |
 | 2026-09-29 | ladder-L-lr1e-3 | 7c38542 | L, AdamW lr 1e-3 (min 1e-4) | 2.286 / 1.999 / 2.777 / 1.564 = 8.626; Aria 7.598 | = lr 6e-4: flat optimum at ≥ 6e-4 |
 | 2026-09-29 | ladder-L-lr3e-4 | 7c38542 | L, AdamW lr 3e-4 (min 3e-5) | 2.376 / 2.042 / 2.838 / 1.615 = 8.871; Aria 7.920 | +0.32: too low |
