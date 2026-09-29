@@ -25,6 +25,8 @@ from rich.progress_bar import ProgressBar
 from rich.table import Table
 from rich.text import Text
 
+from jobstatus import read_jobs
+
 ROOT = Path(__file__).resolve().parent
 LOGS = ROOT / 'logs'
 
@@ -150,6 +152,41 @@ def pipeline_table():
     return t
 
 
+def fmt_secs(s):
+    s = int(s)
+    return f'{s // 3600}:{s % 3600 // 60:02d}:{s % 60:02d}' if s >= 3600 else f'{s // 60}:{s % 60:02d}'
+
+
+def jobs_table(keep=6):
+    """generate.py / sample_sweep.py runs (logs/jobs/*.json): all live ones plus the most recent finished ones."""
+    t = Table(title='Sampling jobs', expand=True, title_justify='left')
+    for col, kw in [('job', {}), ('pid', {'justify': 'right'}), ('state', {}), ('progress', {'ratio': 2}),
+                    ('notes', {'justify': 'right'}), ('speed', {'justify': 'right'}), ('ETA', {'justify': 'right'}),
+                    ('detail / result', {'ratio': 2})]:
+        t.add_column(col, **kw)
+    jobs = read_jobs()
+    alive = lambda j: Path(f"/proc/{j['pid']}").exists()
+    live = [j for j in jobs if not j['finished'] and alive(j)]
+    rest = [j for j in jobs if j not in live][-max(0, keep - len(live)):] if keep > len(live) else []
+    for j in rest + live:
+        elapsed = (j['updated'] if j['finished'] or not alive(j) else time.time()) - j['started']
+        rate = j['done'] / elapsed if elapsed > 0 else 0
+        if j['finished']:
+            state = Text('done', style='green')
+        elif alive(j):
+            state = Text('running', style='bold yellow')
+        else:
+            state = Text('died', style='red')
+        running_now = state.plain == 'running'
+        eta = fmt_secs((j['total'] - j['done']) / rate) if running_now and rate > 0 else ''
+        t.add_row(j['name'], str(j['pid']), state, ProgressBar(total=max(1, j['total']), completed=j['done']),
+                  f"{j['done']}/{j['total']}", f'{rate:.1f}/s' if rate else '', eta,
+                  j['result'] if j['finished'] else j['detail'])
+    if not jobs:
+        t.add_row('—', '', Text('none yet', style='dim'), '', '', '', '', 'generate.py / sample_sweep.py')
+    return t
+
+
 def system_panel():
     try:
         out = subprocess.run(['nvidia-smi', '--query-gpu=utilization.gpu,memory.used,memory.total,power.draw,'
@@ -167,7 +204,8 @@ def system_panel():
 
 
 def render():
-    return Group(Text(time.strftime('%H:%M:%S'), style='dim'), system_panel(), training_table(), pipeline_table())
+    return Group(Text(time.strftime('%H:%M:%S'), style='dim'), system_panel(), training_table(), jobs_table(),
+                 pipeline_table())
 
 
 def main():

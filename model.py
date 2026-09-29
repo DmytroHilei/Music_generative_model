@@ -259,11 +259,11 @@ class CascadeHeads(nn.Module):
         return logits
 
     def sample(self, h, sample_fn):
-        # h: (B, 1, C) -> dict name -> (B, 1)
+        # h: (B, 1, C) -> dict name -> (B, 1); sample_fn(logits, head_name)
         out = {}
         cond = h
         for name in CASCADE_ORDER:
-            out[name] = sample_fn(self.heads[name](cond))
+            out[name] = sample_fn(self.heads[name](cond), name)
             if name in self.cond_emb:
                 cond = cond + self.cond_emb[name](out[name])
         return out
@@ -441,7 +441,7 @@ class GPT(nn.Module):
         return optimizer
     @torch.no_grad()
     def generate(self, pitch, velocity, duration, delta_time, max_new_tokens, temperature=0.85, top_k=None,
-                 anchor=0, slide=None):
+                 anchor=0, slide=None, progress=None, dt_bias=0.0, target_nps=None, dt_seconds=0.02):
         """
         Sampling with a KV cache: each new note costs one position through the model, not a full re-run.
         Positions are learned up to block_size, so the window can't roll one note at a time with a cache (every
@@ -449,14 +449,27 @@ class GPT(nn.Module):
         for `slide` new notes (default block_size // 4, so the context stays between 3/4 and all of block_size).
         anchor > 0 (optional, off by default): the first `anchor` notes of the sequence (e.g. the prompt's theme)
         stay pinned at the start of every rebuilt window, in front of the most recent notes.
+        progress: optional callback(n_generated) after every note (e.g. a jobstatus.JobStatus update).
+        Density control (no retraining; only the delta_time head is touched, every other choice stays the model's):
+          dt_bias: fixed logit bias b * log(max(bin, 1)) on delta_time; b > 0 favours longer gaps = fewer notes/s.
+          target_nps: notes per second to track. A controller nudges the bias after every note from the running
+            density of the last 64 notes, starting at dt_bias. dt_seconds = seconds per delta_time bin.
         """
         L = self.config.block_size
         slide = slide or L // 4
         assert 0 <= anchor and anchor + slide < L, "need anchor + slide < block_size"
         streams = [pitch, velocity, duration, delta_time]
 
-        def sample(logits):  # (B, 1, vocab) → (B, 1)
+        bias = [float(dt_bias)]
+        # log(bin), with bins 0 and 1 unbiased: longer gaps get likelier, but "same onset" (bin 0 = chord notes)
+        # keeps its odds against the shortest gap, so chords aren't broken up into arpeggios
+        dt_shape = torch.log(torch.arange(self.config.delta_time_size, dtype=torch.float32,
+                                          device=pitch.device).clamp(min=1))
+
+        def sample(logits, name=None):  # (B, 1, vocab) → (B, 1)
             logits = logits[:, -1, :] / temperature
+            if name == 'delta_time' and bias[0] != 0.0:
+                logits = logits + bias[0] * dt_shape.to(logits.dtype)
             if top_k is not None:
                 v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
                 logits[logits < v[:, [-1]]] = -float('Inf')
@@ -478,9 +491,16 @@ class GPT(nn.Module):
             if self.config.cascade_heads:
                 nxt = self.cascade.sample(h, sample)
             else:
-                nxt = {name: sample(lg) for name, lg in self._head_logits(h).items()}
+                nxt = {name: sample(lg, name) for name, lg in self._head_logits(h).items()}
             new = [nxt[name] for name in STREAM_ORDER]
             streams = [torch.cat([s, t], dim=1) for s, t in zip(streams, new)]
+            if target_nps:
+                # integral controller on log density (batch mean), bias kept in [-2, 6]
+                recent = streams[3][:, -64:].float().sum(dim=1).mean().item() * dt_seconds
+                nps = 1e3 if recent == 0 else min(streams[3].size(1), 64) / recent
+                bias[0] = min(6.0, max(-2.0, bias[0] + 0.05 * math.log(max(nps, 1e-3) / target_nps)))
+            if progress is not None:
+                progress(i + 1)
             if i == max_new_tokens - 1:
                 break
             cached = caches[0]['k'].size(2)
