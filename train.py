@@ -148,7 +148,7 @@ train_dataset = MaestroDataset(csv_path, root_dir=root_dir, split='train', block
                                augment=True, cache_dir=cache_dir, special_tokens=special_tokens,
                                styles=styles, style_dropout=style_dropout, boundary_frac=boundary_frac,
                                aug_tempo=aug_tempo, aug_velocity=aug_velocity,
-                               aug_stores=[int(a) for a in aug_stores.split(',')] if aug_stores else None,
+                               aug_stores=[int(a) for a in str(aug_stores).strip('()[] ').split(',') if a.strip()] if aug_stores else None,
                                source_weights=[float(w) for w in source_weights.split(',')] if source_weights else None)
 
 
