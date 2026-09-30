@@ -63,6 +63,7 @@ RUNS = [
     ('ua-C tempo aug', 'ua_C_tempo.log', 'FT from B1'),
     ('ua-C tempo+vel aug', 'ua_C_tempovel.log', 'FT from B1'),
     ('ua-C seed 2 (noise)', 'ua_C_seed2.log', 'FT from B1'),
+    ('ua-C tempo aug, UA only', 'ua_C_tempo_ft.log', 'FT from B1'),
 ]
 
 TQDM = re.compile(r'Training:\s+(\d+)%\|[^|]*\|\s*(\d+)/(\d+) \[([\d:]+)<([\d:?]+),\s*([\d.?]+)(it/s|s/it)')
@@ -84,7 +85,8 @@ def running(pattern):
     return subprocess.run(['pgrep', '-f', pattern], capture_output=True).returncode == 0
 
 
-def training_table():
+def training_table(done_keep=None):
+    """All unfinished runs plus the last done_keep finished ones (None = all)."""
     t = Table(title='Training runs', expand=True, title_justify='left')
     for col, kw in [('run', {}), ('params', {'justify': 'right'}), ('state', {}), ('progress', {'ratio': 2}),
                     ('step', {'justify': 'right'}), ('speed', {'justify': 'right'}), ('ETA', {'justify': 'right'}),
@@ -98,10 +100,11 @@ def training_table():
             active.add(Path(os.readlink(f'/proc/{pid}/fd/1')).name)
         except OSError:
             pass
+    rows = []  # (finished?, cells)
     for label, log, params in RUNS:
         text = tail_text(LOGS / log)
         if not text or not text.strip():
-            t.add_row(label, params, Text('queued', style='dim'), '', '', '', '', '', '', '')
+            rows.append((False, (label, params, Text('queued', style='dim'), '', '', '', '', '', '', '')))
             continue
         bars = TQDM.findall(text)
         steps = STEP.findall(text)
@@ -119,8 +122,15 @@ def training_table():
         aria = s[7] if s and s[7] else ''
         heads = f'{s[3]}/{s[4]}/{s[5]}/{s[6]}' if s else ''
         prog = ProgressBar(total=tot, completed=tot if done else cur, width=None)
-        t.add_row(label, params, state, prog, f'{tot if done else cur}/{tot}', '' if done else speed,
-                  '' if done else eta, val, aria, heads)
+        rows.append((state.plain == 'done', (label, params, state, prog, f'{tot if done else cur}/{tot}',
+                                             '' if done else speed, '' if done else eta, val, aria, heads)))
+    finished = [i for i, (fin, _) in enumerate(rows) if fin]
+    hidden = set(finished[:-done_keep] if done_keep else finished) if done_keep is not None else set()
+    for i, (_, cells) in enumerate(rows):
+        if i not in hidden:
+            t.add_row(*cells)
+    if hidden:
+        t.caption = f'{len(hidden)} older finished runs hidden (status.py --all shows them)'
     return t
 
 
@@ -140,19 +150,27 @@ def pipeline_table():
     fetch_running = running('data/fetch_songs.py')
     # the fetch log prints "<artist>: N songs" when it starts an artist, so the artists before the last one are done
     fetch_log = next((LOGS / n for n in ('fetch2.log', 'fetch.log') if (LOGS / n).exists()), None)
-    started = re.findall(r'^(.+): (\d+) songs$', tail_text(fetch_log, 10_000_000) or '', re.M) if fetch_log else []
+    log_text = (tail_text(fetch_log, 10_000_000) or '') if fetch_log else ''
+    started = re.findall(r'^(.+): (\d+) songs$', log_text, re.M)
     started = [a for a, _ in started]
     if fetch_running:
         done_artists = max(0, len(started) - 1)
         current = started[-1] if started else 'searching'
         detail = f"{done_artists}/{len(artists)} artists; now: {current}"
+        pid = subprocess.run(['pgrep', '-of', 'data/fetch_songs.py'], capture_output=True, text=True).stdout.split()
+        etime = subprocess.run(['ps', '-o', 'etimes=', '-p', pid[0]], capture_output=True, text=True).stdout if pid else ''
+        if etime.strip() and done_artists:
+            per_artist_s = int(etime) / done_artists
+            detail += f"; {per_artist_s / 60:.0f} min/artist, ~{(len(artists) - done_artists) * per_artist_s / 3600:.1f} h left"
     else:
         done_artists = sum(1 for a in artists if per_artist.get(a, 0) > 0)
         missing = [a for a in artists if not per_artist.get(a, 0)]
         detail = f"{done_artists}/{len(artists)} artists" + (f"; none for: {', '.join(missing[:4])}" if missing else '')
     dl_state = Text('running', style='bold yellow') if fetch_running else Text('idle', style='dim')
+    # this run's new downloads: "[get ]" lines in its log minus the failed ones
+    new = log_text.count('[get ]') - log_text.count('FAILED')
     t.add_row('download', dl_state, ProgressBar(total=len(artists), completed=done_artists),
-              f'{sum(per_artist.values())} songs', detail)
+              f'{sum(per_artist.values())} songs (+{new} new)', detail)
 
     # reduction: pending = audio without its MIDI yet (with --delete-audio, reduced songs' mp3s are gone)
     audio = [(p, ROOT / 'data/finetune' / p.parent.name / 'midi' / f'{p.stem}.mid')
@@ -226,25 +244,27 @@ def system_panel():
     return Panel(Text(f'{gpu}\n') + Text(disk, style=style), title='System', title_align='left')
 
 
-def render():
-    return Group(Text(time.strftime('%H:%M:%S'), style='dim'), system_panel(), training_table(), jobs_table(),
-                 pipeline_table())
+def render(show_all=False):
+    # what is running comes first: the live view is cut at the terminal height
+    return Group(Text(time.strftime('%H:%M:%S'), style='dim'), system_panel(), pipeline_table(),
+                 training_table(None if show_all else 4), jobs_table(keep=6 if show_all else 2))
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--once', action='store_true')
     parser.add_argument('--interval', type=float, default=5)
+    parser.add_argument('--all', action='store_true', help='also show old finished runs and sampling jobs')
     args = parser.parse_args()
     if args.once:
         from rich.console import Console
-        Console().print(render())
+        Console().print(render(args.all))
         return
-    with Live(render(), refresh_per_second=1, screen=False) as live:
+    with Live(render(args.all), refresh_per_second=1, screen=False) as live:
         try:
             while True:
                 time.sleep(args.interval)
-                live.update(render())
+                live.update(render(args.all))
         except KeyboardInterrupt:
             pass
 

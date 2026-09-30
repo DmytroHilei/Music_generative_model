@@ -66,6 +66,7 @@ class MaestroDataset(Dataset):
         boundary_frac=0.0,
         aug_tempo=0.0,
         aug_velocity=0,
+        aug_stores=None,
     ):
         """
         csv_path:    one or more sources separated by ',': a CSV (paths inside relative to root_dir or absolute),
@@ -85,6 +86,9 @@ class MaestroDataset(Dataset):
                      [1/(1+aug_tempo), 1+aug_tempo] per window, with stochastic rounding (0 = off)
         aug_velocity: training only: shift all velocity bins of a window by up to ±aug_velocity, clamped to the
                      bin range (0 = off)
+        aug_stores:  optional 0/1 per store (same order as source_weights): which stores get the tempo/velocity
+                     augmentation (e.g. [1, 0] = only the fine-tune CSVs, the replay store stays real). Default: all.
+                     Transposition applies to every store regardless
         """
         sources = [s.strip() for s in str(csv_path).split(',') if s.strip()]
         self.csv_paths = [Path(s) for s in sources if not s.startswith('store:')]
@@ -101,6 +105,7 @@ class MaestroDataset(Dataset):
         self.augment = augment
         self.aug_tempo = aug_tempo
         self.aug_velocity = aug_velocity
+        self.aug_stores = aug_stores
         self.cache_dir = Path(cache_dir)
         self.eval_stride = eval_stride
 
@@ -148,6 +153,8 @@ class MaestroDataset(Dataset):
             self.store_file_range = [(int(np.searchsorted(self.store_ids, i, 'left')),
                                       int(np.searchsorted(self.store_ids, i, 'right'))) for i in ids]
             self.source_weights = [float(w) for w in source_weights]
+        if aug_stores is not None:
+            assert len(aug_stores) == len(self.store_dirs), f"{len(aug_stores)} aug_stores for {len(self.store_dirs)} stores"
         # number of valid window starts per file, cumulative (for uniform sampling over all positions)
         self.cum_valid = np.cumsum(self.lengths - self.block_size)
 
@@ -305,11 +312,12 @@ class MaestroDataset(Dataset):
             lo, hi = int(pitch[notes].min()), int(pitch[notes].max())
             shift = random.randint(max(-5, -lo), min(5, 127 - hi))
             pitch = torch.where(notes, pitch + shift, pitch)
-            if self.aug_tempo:
+            store_augmented = self.aug_stores is None or bool(self.aug_stores[int(self.store_ids[file_idx])])
+            if self.aug_tempo and store_augmented:
                 s = (1 + self.aug_tempo) ** random.uniform(-1, 1)
                 duration = self._stretch(duration, s, self.max_duration_bin)
                 delta_time = self._stretch(delta_time, s, self.max_delta_bin)
-            if self.aug_velocity:
+            if self.aug_velocity and store_augmented:
                 # symmetric shift, clamped: a no-clip bound would bias it downwards (-0.9 bins on the reductions), since
                 # most windows hold a few melody notes saturated at the top bin (the melody boost clips at 127)
                 shift = random.randint(-self.aug_velocity, self.aug_velocity)
