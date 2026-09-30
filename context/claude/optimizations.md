@@ -18,7 +18,7 @@ first (item T1) before building anything. Hardware: RTX 5060 Laptop (sm_120, 8 G
 | fp8 + torch.compile (training) | +20% tokens/s at L, −25% memory |
 | KV cache (inference) | 3.8× on CPU at 200 notes; preallocated static cache since 2026-09-29 |
 | Batched generation (inference) | `generate.py --num-samples N [--batch-size B]`. On GPU (shared with training): 283 notes/s at B=1 → 1,753 at B=8 → 3,323 at B=32 |
-| CUDA-graph decode (inference) | one-note transformer step captured once and replayed (`--no-cuda-graph` to disable). Same notes as eager. **Speedup still unmeasured**: with training on the GPU the step is ~3 ms either way (time-slicing dominates). Re-benchmark on an idle GPU; the weight-read floor is ~0.6 ms/step for 107M bf16 |
+| CUDA-graph decode (inference) | one-note transformer step captured once and replayed (`--no-cuda-graph` to disable), same notes as eager. **Measured on the idle GPU (2026-09-30): 1.22× at B=1 (514 → 630 notes/s), none in batches** (not launch-bound there). Roofline share: 39% at B=1, 60% at B=128 |
 | bf16 inference on CUDA | `generate.py --dtype auto` (bf16 on CUDA, fp32 on CPU) |
 
 ## Training backlog
