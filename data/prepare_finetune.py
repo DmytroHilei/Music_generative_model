@@ -55,7 +55,8 @@ def main():
             title = by_id[m.group(1)]
         else:
             title = re.sub(r'\(meloua\.com\)', '', midi.stem)
-            title = re.sub(r'^(iryna-bilyk-)?skryabin-', '', title).replace('-', ' ')
+            title = re.sub(r'^(iryna-bilyk-)?skryabin-', '', title).replace('-', ' ') if 'meloua' in midi.stem \
+                else re.split(r'\s[-–—]\s', title, maxsplit=1)[-1]  # "Скрябін - Title" / "Скрябін, X - Title"
         key = (artist, norm_title(title))
         if key in seen:
             dupes.append((midi.name, seen[key]))

@@ -56,6 +56,8 @@ RUNS = [
     ('ua-A lr3e-4', 'ua_A_lr3e-4.log', 'FT 107M'),
     ('ua-A lr1e-3', 'ua_A_lr1e-3.log', 'FT 107M'),
     ('poprock-B1', 'poprock_B1.log', '107M 203Mt'),
+    ('ua-A2 (fixed split)', 'ua_A2.log', 'FT 107M'),
+    ('ua-B2', 'ua_B2.log', 'FT from B1'),
 ]
 
 TQDM = re.compile(r'Training:\s+(\d+)%\|[^|]*\|\s*(\d+)/(\d+) \[([\d:]+)<([\d:?]+),\s*([\d.?]+)(it/s|s/it)')
@@ -81,7 +83,7 @@ def training_table():
     t = Table(title='Training runs', expand=True, title_justify='left')
     for col, kw in [('run', {}), ('params', {'justify': 'right'}), ('state', {}), ('progress', {'ratio': 2}),
                     ('step', {'justify': 'right'}), ('speed', {'justify': 'right'}), ('ETA', {'justify': 'right'}),
-                    ('val CE', {'justify': 'right'}), ('aria CE', {'justify': 'right'}),
+                    ('val CE', {'justify': 'right'}), ('val2 CE', {'justify': 'right'}),
                     ('pit/vel/dur/dt', {'justify': 'right'})]:
         t.add_column(col, **kw)
     # a run is live if some train.py process has its stdout on that log (works for --out_dir and config-file runs)
