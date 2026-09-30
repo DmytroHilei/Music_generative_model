@@ -58,6 +58,8 @@ RUNS = [
     ('poprock-B1', 'poprock_B1.log', '107M 203Mt'),
     ('ua-A2 (fixed split)', 'ua_A2.log', 'FT 107M'),
     ('ua-B2', 'ua_B2.log', 'FT from B1'),
+    ('ua-B3 style x10', 'ua_B3_x10.log', 'FT from B1'),
+    ('ua-B3 style x30', 'ua_B3_x30.log', 'FT from B1'),
 ]
 
 TQDM = re.compile(r'Training:\s+(\d+)%\|[^|]*\|\s*(\d+)/(\d+) \[([\d:]+)<([\d:?]+),\s*([\d.?]+)(it/s|s/it)')
