@@ -50,6 +50,8 @@ style_map = ''            # e.g. 'data/styles.json': conditioning on genre/artis
 style_lr_mult = 1.0       # Muon runs: LR multiplier for the style table (own AdamW group, no weight decay)
 style_dropout = 0.1       # training: probability of dropping the style to 'none' (keeps an unconditional mode)
 boundary_frac = 0.1       # with special_tokens: share of train windows placed at a piece's start/end
+aug_tempo = 0.0           # training: time stretch up to x(1+aug_tempo) either way per window (0 = off)
+aug_velocity = 0          # training: velocity shift up to ±N bins (of 32) per window, clamped (0 = off)
 source_weights = ''       # e.g. '0.8,0.2': sampling weight per train store (CSVs = one store, then each store:); '' = by size
 batch_size = 6
 block_size = 512
@@ -144,6 +146,7 @@ def collate_fn(batch):
 train_dataset = MaestroDataset(csv_path, root_dir=root_dir, split='train', block_size=block_size,
                                augment=True, cache_dir=cache_dir, special_tokens=special_tokens,
                                styles=styles, style_dropout=style_dropout, boundary_frac=boundary_frac,
+                               aug_tempo=aug_tempo, aug_velocity=aug_velocity,
                                source_weights=[float(w) for w in source_weights.split(',')] if source_weights else None)
 
 

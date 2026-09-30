@@ -60,6 +60,9 @@ RUNS = [
     ('ua-B2', 'ua_B2.log', 'FT from B1'),
     ('ua-B3 style x10', 'ua_B3_x10.log', 'FT from B1'),
     ('ua-B3 style x30', 'ua_B3_x30.log', 'FT from B1'),
+    ('ua-C tempo aug', 'ua_C_tempo.log', 'FT from B1'),
+    ('ua-C tempo+vel aug', 'ua_C_tempovel.log', 'FT from B1'),
+    ('ua-C seed 2 (noise)', 'ua_C_seed2.log', 'FT from B1'),
 ]
 
 TQDM = re.compile(r'Training:\s+(\d+)%\|[^|]*\|\s*(\d+)/(\d+) \[([\d:]+)<([\d:?]+),\s*([\d.?]+)(it/s|s/it)')
@@ -135,28 +138,40 @@ def pipeline_table():
     artists = [line.split('|')[0].strip() for line in open(ROOT / 'data/artists.txt', encoding='utf-8')
                if line.strip() and not line.startswith('#')]
     fetch_running = running('data/fetch_songs.py')
-    # an artist counts as done when it has songs and no download is running (some bands have < 25 uploads)
-    done_artists = sum(1 for a in artists if per_artist.get(a, 0) >= (20 if fetch_running else 1))
-    dl_state = Text('running', style='bold yellow') if running('data/fetch_songs.py') else Text('idle', style='dim')
-    missing = [a for a in artists if per_artist.get(a, 0) < (20 if fetch_running else 1)]
+    # the fetch log prints "<artist>: N songs" when it starts an artist, so the artists before the last one are done
+    fetch_log = next((LOGS / n for n in ('fetch2.log', 'fetch.log') if (LOGS / n).exists()), None)
+    started = re.findall(r'^(.+): (\d+) songs$', tail_text(fetch_log, 10_000_000) or '', re.M) if fetch_log else []
+    started = [a for a, _ in started]
+    if fetch_running:
+        done_artists = max(0, len(started) - 1)
+        current = started[-1] if started else 'searching'
+        detail = f"{done_artists}/{len(artists)} artists; now: {current}"
+    else:
+        done_artists = sum(1 for a in artists if per_artist.get(a, 0) > 0)
+        missing = [a for a in artists if not per_artist.get(a, 0)]
+        detail = f"{done_artists}/{len(artists)} artists" + (f"; none for: {', '.join(missing[:4])}" if missing else '')
+    dl_state = Text('running', style='bold yellow') if fetch_running else Text('idle', style='dim')
     t.add_row('download', dl_state, ProgressBar(total=len(artists), completed=done_artists),
-              f'{sum(per_artist.values())} songs', f"{done_artists}/{len(artists)} artists; "
-              f"left: {', '.join(missing[:4])}{'…' if len(missing) > 4 else ''}")
+              f'{sum(per_artist.values())} songs', detail)
 
-    # reduction
-    audio = [p for p in (ROOT / 'data/audio').glob('*/*.mp3') if p.parent.name != 'skryabin_test']
-    audio += list((ROOT / 'Skryabin').glob('*.mp3'))
+    # reduction: pending = audio without its MIDI yet (with --delete-audio, reduced songs' mp3s are gone)
+    audio = [(p, ROOT / 'data/finetune' / p.parent.name / 'midi' / f'{p.stem}.mid')
+             for p in (ROOT / 'data/audio').glob('*/*.mp3') if p.parent.name != 'skryabin_test']
+    audio += [(p, ROOT / 'data/finetune/skryabin_local/midi' / f'{p.stem}.mid') for p in (ROOT / 'Skryabin').glob('*.mp3')]
+    pending = sum(1 for _, midi in audio if not midi.exists())
     reduced = [p for p in (ROOT / 'data/finetune').glob('*/midi/*.mid') if p.parts[-3] != 'skryabin_test']
-    red_state = Text('running', style='bold yellow') if running('run_reduce.sh') else Text('idle', style='dim')
+    red_running = running('run_reduce.sh') or running('run_fetch_reduce2.sh')
+    red_state = Text('running', style='bold yellow') if red_running else Text('idle', style='dim')
     rate = ''
     recent = [p.stat().st_mtime for p in reduced if time.time() - p.stat().st_mtime < 900]
     if len(recent) >= 2:
         per_song = (max(recent) - min(recent)) / (len(recent) - 1)
-        left = max(0, len(audio) - len(reduced))
-        rate = f'{per_song:.0f} s/song, ~{left * per_song / 60:.0f} min left for {left} songs'
-    failed = (tail_text(LOGS / 'reduce.log') or '').count('FAILED')
-    t.add_row('piano reduction', red_state, ProgressBar(total=max(1, len(audio)), completed=len(reduced)),
-              f'{len(reduced)}/{len(audio)}', rate + (f'; {failed} failed' if failed else ''))
+        rate = f'{per_song:.0f} s/song, ~{pending * per_song / 60:.0f} min left for {pending} downloaded songs'
+    elif pending:
+        rate = f'{pending} downloaded songs waiting'
+    failed = sum((tail_text(LOGS / n) or '').count('FAILED') for n in ('reduce.log', 'reduce2.log'))
+    t.add_row('piano reduction', red_state, ProgressBar(total=max(1, len(reduced) + pending), completed=len(reduced)),
+              f'{len(reduced)}/{len(reduced) + pending}', rate + (f'; {failed} failed' if failed else ''))
     return t
 
 

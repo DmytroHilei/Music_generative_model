@@ -64,6 +64,8 @@ class MaestroDataset(Dataset):
         styles=None,
         style_dropout=0.0,
         boundary_frac=0.0,
+        aug_tempo=0.0,
+        aug_velocity=0,
     ):
         """
         csv_path:    one or more sources separated by ',': a CSV (paths inside relative to root_dir or absolute),
@@ -79,6 +81,10 @@ class MaestroDataset(Dataset):
                      style_dropout: probability (training only) of replacing it with 0 = unconditional
         boundary_frac: training only, with special_tokens: this fraction of windows is placed exactly at a piece's
                      start (half) or end (half), so openings and EOS are seen often (otherwise ~0.2% of windows)
+        aug_tempo:   training only: stretch time (duration and delta_time) by a log-uniform factor in
+                     [1/(1+aug_tempo), 1+aug_tempo] per window, with stochastic rounding (0 = off)
+        aug_velocity: training only: shift all velocity bins of a window by up to ±aug_velocity, clamped to the
+                     bin range (0 = off)
         """
         sources = [s.strip() for s in str(csv_path).split(',') if s.strip()]
         self.csv_paths = [Path(s) for s in sources if not s.startswith('store:')]
@@ -93,6 +99,8 @@ class MaestroDataset(Dataset):
         self.max_delta_bin = max_delta_bin
         self.debug = debug
         self.augment = augment
+        self.aug_tempo = aug_tempo
+        self.aug_velocity = aug_velocity
         self.cache_dir = Path(cache_dir)
         self.eval_stride = eval_stride
 
@@ -297,6 +305,15 @@ class MaestroDataset(Dataset):
             lo, hi = int(pitch[notes].min()), int(pitch[notes].max())
             shift = random.randint(max(-5, -lo), min(5, 127 - hi))
             pitch = torch.where(notes, pitch + shift, pitch)
+            if self.aug_tempo:
+                s = (1 + self.aug_tempo) ** random.uniform(-1, 1)
+                duration = self._stretch(duration, s, self.max_duration_bin)
+                delta_time = self._stretch(delta_time, s, self.max_delta_bin)
+            if self.aug_velocity:
+                # symmetric shift, clamped: a no-clip bound would bias it downwards (-0.9 bins on the reductions), since
+                # most windows hold a few melody notes saturated at the top bin (the melody boost clips at 127)
+                shift = random.randint(-self.aug_velocity, self.aug_velocity)
+                velocity = torch.where(notes, (velocity + shift).clamp(0, self.velocity_bins - 1), velocity)
 
         x, y = self._split_xy((pitch, velocity, duration, delta_time))
         if self.file_style is not None:
@@ -305,6 +322,14 @@ class MaestroDataset(Dataset):
                 style = 0
             x = x + (torch.tensor(style),)
         return x, y
+
+    @staticmethod
+    def _stretch(bins, s, max_bin):
+        # stochastic rounding keeps the stretched bins unbiased and avoids a lattice of empty bins; 0 (chords) stays 0
+        scaled = bins.double() * s
+        low = scaled.floor()
+        out = low + (torch.rand_like(scaled) < scaled - low).double()
+        return out.long().clamp(max=max_bin)
 
     def _split_xy(self, tokens):
         x = tuple(t[:-1] for t in tokens)
