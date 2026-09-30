@@ -12,7 +12,7 @@ import torch
 
 from jobstatus import JobStatus
 from model import GPT, MusicConfig
-from data_loader import tokenize_midi
+from data_loader import tokenize_midi, load_styles, BOS_PITCH, EOS_PITCH
 
 
 def parse_args():
@@ -61,6 +61,11 @@ def parse_args():
     parser.add_argument("--anchor", type=int, default=0,
                         help="optional, off by default: pin the first N notes (e.g. the prompt's theme) at the start "
                              "of the context once generation runs past the 512-note window")
+    parser.add_argument("--style", type=str, default=None,
+                        help="models trained with styles: a name from data/styles.json (genre or artist, e.g. pop, "
+                             "Скрябін) or 'none' (default: none = unconditional)")
+    parser.add_argument("--min-notes", type=int, default=0,
+                        help="models with BOS/EOS: don't allow the end token before this many new notes")
     parser.add_argument("--density", type=str, default=None,
                         help="optional: steer notes per second without retraining. A number (e.g. 5) or 'prompt' = "
                              "match the prompt's own density. Only the delta_time head is biased")
@@ -196,7 +201,16 @@ def main():
 
 
 def prompt_rows(config, args, pieces, seed, n_rows, device):
-    """(pitch, velocity, duration, delta_time) each (n_rows, T), one prompt per row, and a label per row."""
+    """(pitch, velocity, duration, delta_time) each (n_rows, T), one prompt per row, and a label per row.
+    Models with BOS/EOS get BOS in front of a prompt that starts at the beginning of its piece, and BOS as the seed."""
+    streams, labels = _prompt_rows(config, args, pieces, seed, n_rows, device)
+    if config.pitch_size > BOS_PITCH and (args.prompt_start == 0 or streams[0].size(1) == 0):
+        bos = [torch.full((n_rows, 1), BOS_PITCH if j == 0 else 0, dtype=torch.long, device=device) for j in range(4)]
+        streams = tuple(torch.cat([b, s], dim=1) for b, s in zip(bos, streams))
+    return streams, labels
+
+
+def _prompt_rows(config, args, pieces, seed, n_rows, device):
     a, b = args.prompt_start, args.prompt_start + args.prompt_notes
     if pieces:
         rng = random.Random(seed)
@@ -219,7 +233,9 @@ def prompt_rows(config, args, pieces, seed, n_rows, device):
                                max_delta_bin=config.delta_time_size - 1)
         streams = tuple(t[a:b].unsqueeze(0).expand(n_rows, -1).contiguous().to(device) for t in tokens)
         return streams, [f"notes {a}-{a + streams[0].size(1)} of {args.prompt}"] * n_rows
-    # single-token seed (silent note)
+    if config.pitch_size > BOS_PITCH:
+        return tuple(torch.zeros((n_rows, 0), dtype=torch.long, device=device) for _ in range(4)), [None] * n_rows
+    # single-token seed (silent note) for models without BOS
     z = lambda fill: torch.full((n_rows, 1), fill, dtype=torch.long, device=device)
     return (z(0), z(0), z(10), z(0)), [None] * n_rows
 
@@ -231,11 +247,21 @@ def generate_batch(model, config, args, pieces, seed, outs, device, progress=Non
         if label:
             print(f"Prompt for {out.name}: {label}")
     has_prompt = bool(pieces or args.prompt)
+    style = None
+    if config.n_styles:
+        names = load_styles()
+        name = args.style or 'none'
+        if name not in names:
+            raise SystemExit(f"unknown style {name!r}; choose from: {', '.join(names)}")
+        style = names.index(name)
+        print(f"Style: {name} (id {style})")
+    elif args.style:
+        raise SystemExit("this checkpoint was trained without styles")
     target_nps = None
     if args.density == "prompt":
         if not has_prompt or pitch.size(1) < 2:
             raise SystemExit("--density prompt needs a prompt")
-        secs = delta_time[:, 1:].sum(dim=1).float().clamp(min=1) * 0.02
+        secs = delta_time[:, 1:].sum(dim=1).float().clamp(min=1) * 0.02  # (a BOS row adds 0 time)
         target_nps = (pitch.size(1) / secs).tolist()
         print("Density target (from the prompts): " + ", ".join(f"{t:.1f}" for t in target_nps) + " notes/s")
     elif args.density:
@@ -256,14 +282,23 @@ def generate_batch(model, config, args, pieces, seed, outs, device, progress=Non
             dt_bias=args.dt_bias,
             target_nps=target_nps,
             cuda_graph=not args.no_cuda_graph,
+            style=style,
+            min_new=args.min_notes,
         )
     streams = [t.cpu() for t in (pitch, velocity, duration, delta_time)]
     print(f"  {len(outs) * args.max_new_tokens / (time.time() - t0):.0f} notes/s")
 
     for r, out in enumerate(outs):
-        # drop the seed / prompt unless --keep-prompt
-        midi = tokens_to_midi(*(s[r, n_prompt:].tolist() for s in streams),
-                              max_polyphony=args.max_polyphony, max_delta=args.max_delta)
+        # drop the seed / prompt unless --keep-prompt; cut at the first EOS; drop BOS/EOS rows
+        rows = [s[r, n_prompt:].tolist() for s in streams]
+        new = streams[0][r, streams[0].size(1) - args.max_new_tokens:].tolist()
+        if EOS_PITCH in new:
+            cut = len(rows[0]) - (len(new) - new.index(EOS_PITCH))
+            rows = [x[:cut] for x in rows]
+            print(f"  {out.name}: ended with EOS after {new.index(EOS_PITCH)} new notes")
+        keep = [i for i, p in enumerate(rows[0]) if p < BOS_PITCH]
+        rows = [[x[i] for i in keep] for x in rows]
+        midi = tokens_to_midi(*rows, max_polyphony=args.max_polyphony, max_delta=args.max_delta)
         out.parent.mkdir(parents=True, exist_ok=True)
         midi.write(str(out))
         print(f"Saved MIDI → {out}")

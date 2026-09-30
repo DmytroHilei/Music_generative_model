@@ -52,6 +52,10 @@ RUNS = [
     ('iso-M-muon', 'iso_M_muon.log', '20M 400Mt'),
     ('iso-L-muon', 'iso_L_muon.log', '42M 194Mt'),
     ('big-107M', 'big_107M.log', '107M 2.33Bt'),
+    ('ua-A lr1e-4', 'ua_A_lr1e-4.log', 'FT 107M'),
+    ('ua-A lr3e-4', 'ua_A_lr3e-4.log', 'FT 107M'),
+    ('ua-A lr1e-3', 'ua_A_lr1e-3.log', 'FT 107M'),
+    ('poprock-B1', 'poprock_B1.log', '107M 203Mt'),
 ]
 
 TQDM = re.compile(r'Training:\s+(\d+)%\|[^|]*\|\s*(\d+)/(\d+) \[([\d:]+)<([\d:?]+),\s*([\d.?]+)(it/s|s/it)')

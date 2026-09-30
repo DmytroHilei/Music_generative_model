@@ -14,6 +14,15 @@ from torch.utils.data import Dataset
 from tqdm import tqdm
 
 
+BOS_PITCH, EOS_PITCH = 128, 129       # special "notes" when special_tokens=True (pitch vocab 130)
+DEFAULT_CSV_STYLE = {'combined': 'classical'}   # style of CSV sources without a style/artist column
+DEFAULT_STORE_STYLE = 'none'
+
+
+def load_styles(path='data/styles.json'):
+    return json.loads(Path(path).read_text())
+
+
 class MaestroDataset(Dataset):
     """
     Dataset of MIDI files listed in one or more CSVs (columns: split, midi_filename).
@@ -50,11 +59,26 @@ class MaestroDataset(Dataset):
         augment=False,
         cache_dir="data/cache",
         eval_stride=None,
+        source_weights=None,
+        special_tokens=False,
+        styles=None,
+        style_dropout=0.0,
+        boundary_frac=0.0,
     ):
         """
         csv_path:    one or more sources separated by ',': a CSV (paths inside relative to root_dir or absolute),
                      or 'store:<prefix>' = a prebuilt token store <prefix>_<split>/ (e.g. from data/prepare_aria.py)
         eval_stride: if set, the dataset is deterministic (no randomness, no augmentation): use it for validation
+        source_weights: optional sampling weight per store (the CSV sources form one store, first; then each
+                     'store:' source in order). Default: uniform over all note positions, i.e. by size. Use it to mix a
+                     small fine-tune set with replay, e.g. [0.8, 0.2]
+        special_tokens: every file is read as [BOS] + notes + [EOS] (pitch BOS_PITCH / EOS_PITCH, other attributes 0),
+                     without touching the token stores
+        styles:      a style vocabulary (list of names, index 0 = 'none'): each window then also returns the style id of
+                     its file (CSV column 'style', else 'artist', else DEFAULT_CSV_STYLE; store metadata 'genre').
+                     style_dropout: probability (training only) of replacing it with 0 = unconditional
+        boundary_frac: training only, with special_tokens: this fraction of windows is placed exactly at a piece's
+                     start (half) or end (half), so openings and EOS are seen often (otherwise ~0.2% of windows)
         """
         sources = [s.strip() for s in str(csv_path).split(',') if s.strip()]
         self.csv_paths = [Path(s) for s in sources if not s.startswith('store:')]
@@ -72,9 +96,14 @@ class MaestroDataset(Dataset):
         self.cache_dir = Path(cache_dir)
         self.eval_stride = eval_stride
 
-        self.store_dirs = []
+        self.pad = 1 if special_tokens else 0
+        self.style_dropout = style_dropout
+        self.boundary_frac = boundary_frac if special_tokens else 0.0
+        self.style_ids = {name: i for i, name in enumerate(styles)} if styles else None
+        self.store_dirs, file_styles = [], []
         if self.csv_paths:
             self.midi_paths = self._load_midi_paths()
+            file_styles.append(self.midi_styles)
             self.store_dirs.append(self._build_store())
         for store in prebuilt:
             if not (store / "meta.json").exists():
@@ -82,35 +111,61 @@ class MaestroDataset(Dataset):
             meta = json.loads((store / "meta.json").read_text())
             print(f"Loaded tokenized {self.split}: {meta['n_files']:,} files, {meta['n_notes']:,} notes from {store}")
             self.store_dirs.append(store)
+            file_styles.append(self._store_styles(store, meta['n_files']))
         self._tokens = None  # memmaps, opened lazily in each DataLoader worker
 
-        store_ids, starts, lengths = [], [], []
+        store_ids, starts, lengths, styles_kept = [], [], [], []
         for i, store in enumerate(self.store_dirs):
             offsets = np.load(store / "offsets.npy")
-            n = np.diff(offsets)
+            n = np.diff(offsets) + 2 * self.pad  # virtual length incl. BOS/EOS
             keep = n > self.block_size  # need block_size + 1 notes because targets are shifted by one
             store_ids.append(np.full(int(keep.sum()), i, dtype=np.int32))
             starts.append(offsets[:-1][keep])
             lengths.append(n[keep])
+            if self.style_ids is not None:
+                ids = np.array([self.style_ids.get(x, 0) for x in file_styles[i]], dtype=np.int64)
+                assert len(ids) == len(n), f"{store}: {len(ids)} style entries for {len(n)} files"
+                styles_kept.append(ids[keep])
         self.store_ids, self.starts, self.lengths = map(np.concatenate, (store_ids, starts, lengths))
+        self.file_style = np.concatenate(styles_kept) if self.style_ids is not None else None
         if len(self.lengths) == 0:
             raise ValueError("No MIDI sequences longer than block_size. Reduce block_size or check the data.")
         self.n_files = len(self.lengths)
+        self.source_weights = None
+        if source_weights is not None and not eval_stride:
+            assert len(source_weights) == len(self.store_dirs), \
+                f"{len(source_weights)} source_weights for {len(self.store_dirs)} stores"
+            ids = np.arange(len(self.store_dirs))
+            # files of one store are contiguous (stores are concatenated in order)
+            self.store_file_range = [(int(np.searchsorted(self.store_ids, i, 'left')),
+                                      int(np.searchsorted(self.store_ids, i, 'right'))) for i in ids]
+            self.source_weights = [float(w) for w in source_weights]
         # number of valid window starts per file, cumulative (for uniform sampling over all positions)
         self.cum_valid = np.cumsum(self.lengths - self.block_size)
 
         if eval_stride:
-            # (store, start) pairs; order = sources in the given order, files in store order
+            # (file index, offset in the file's virtual sequence); order = sources in order, files in store order
             self.windows = np.concatenate([
-                np.stack([np.full(len(r), sid), r], axis=1)
-                for sid, s, n in zip(self.store_ids, self.starts, self.lengths)
-                for r in [np.arange(s, s + n - self.block_size, eval_stride)]
+                np.stack([np.full(len(r), fi), r], axis=1)
+                for fi, n in enumerate(self.lengths)
+                for r in [np.arange(0, n - self.block_size, eval_stride)]
             ])
 
     # ------------------------------------------------------------------ storage
 
+    def _store_styles(self, store, n_files):
+        """Per-file style names of a prebuilt store: 'genre' of the <split> rows of data/aria/<name>.csv."""
+        if self.style_ids is None:
+            return None
+        name = store.name[:-len(f"_{self.split}")]
+        meta_csv = Path("data/aria") / f"{name}.csv"
+        if not meta_csv.exists():
+            return [DEFAULT_STORE_STYLE] * n_files
+        df = pd.read_csv(meta_csv, dtype=str, keep_default_na=False)
+        return list(df.loc[df["split"] == self.split, "genre"])
+
     def _load_midi_paths(self):
-        paths = []
+        paths, styles = [], []
         for csv_path in self.csv_paths:
             if not csv_path.exists():
                 raise FileNotFoundError(f"CSV file not found: {csv_path}")
@@ -121,6 +176,8 @@ class MaestroDataset(Dataset):
             if self.debug:
                 df = df.head(5)
             paths += [self.root_dir / f for f in df["midi_filename"]]
+            col = "style" if "style" in df.columns else "artist" if "artist" in df.columns else None
+            styles += list(df[col]) if col else [DEFAULT_CSV_STYLE.get(csv_path.stem, "none")] * len(df)
 
         if len(paths) == 0:
             raise ValueError(f"No MIDI files found for split='{self.split}'.")
@@ -129,9 +186,11 @@ class MaestroDataset(Dataset):
         if missing:
             print(f"WARNING [{self.split}]: {len(missing)}/{len(paths)} MIDI files are missing "
                   f"and will be skipped (first: {missing[0]})")
+            styles = [st for p, st in zip(paths, styles) if p.exists()]
             paths = [p for p in paths if p.exists()]
             if not paths:
                 raise FileNotFoundError(f"All MIDI files for split='{self.split}' are missing.")
+        self.midi_styles = styles
         return paths
 
     def _build_store(self):
@@ -187,7 +246,7 @@ class MaestroDataset(Dataset):
     # ------------------------------------------------------------------ sampling
 
     def num_notes(self):
-        return int(self.lengths.sum())
+        return int(self.lengths.sum()) - 2 * self.pad * len(self.lengths)
 
     def __len__(self):
         if self.eval_stride:
@@ -195,27 +254,57 @@ class MaestroDataset(Dataset):
         # one "epoch" = as many windows as fit without overlap; items are random anyway
         return max(1, int(self.lengths.sum()) // self.block_size)
 
+    def _read(self, file_idx, v):
+        """block_size + 1 rows of the file's virtual sequence ([BOS] + notes + [EOS] with special tokens) from v."""
+        store_id, start = int(self.store_ids[file_idx]), int(self.starts[file_idx])
+        n = int(self.lengths[file_idx]) - 2 * self.pad
+        tokens = self.tokens[store_id]
+        lo, hi = v - self.pad, v - self.pad + self.block_size + 1  # real note range
+        rows = tokens[start + max(lo, 0):start + min(hi, n)].astype(np.int64)
+        if lo < 0:
+            rows = np.concatenate([np.array([[BOS_PITCH, 0, 0, 0]]), rows])
+        if hi > n:
+            rows = np.concatenate([rows, np.array([[EOS_PITCH, 0, 0, 0]])])
+        return torch.from_numpy(rows)
+
     def __getitem__(self, idx):
         if self.eval_stride:
-            store_id, start = (int(v) for v in self.windows[idx])
+            file_idx, v = (int(x) for x in self.windows[idx])
         else:
-            pos = random.randrange(int(self.cum_valid[-1]))
+            if self.source_weights is None:
+                pos = random.randrange(int(self.cum_valid[-1]))
+            else:
+                sid = random.choices(range(len(self.source_weights)), weights=self.source_weights)[0]
+                lo, hi = self.store_file_range[sid]
+                base = int(self.cum_valid[lo - 1]) if lo > 0 else 0
+                pos = base + random.randrange(int(self.cum_valid[hi - 1]) - base)
             file_idx = int(np.searchsorted(self.cum_valid, pos, side="right"))
             prev = int(self.cum_valid[file_idx - 1]) if file_idx > 0 else 0
-            store_id = int(self.store_ids[file_idx])
-            start = int(self.starts[file_idx]) + (pos - prev)
+            v = pos - prev
+            if self.boundary_frac:
+                r = random.random()
+                if r < self.boundary_frac / 2:
+                    v = 0                                                   # starts with BOS
+                elif r < self.boundary_frac:
+                    v = int(self.lengths[file_idx]) - self.block_size - 1  # ends with EOS
 
-        tokens = self.tokens[store_id]
-        window = torch.from_numpy(tokens[start:start + self.block_size + 1].astype(np.int64))
-        pitch, velocity, duration, delta_time = window.unbind(1)
+        pitch, velocity, duration, delta_time = self._read(file_idx, v).unbind(1)
 
         if self.augment and not self.eval_stride:
-            # transpose by up to ±5 semitones, limited so no note leaves 0..127 (clamping would bend them)
-            lo, hi = int(pitch.min()), int(pitch.max())
+            # transpose by up to ±5 semitones, limited so no note leaves 0..127 (clamping would bend them);
+            # BOS/EOS (pitch >= 128) stay as they are
+            notes = pitch < 128
+            lo, hi = int(pitch[notes].min()), int(pitch[notes].max())
             shift = random.randint(max(-5, -lo), min(5, 127 - hi))
-            pitch = pitch + shift
+            pitch = torch.where(notes, pitch + shift, pitch)
 
-        return self._split_xy((pitch, velocity, duration, delta_time))
+        x, y = self._split_xy((pitch, velocity, duration, delta_time))
+        if self.file_style is not None:
+            style = int(self.file_style[file_idx])
+            if self.augment and not self.eval_stride and random.random() < self.style_dropout:
+                style = 0
+            x = x + (torch.tensor(style),)
+        return x, y
 
     def _split_xy(self, tokens):
         x = tuple(t[:-1] for t in tokens)

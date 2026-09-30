@@ -45,6 +45,11 @@ root_dir = '.'
 cache_dir = 'data/cache'
 val_csv_path = ''         # main val set (checkpoint selection); '' = same sources as csv_path
 val2_csv_path = ''        # optional second val set, only logged as val2/* (e.g. keep the old set comparable)
+special_tokens = False    # BOS/EOS around every piece (pitch vocab 128 -> 130; a finetune grows a 128 checkpoint)
+style_map = ''            # e.g. 'data/styles.json': conditioning on genre/artist (n_styles from the file, 0 = none)
+style_dropout = 0.1       # training: probability of dropping the style to 'none' (keeps an unconditional mode)
+boundary_frac = 0.1       # with special_tokens: share of train windows placed at a piece's start/end
+source_weights = ''       # e.g. '0.8,0.2': sampling weight per train store (CSVs = one store, then each store:); '' = by size
 batch_size = 6
 block_size = 512
 gradient_accumulation_steps = 5 * 8  # used to simulate larger batch sizes
@@ -69,6 +74,7 @@ moe_experts = 0
 moe_top_k = 2
 moe_hidden_frac = 0.5
 moe_aux_weight = 0.01
+n_styles = 0              # set from style_map
 
 # wandb logging
 wandb_log = True
@@ -102,6 +108,12 @@ seed = 1337
 # -----------------------------------------------------------------------------
 config_keys = [k for k, v in globals().items() if not k.startswith('_') and isinstance(v, (int, float, bool, str))]
 exec(open('configurator.py').read())  # overrides from command line or config file
+from data_loader import load_styles
+styles = load_styles(style_map) if style_map else None
+if styles:
+    n_styles = len(styles)
+if special_tokens:
+    pitch_size = max(pitch_size, 130)
 config = {k: globals()[k] for k in config_keys}  # logged to wandb and saved in checkpoints
 sys.stdout.reconfigure(line_buffering=True)  # eval lines reach a redirected log at once, not when an 8 KB buffer fills
 # -----------------------------------------------------------------------------
@@ -122,20 +134,22 @@ ctx = nullcontext() if device_type == 'cpu' else torch.amp.autocast(device_type=
 def collate_fn(batch):
     xs, ys = zip(*batch)
     return (
-        tuple(torch.stack([x[i] for x in xs]) for i in range(4)),
+        tuple(torch.stack([x[i] for x in xs]) for i in range(len(xs[0]))),  # 4 streams (+ style ids)
         tuple(torch.stack([y[i] for y in ys]) for i in range(4)),
     )
 
 
 # train: random windows (uniform over all note positions of all files), with augmentation
 train_dataset = MaestroDataset(csv_path, root_dir=root_dir, split='train', block_size=block_size,
-                               augment=True, cache_dir=cache_dir)
+                               augment=True, cache_dir=cache_dir, special_tokens=special_tokens,
+                               styles=styles, style_dropout=style_dropout, boundary_frac=boundary_frac,
+                               source_weights=[float(w) for w in source_weights.split(',')] if source_weights else None)
 
 
 def make_val_loader(sources):
     # fixed non-overlapping windows, evenly thinned to at most eval_iters batches -> identical every eval / run
     ds = MaestroDataset(sources, root_dir=root_dir, split='validation', block_size=block_size,
-                        cache_dir=cache_dir, eval_stride=block_size)
+                        cache_dir=cache_dir, eval_stride=block_size, special_tokens=special_tokens, styles=styles)
     max_val_windows = eval_iters * batch_size
     if len(ds) > max_val_windows:
         step = len(ds) / max_val_windows
@@ -157,9 +171,10 @@ best_val_loss = float('inf')
 wandb_run_id = None
 arch_keys = ['n_layer', 'n_head', 'n_embd', 'block_size', 'bias', 'pitch_size', 'velocity_size',
              'duration_size', 'delta_time_size', 'cascade_heads', 'cascade_residual',
-             'pitch_head_blocks', 'pitch_head_mult', 'moe_experts', 'moe_top_k', 'moe_hidden_frac', 'moe_aux_weight']
+             'pitch_head_blocks', 'pitch_head_mult', 'moe_experts', 'moe_top_k', 'moe_hidden_frac', 'moe_aux_weight',
+             'n_styles']
 # what checkpoints that predate a key actually used
-legacy_defaults = {'cascade_heads': False, 'cascade_residual': False}
+legacy_defaults = {'cascade_heads': False, 'cascade_residual': False, 'n_styles': 0}
 model_args = {k: globals()[k] for k in arch_keys}
 checkpoint = None
 
@@ -168,7 +183,10 @@ if init_from in ('resume', 'finetune'):
     print(f"{init_from}: loading {ckpt_path}")
     checkpoint = torch.load(ckpt_path, map_location=device)
     for k in arch_keys:
+        wanted = model_args[k]
         model_args[k] = checkpoint['model_args'].get(k, legacy_defaults.get(k, model_args[k]))
+        if init_from == 'finetune' and k in ('pitch_size', 'n_styles') and wanted > model_args[k]:
+            model_args[k] = wanted  # grow: BOS/EOS rows, a style table
 else:
     print("Initializing a new model from scratch")
 
@@ -180,7 +198,12 @@ if checkpoint is not None:
     for k in list(state_dict):
         if k.startswith(unwanted_prefix):
             state_dict[k[len(unwanted_prefix):]] = state_dict.pop(k)
-    model.load_state_dict(state_dict)
+    if init_from == 'finetune':
+        grown = model.load_expanded(state_dict)
+        if grown:
+            print(f"finetune: grown / new parameters (fresh init): {', '.join(grown)}")
+    else:
+        model.load_state_dict(state_dict)
     if init_from == 'resume':
         iter_num = checkpoint['iter_num']
         best_val_loss = checkpoint['best_val_loss']
