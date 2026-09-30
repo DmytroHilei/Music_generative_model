@@ -52,6 +52,7 @@ style_dropout = 0.1       # training: probability of dropping the style to 'none
 boundary_frac = 0.1       # with special_tokens: share of train windows placed at a piece's start/end
 aug_tempo = 0.0           # training: time stretch up to x(1+aug_tempo) either way per window (0 = off)
 aug_velocity = 0          # training: velocity shift up to ±N bins (of 32) per window, clamped (0 = off)
+aug_stores = ''           # e.g. '1,0': which train stores get tempo/velocity aug (same order as source_weights); '' = all
 source_weights = ''       # e.g. '0.8,0.2': sampling weight per train store (CSVs = one store, then each store:); '' = by size
 batch_size = 6
 block_size = 512
@@ -147,6 +148,7 @@ train_dataset = MaestroDataset(csv_path, root_dir=root_dir, split='train', block
                                augment=True, cache_dir=cache_dir, special_tokens=special_tokens,
                                styles=styles, style_dropout=style_dropout, boundary_frac=boundary_frac,
                                aug_tempo=aug_tempo, aug_velocity=aug_velocity,
+                               aug_stores=[int(a) for a in aug_stores.split(',')] if aug_stores else None,
                                source_weights=[float(w) for w in source_weights.split(',')] if source_weights else None)
 
 
