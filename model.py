@@ -185,6 +185,12 @@ class MusicConfig:
     moe_top_k: int = 2
     moe_hidden_frac: float = 0.5
     moe_aux_weight: float = 0.01    # Switch-style load-balancing loss
+    # conditioning: a learned style embedding (genre / artist, index 0 = none) added at every position; 0 = off.
+    # pitch_size 130 = special tokens: pitch 128 = BOS (start of piece), 129 = EOS (end of piece)
+    n_styles: int = 0
+
+
+BOS_PITCH, EOS_PITCH = 128, 129
 
 
 # order in which attributes of the next note are decided by CascadeHeads
@@ -333,6 +339,8 @@ class GPT(nn.Module):
             h = nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
             ln_f = LayerNorm(config.n_embd, bias=config.bias),
         ))
+        if config.n_styles:
+            self.transformer['style'] = nn.Embedding(config.n_styles, config.n_embd)
 
         if config.cascade_heads:
             self.cascade = CascadeHeads(config)
@@ -349,6 +357,25 @@ class GPT(nn.Module):
         if config.cascade_heads and config.cascade_residual:
             for emb in self.cascade.cond_emb.values():
                 torch.nn.init.normal_(emb.weight, mean=0.0, std=config.cond_emb_init_std)
+        if config.n_styles:
+            # zero = no effect at the start of a fine-tune: the model begins exactly where the pretrained one was
+            torch.nn.init.zeros_(self.transformer['style'].weight)
+
+    def load_expanded(self, state_dict):
+        """Load a checkpoint into a model that may have grown: extra rows in dim 0 (pitch vocab 128 -> 130) keep
+        their fresh init, keys the checkpoint lacks (style embedding) keep theirs. Returns the grown/new keys."""
+        own = self.state_dict()
+        changed = [k for k in own if k not in state_dict]
+        for k, v in state_dict.items():
+            if k in own and own[k].shape != v.shape:
+                assert own[k].shape[1:] == v.shape[1:] and own[k].shape[0] >= v.shape[0], \
+                    f"{k}: can't grow {tuple(v.shape)} -> {tuple(own[k].shape)}"
+                grown = own[k].clone()
+                grown[:v.shape[0]] = v
+                state_dict[k] = grown
+                changed.append(k)
+        self.load_state_dict(state_dict, strict=False)
+        return changed
 
     def get_num_params(self, non_embedding=True):
         """
@@ -370,7 +397,7 @@ class GPT(nn.Module):
         elif isinstance(module, nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
-    def _encode(self, pitch, velocity, duration, delta_time, cache=None):
+    def _encode(self, pitch, velocity, duration, delta_time, style=None, cache=None):
         """cache=None: plain forward. With a KVCache: T > 1 = prefill from position 0, T == 1 = one step at cache.pos."""
         device = pitch.device
         b, t = pitch.size()
@@ -382,7 +409,10 @@ class GPT(nn.Module):
             seq_pos = torch.arange(0, t, dtype=torch.long, device=device)
         tok_emb = self.transformer.music_embeddings(pitch, velocity, duration, delta_time)
         pos_emb = self.transformer.wpe(seq_pos)
-        x = self.transformer.drop(tok_emb + pos_emb)
+        x = tok_emb + pos_emb
+        if style is not None and self.config.n_styles:
+            x = x + self.transformer['style'](style).unsqueeze(1)  # style: (B,) -> added at every position
+        x = self.transformer.drop(x)
         for i, block in enumerate(self.transformer.h):
             x = block(x, cache, i)
         return self.transformer.ln_f(x)
@@ -394,14 +424,15 @@ class GPT(nn.Module):
         return dict(pitch=self.head_pitch(x), velocity=self.head_velocity(x),
                     duration=self.head_duration(x), delta_time=self.head_delta_time(x))
 
-    def forward(self, pitch, velocity, duration, delta_time, targets=None):
+    def forward(self, pitch, velocity, duration, delta_time, style=None, targets=None):
         """
         With targets: returns (parts, loss). loss = sum of the 4 CEs with label smoothing (what we optimize),
         parts = dict name -> CE without label smoothing (detached, for honest logging / comparing runs).
         Without targets (independent heads only): returns ((p, v, d, dt) logits of the last position, None).
         Cascade heads can't give all 4 logits without choosing the earlier attributes, so use generate().
+        style: (B,) style ids when the model has n_styles (0 = none).
         """
-        x = self._encode(pitch, velocity, duration, delta_time)
+        x = self._encode(pitch, velocity, duration, delta_time, style=style)
 
         if targets is not None:
             tgt = dict(zip(STREAM_ORDER, targets))
@@ -465,7 +496,7 @@ class GPT(nn.Module):
     @torch.no_grad()
     def generate(self, pitch, velocity, duration, delta_time, max_new_tokens, temperature=0.85, top_k=None,
                  anchor=0, slide=None, progress=None, dt_bias=0.0, target_nps=None, dt_seconds=0.02,
-                 cuda_graph=True):
+                 cuda_graph=True, style=None, min_new=0):
         """
         Batched sampling (B rows, same prompt length) with a preallocated KV cache: each new note costs one position
         through the model, not a full re-run. On CUDA the one-note transformer step is captured once as a CUDA graph
@@ -480,6 +511,9 @@ class GPT(nn.Module):
           dt_bias: fixed logit bias b * log(max(bin, 1)) on delta_time; b > 0 favours longer gaps = fewer notes/s.
           target_nps: notes per second to track (a float, or one per row). A controller nudges each row's bias after
             every note from the density of its last 64 notes, starting at dt_bias. dt_seconds = seconds per bin.
+        style: (B,) style ids (models with n_styles; 0 = none/unconditional).
+        Special tokens (pitch vocab 130): BOS is never sampled; EOS (end of piece) not before min_new notes. Rows keep
+        running after their EOS (batch shapes stay fixed); cut them at the first EOS when writing MIDI.
         Nothing here syncs the GPU with the CPU inside the loop.
         """
         L = self.config.block_size
@@ -502,8 +536,17 @@ class GPT(nn.Module):
         if target_nps is not None:
             target = torch.as_tensor(target_nps, dtype=torch.float32, device=device).reshape(-1, 1).expand(B, 1)
 
+        specials = self.config.pitch_size > BOS_PITCH
+        step_i = [0]
+        if style is not None:
+            style = torch.as_tensor(style, dtype=torch.long, device=device).reshape(-1).expand(B).contiguous()
+
         def sample(logits, name=None):  # (B, 1, vocab) → (B, 1)
             logits = logits[:, -1, :].float() / temperature
+            if name == 'pitch' and specials:
+                logits[:, BOS_PITCH] = -float('Inf')
+                if step_i[0] < min_new:
+                    logits[:, EOS_PITCH] = -float('Inf')
             if name == 'delta_time' and (dt_bias != 0.0 or target is not None):
                 logits = logits + bias * dt_shape
             if top_k is not None:
@@ -525,21 +568,22 @@ class GPT(nn.Module):
             w = window[0].size(1)
             if w == 1:
                 cache.pos.fill_(0)  # a 1-note window goes through the single-step path at slot 0
-            return self._encode(*window, cache=cache)[:, [-1], :], w
+            return self._encode(*window, style=style, cache=cache)[:, [-1], :], w
 
         # the one-note step: static inputs -> static output, optionally captured as a CUDA graph
         step_in = [torch.zeros(B, 1, dtype=torch.long, device=device) for _ in range(4)]
+        step_style = style  # constant during generation, so the graph can read it directly
         graph = None
         if cuda_graph and device.type == 'cuda':
             stream = torch.cuda.Stream()
             stream.wait_stream(torch.cuda.current_stream())
             with torch.cuda.stream(stream):  # warm-up outside the graph (allocator, kernel selection)
                 for _ in range(2):
-                    self._encode(*step_in, cache=cache)
+                    self._encode(*step_in, style=step_style, cache=cache)
             torch.cuda.current_stream().wait_stream(stream)
             graph = torch.cuda.CUDAGraph()
             with torch.cuda.graph(graph):
-                step_out = self._encode(*step_in, cache=cache)
+                step_out = self._encode(*step_in, style=step_style, cache=cache)
             # the warm-up and capture wrote junk into slot 0; prefill below overwrites every slot it uses
 
         def step(new, pos):
@@ -549,7 +593,7 @@ class GPT(nn.Module):
             if graph is not None:
                 graph.replay()
                 return step_out
-            return self._encode(*step_in, cache=cache)
+            return self._encode(*step_in, style=step_style, cache=cache)
 
         h, filled = prefill(n0)
         for i in range(max_new_tokens):
@@ -568,6 +612,7 @@ class GPT(nn.Module):
                 secs = out[3][:, n - w:n].sum(dim=1, keepdim=True).float() * dt_seconds
                 nps = torch.where(secs > 0, w / secs.clamp(min=1e-6), torch.full_like(secs, 1e3))
                 bias.add_(0.05 * torch.log(nps.clamp(min=1e-3) / target)).clamp_(-2.0, 6.0)
+            step_i[0] = i + 1
             if progress is not None:
                 progress(i + 1)
             if i == max_new_tokens - 1:
