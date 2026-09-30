@@ -38,6 +38,7 @@ def parse_args():
     parser.add_argument('--search-size', type=int, default=80, help='search results to scan per query')
     parser.add_argument('--min-sec', type=int, default=90)
     parser.add_argument('--max-sec', type=int, default=480)
+    parser.add_argument('--quality', default='192', help='mp3 kbps (128 is enough for Demucs + basic-pitch)')
     parser.add_argument('--sleep', type=float, default=3.0, help='seconds between downloads (be polite)')
     parser.add_argument('--dry-run', action='store_true')
     return parser.parse_args()
@@ -111,12 +112,12 @@ def select(entries, names, args):
     return chosen
 
 
-def download(item, out_dir):
+def download(item, out_dir, quality):
     opts = {
         'quiet': True,
         'format': 'bestaudio/best',
         'outtmpl': str(out_dir / '%(title)s [%(id)s].%(ext)s'),
-        'postprocessors': [{'key': 'FFmpegExtractAudio', 'preferredcodec': 'mp3', 'preferredquality': '192'}],
+        'postprocessors': [{'key': 'FFmpegExtractAudio', 'preferredcodec': 'mp3', 'preferredquality': quality}],
         'noplaylist': True,
     }
     with yt_dlp.YoutubeDL(opts) as ydl:
@@ -151,7 +152,7 @@ def main():
                 if args.dry_run or item['id'] in done:
                     continue
                 try:
-                    download(item, out_root / artist)
+                    download(item, out_root / artist, args.quality)
                 except Exception as e:
                     print(f'    FAILED: {e!r}')
                     continue

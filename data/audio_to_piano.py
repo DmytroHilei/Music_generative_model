@@ -42,6 +42,8 @@ def parse_args():
     parser.add_argument('--output', required=True, help='output folder (midi/, debug/, stems/, songs.csv)')
     parser.add_argument('--limit', type=int, default=None, help='only process the first N files')
     parser.add_argument('--device', default='cuda')
+    parser.add_argument('--delete-audio', action='store_true',
+                        help='delete the source audio after its MIDI is written (re-downloadable via songs.csv; saves disk)')
     parser.add_argument('--keep-stems', action='store_true',
                         help='keep the Demucs wavs (~350 MB per song!); by default deleted after transcription')
     parser.add_argument('--harmony-max-poly', type=int, default=3, help='max harmony notes sounding together')
@@ -267,6 +269,8 @@ def main():
                 continue
             writer.writerow(row)
             f.flush()
+            if args.delete_audio:  # only songs reduced in this run: skipped (already done) files are never touched
+                audio.unlink()
             print(f"  melody {row['n_melody']}, bass {row['n_bass']}, harmony {row['n_harmony']}, key {row['key']}")
 
 
