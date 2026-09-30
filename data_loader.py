@@ -248,6 +248,8 @@ class MaestroDataset(Dataset):
         if self._tokens is None:
             self._tokens = []
             for store in self.store_dirs:
+                # multi-instrument stores (data/prepare_gigamidi.py) keep drums in the stream: not for the piano model
+                assert not (store / "programs.u8").exists(), f"{store} has instrument programs; loader can't use them yet"
                 n = int(np.load(store / "offsets.npy")[-1])
                 self._tokens.append(np.memmap(store / "tokens.u16", dtype=np.uint16, mode="r", shape=(n, 4)))
         return self._tokens

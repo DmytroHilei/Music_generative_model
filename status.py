@@ -64,6 +64,8 @@ RUNS = [
     ('ua-C tempo+vel aug', 'ua_C_tempovel.log', 'FT from B1'),
     ('ua-C seed 2 (noise)', 'ua_C_seed2.log', 'FT from B1'),
     ('ua-C tempo aug, UA only', 'ua_C_tempo_ft.log', 'FT from B1'),
+    ('ua-C tempo ±20%, UA only', 'ua_C_tempo20_ft.log', 'FT from B1'),
+    ('ua-C winner, 1200 steps', 'ua_C_long1200.log', 'FT from B1'),
 ]
 
 TQDM = re.compile(r'Training:\s+(\d+)%\|[^|]*\|\s*(\d+)/(\d+) \[([\d:]+)<([\d:?]+),\s*([\d.?]+)(it/s|s/it)')
