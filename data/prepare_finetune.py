@@ -36,6 +36,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--val-percent', type=int, default=10)
     ap.add_argument('--out', default=str(ROOT / 'data/finetune/ukrainian.csv'))
+    ap.add_argument('--style', default='', help="write a 'style' column with this label for every song (e.g. "
+                    "'reduction' = one domain label); without it the loader uses the artist as the style")
     args = ap.parse_args()
 
     by_id = {}
@@ -63,10 +65,11 @@ def main():
             continue
         seen[key] = midi.name
         split = 'validation' if zlib.crc32(key[1].encode()) % 100 < args.val_percent else 'train'
-        rows.append(dict(split=split, midi_filename=str(midi), artist=artist, title=title.strip()))
+        rows.append(dict(split=split, midi_filename=str(midi), artist=artist, title=title.strip(),
+                         **({'style': args.style} if args.style else {})))
 
     with open(args.out, 'w', newline='', encoding='utf-8') as f:
-        w = csv.DictWriter(f, fieldnames=['split', 'midi_filename', 'artist', 'title'])
+        w = csv.DictWriter(f, fieldnames=['split', 'midi_filename', 'artist', 'title'] + (['style'] if args.style else []))
         w.writeheader()
         w.writerows(rows)
     n_val = sum(r['split'] == 'validation' for r in rows)

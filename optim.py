@@ -79,25 +79,33 @@ class CombinedOptimizer:
             opt.load_state_dict(s)
 
 
-def build_muon_optimizer(model, weight_decay, learning_rate, betas, device_type, momentum=0.95):
-    """Muon for the 2D matrices inside the transformer blocks, AdamW for embeddings, heads, norms."""
+def build_muon_optimizer(model, weight_decay, learning_rate, betas, device_type, momentum=0.95, style_lr_mult=1.0):
+    """Muon for the 2D matrices inside the transformer blocks, AdamW for embeddings, heads, norms.
+    The style table (if any) gets its own AdamW group: lr x style_lr_mult (the train loop applies each group's
+    'lr_mult'), no weight decay, so a zero-initialized conditioning vector can move far in a short fine-tune."""
     import inspect
-    muon_params, adam_decay, adam_nodecay = [], [], []
+    muon_params, adam_decay, adam_nodecay, style_params = [], [], [], []
     muon_ids = {id(p) for p in model.transformer.h.parameters() if p.dim() == 2}
     for n, p in model.named_parameters():
         if not p.requires_grad:
             continue
         if id(p) in muon_ids:
             muon_params.append(p)
+        elif n.startswith('transformer.style.'):
+            style_params.append(p)
         elif p.dim() >= 2 and not (model.config.cascade_residual and 'cond_emb' in n):
             adam_decay.append(p)
         else:
             adam_nodecay.append(p)
     fused = 'fused' in inspect.signature(torch.optim.AdamW).parameters and device_type == 'cuda'
-    adamw = torch.optim.AdamW([{'params': adam_decay, 'weight_decay': weight_decay},
-                               {'params': adam_nodecay, 'weight_decay': 0.0}],
+    groups = [{'params': adam_decay, 'weight_decay': weight_decay},
+              {'params': adam_nodecay, 'weight_decay': 0.0}]
+    if style_params:
+        groups.append({'params': style_params, 'weight_decay': 0.0, 'lr_mult': style_lr_mult})
+    adamw = torch.optim.AdamW(groups,
                               lr=learning_rate, betas=betas, **(dict(fused=True) if fused else {}))
     muon = Muon(muon_params, lr=learning_rate, momentum=momentum, weight_decay=weight_decay)
     print(f"Muon: {len(muon_params)} matrices, {sum(p.numel() for p in muon_params):,} params | "
-          f"AdamW: {sum(p.numel() for p in adam_decay + adam_nodecay):,} params")
+          f"AdamW: {sum(p.numel() for p in adam_decay + adam_nodecay):,} params"
+          + (f" | style table: {sum(p.numel() for p in style_params):,} params, lr x{style_lr_mult:g}" if style_params else ""))
     return CombinedOptimizer(muon, adamw)

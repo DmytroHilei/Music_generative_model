@@ -47,6 +47,7 @@ val_csv_path = ''         # main val set (checkpoint selection); '' = same sourc
 val2_csv_path = ''        # optional second val set, only logged as val2/* (e.g. keep the old set comparable)
 special_tokens = False    # BOS/EOS around every piece (pitch vocab 128 -> 130; a finetune grows a 128 checkpoint)
 style_map = ''            # e.g. 'data/styles.json': conditioning on genre/artist (n_styles from the file, 0 = none)
+style_lr_mult = 1.0       # Muon runs: LR multiplier for the style table (own AdamW group, no weight decay)
 style_dropout = 0.1       # training: probability of dropping the style to 'none' (keeps an unconditional mode)
 boundary_frac = 0.1       # with special_tokens: share of train windows placed at a piece's start/end
 source_weights = ''       # e.g. '0.8,0.2': sampling weight per train store (CSVs = one store, then each store:); '' = by size
@@ -236,7 +237,7 @@ scaler = torch.amp.GradScaler(device_type, enabled=(dtype == 'float16'))
 if optimizer_name == 'muon':
     from optim import build_muon_optimizer
     optimizer = build_muon_optimizer(model, weight_decay, learning_rate, (beta1, beta2), device_type,
-                                     momentum=muon_momentum)
+                                     momentum=muon_momentum, style_lr_mult=style_lr_mult)
 else:
     optimizer = model.configure_optimizers(weight_decay, learning_rate, (beta1, beta2), device_type)
 if init_from == 'resume':
@@ -339,7 +340,7 @@ pbar = tqdm(range(iter_num, max_iters), desc="Training", initial=iter_num, total
 for iter_num in pbar:
     lr = get_lr(iter_num) if decay_lr else learning_rate
     for param_group in optimizer.param_groups:
-        param_group['lr'] = lr
+        param_group['lr'] = lr * param_group.get('lr_mult', 1.0)
 
     if iter_num % eval_interval == 0 or iter_num == max_iters - 1:
         val = estimate_val_loss(val_loader)
