@@ -46,13 +46,20 @@ def main():
         with open(songs_csv, newline='', encoding='utf-8') as f:
             by_id = {row['id']: row['song'] for row in csv.DictReader(f)}
 
-    rows, seen, dupes = [], {}, []
+    # data/finetune/exclude.txt: YouTube ids of wrong search hits (another artist, a vlog, a sped-up copy), '#' comments
+    exclude_txt = ROOT / 'data/finetune/exclude.txt'
+    excluded = {line.split('#')[0].strip() for line in exclude_txt.read_text(encoding='utf-8').splitlines()} - {''} \
+        if exclude_txt.exists() else set()
+    rows, seen, dupes, n_excluded = [], {}, [], 0
     for midi in sorted((ROOT / 'data/finetune').glob('*/midi/*.mid')):
         folder = midi.parent.parent.name
         if folder == 'skryabin_test':
             continue
         artist = ARTIST_ALIASES.get(folder, folder)
         m = re.search(r'\[([\w-]{11})\]', midi.stem)
+        if m and m.group(1) in excluded:
+            n_excluded += 1
+            continue
         if m and m.group(1) in by_id:
             title = by_id[m.group(1)]
         else:
@@ -73,7 +80,8 @@ def main():
         w.writeheader()
         w.writerows(rows)
     n_val = sum(r['split'] == 'validation' for r in rows)
-    print(f"{len(rows)} songs ({len(rows) - n_val} train / {n_val} validation), {len(dupes)} duplicates dropped -> {args.out}")
+    print(f"{len(rows)} songs ({len(rows) - n_val} train / {n_val} validation), {len(dupes)} duplicates dropped, "
+          f"{n_excluded} excluded -> {args.out}")
     for a, b in dupes:
         print(f"  dup: {a}  ==  {b}")
 
