@@ -79,6 +79,9 @@ moe_top_k = 2
 moe_hidden_frac = 0.5
 moe_aux_weight = 0.01
 n_styles = 0              # set from style_map
+pos_emb = 'learned'       # 'learned' (absolute table, old checkpoints) | 'rope' (rotary; a finetune may switch to it
+                          # and then also raise block_size above the checkpoint's)
+rope_base = 10000.0
 n_programs = 0            # multi-instrument: 129 = GM programs + drums (needs a programs.u8 store or reads piano as 0)
 
 # wandb logging
@@ -181,9 +184,10 @@ wandb_run_id = None
 arch_keys = ['n_layer', 'n_head', 'n_embd', 'block_size', 'bias', 'pitch_size', 'velocity_size',
              'duration_size', 'delta_time_size', 'cascade_heads', 'cascade_residual',
              'pitch_head_blocks', 'pitch_head_mult', 'moe_experts', 'moe_top_k', 'moe_hidden_frac', 'moe_aux_weight',
-             'n_styles', 'n_programs']
+             'n_styles', 'n_programs', 'pos_emb', 'rope_base']
 # what checkpoints that predate a key actually used
-legacy_defaults = {'cascade_heads': False, 'cascade_residual': False, 'n_styles': 0, 'n_programs': 0}
+legacy_defaults = {'cascade_heads': False, 'cascade_residual': False, 'n_styles': 0, 'n_programs': 0,
+                   'pos_emb': 'learned', 'rope_base': 10000.0}
 model_args = {k: globals()[k] for k in arch_keys}
 checkpoint = None
 
@@ -196,6 +200,10 @@ if init_from in ('resume', 'finetune'):
         model_args[k] = checkpoint['model_args'].get(k, legacy_defaults.get(k, model_args[k]))
         if init_from == 'finetune' and k in ('pitch_size', 'n_styles', 'n_programs') and wanted > model_args[k]:
             model_args[k] = wanted  # grow: BOS/EOS rows, a style table, the instrument attribute
+        if init_from == 'finetune' and k == 'pos_emb' and wanted == 'rope':
+            model_args[k] = wanted  # switch to RoPE: the position table is dropped (not function-preserving)
+    if init_from == 'finetune' and model_args['pos_emb'] == 'rope':
+        model_args['block_size'] = block_size  # nothing in a RoPE model depends on the context length
 else:
     print("Initializing a new model from scratch")
 
