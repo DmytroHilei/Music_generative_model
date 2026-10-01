@@ -188,13 +188,19 @@ class MusicConfig:
     # conditioning: a learned style embedding (genre / artist, index 0 = none) added at every position; 0 = off.
     # pitch_size 130 = special tokens: pitch 128 = BOS (start of piece), 129 = EOS (end of piece)
     n_styles: int = 0
+    # multi-instrument: a 5th note attribute, the instrument (GM program 0-127, DRUM_PROGRAM = drums); 0 = off.
+    # Added to the input embedding (zero init, like the style table) and predicted by a cascade head after dt.
+    n_programs: int = 0
 
 
 BOS_PITCH, EOS_PITCH = 128, 129
+DRUM_PROGRAM = 128
 
 
 # order in which attributes of the next note are decided by CascadeHeads
 CASCADE_ORDER = ('delta_time', 'pitch', 'duration', 'velocity')
+# with n_programs: the instrument is chosen right after the onset, so pitch/duration/velocity are conditioned on it
+CASCADE_ORDER_PROGRAMS = ('delta_time', 'program', 'pitch', 'duration', 'velocity')
 # order of the attribute streams everywhere else (inputs, targets, datasets)
 STREAM_ORDER = ('pitch', 'velocity', 'duration', 'delta_time')
 
@@ -235,11 +241,13 @@ class CascadeHeads(nn.Module):
     def __init__(self, config):
         super().__init__()
         sizes = dict(pitch=config.pitch_size, velocity=config.velocity_size,
-                     duration=config.duration_size, delta_time=config.delta_time_size)
+                     duration=config.duration_size, delta_time=config.delta_time_size, program=config.n_programs)
         C = config.n_embd
+        self.order = CASCADE_ORDER_PROGRAMS if config.n_programs else CASCADE_ORDER
+        assert config.cascade_residual or not config.n_programs, "programs need the v2 (residual) cascade heads"
         # the last attribute is never used as a condition, so it needs no embedding
         self.cond_emb = nn.ModuleDict({
-            name: nn.Embedding(sizes[name], C) for name in CASCADE_ORDER[:-1]
+            name: nn.Embedding(sizes[name], C) for name in self.order[:-1]
         })
         self.residual = config.cascade_residual
         if self.residual:
@@ -247,7 +255,7 @@ class CascadeHeads(nn.Module):
                 name: ResidualHead(C, sizes[name], config.bias,
                                    n_blocks=config.pitch_head_blocks if name == 'pitch' else 1,
                                    mult=config.pitch_head_mult if name == 'pitch' else 1)
-                for name in CASCADE_ORDER
+                for name in self.order
             })
             return
         self.heads = nn.ModuleDict({
@@ -263,7 +271,7 @@ class CascadeHeads(nn.Module):
         # h: (B, T, C), targets: dict name -> (B, T), -1 = ignore
         logits = {}
         cond = h
-        for name in CASCADE_ORDER:
+        for name in self.order:
             logits[name] = self.heads[name](cond)
             if name in self.cond_emb:
                 cond = cond + self.cond_emb[name](targets[name].clamp(min=0))
@@ -273,7 +281,7 @@ class CascadeHeads(nn.Module):
         # h: (B, 1, C) -> dict name -> (B, 1); sample_fn(logits, head_name)
         out = {}
         cond = h
-        for name in CASCADE_ORDER:
+        for name in self.order:
             out[name] = sample_fn(self.heads[name](cond), name)
             if name in self.cond_emb:
                 cond = cond + self.cond_emb[name](out[name])
@@ -341,6 +349,8 @@ class GPT(nn.Module):
         ))
         if config.n_styles:
             self.transformer['style'] = nn.Embedding(config.n_styles, config.n_embd)
+        if config.n_programs:
+            self.transformer['program'] = nn.Embedding(config.n_programs, config.n_embd)
 
         if config.cascade_heads:
             self.cascade = CascadeHeads(config)
@@ -360,12 +370,27 @@ class GPT(nn.Module):
         if config.n_styles:
             # zero = no effect at the start of a fine-tune: the model begins exactly where the pretrained one was
             torch.nn.init.zeros_(self.transformer['style'].weight)
+        if config.n_programs:
+            # zero: a piano model grown to programs starts with exactly its old input embedding
+            torch.nn.init.zeros_(self.transformer['program'].weight)
+
+    @property
+    def head_names(self):
+        """The attributes the model predicts, in STREAM_ORDER (+ 'program'): the order of `targets` in forward()."""
+        return STREAM_ORDER + (('program',) if self.config.n_programs else ())
 
     def load_expanded(self, state_dict):
         """Load a checkpoint into a model that may have grown: extra rows in dim 0 (pitch vocab 128 -> 130) keep
-        their fresh init, keys the checkpoint lacks (style embedding) keep theirs. Returns the grown/new keys."""
+        their fresh init, keys the checkpoint lacks (style embedding) keep theirs. Returns the grown/new keys.
+        Exception: a new program condition embedding is zeroed, so the old pitch/duration/velocity heads see exactly
+        the conditioning they were trained with (function-preserving growth to multi-instrument), and so is the
+        instrument head's output layer."""
         own = self.state_dict()
         changed = [k for k in own if k not in state_dict]
+        for k in changed:
+            # the new instrument head's output also starts at zero = a uniform guess (ln 129), not a random one
+            if k.startswith('cascade.cond_emb.program.') or k == 'cascade.heads.program.out.weight':
+                state_dict[k] = torch.zeros_like(own[k])
         for k, v in state_dict.items():
             if k in own and own[k].shape != v.shape:
                 assert own[k].shape[1:] == v.shape[1:] and own[k].shape[0] >= v.shape[0], \
@@ -397,7 +422,7 @@ class GPT(nn.Module):
         elif isinstance(module, nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
-    def _encode(self, pitch, velocity, duration, delta_time, style=None, cache=None):
+    def _encode(self, pitch, velocity, duration, delta_time, style=None, program=None, cache=None):
         """cache=None: plain forward. With a KVCache: T > 1 = prefill from position 0, T == 1 = one step at cache.pos."""
         device = pitch.device
         b, t = pitch.size()
@@ -410,6 +435,9 @@ class GPT(nn.Module):
         tok_emb = self.transformer.music_embeddings(pitch, velocity, duration, delta_time)
         pos_emb = self.transformer.wpe(seq_pos)
         x = tok_emb + pos_emb
+        if self.config.n_programs:
+            # program: (B, T) instrument of each input note; models with programs need it (piano stores send 0)
+            x = x + self.transformer['program'](program)
         if style is not None and self.config.n_styles:
             x = x + self.transformer['style'](style).unsqueeze(1)  # style: (B,) -> added at every position
         x = self.transformer.drop(x)
@@ -424,23 +452,26 @@ class GPT(nn.Module):
         return dict(pitch=self.head_pitch(x), velocity=self.head_velocity(x),
                     duration=self.head_duration(x), delta_time=self.head_delta_time(x))
 
-    def forward(self, pitch, velocity, duration, delta_time, style=None, targets=None):
+    def forward(self, pitch, velocity, duration, delta_time, style=None, program=None, targets=None):
         """
         With targets: returns (parts, loss). loss = sum of the 4 CEs with label smoothing (what we optimize),
         parts = dict name -> CE without label smoothing (detached, for honest logging / comparing runs).
         Without targets (independent heads only): returns ((p, v, d, dt) logits of the last position, None).
         Cascade heads can't give all 4 logits without choosing the earlier attributes, so use generate().
         style: (B,) style ids when the model has n_styles (0 = none).
+        program: (B, T) instrument per input note when the model has n_programs; targets then has a 5th entry, the
+        next note's program (see head_names). Duration targets of drum notes are expected as -1 (masked).
         """
-        x = self._encode(pitch, velocity, duration, delta_time, style=style)
+        x = self._encode(pitch, velocity, duration, delta_time, style=style, program=program)
 
         if targets is not None:
-            tgt = dict(zip(STREAM_ORDER, targets))
+            assert len(targets) == len(self.head_names), f"{len(targets)} targets for heads {self.head_names}"
+            tgt = dict(zip(self.head_names, targets))
             logits = self._head_logits(x, tgt)
             ls = self.config.label_smoothing
             loss = 0.0
             parts = {}
-            for name in STREAM_ORDER:
+            for name in self.head_names:
                 lg = logits[name].view(-1, logits[name].size(-1))
                 t = tgt[name].reshape(-1)
                 loss = loss + F.cross_entropy(lg, t, ignore_index=-1, label_smoothing=ls)
@@ -516,6 +547,7 @@ class GPT(nn.Module):
         running after their EOS (batch shapes stay fixed); cut them at the first EOS when writing MIDI.
         Nothing here syncs the GPU with the CPU inside the loop.
         """
+        assert not self.config.n_programs, "generation with instruments isn't implemented yet (to-do 15)"
         L = self.config.block_size
         slide = slide or L // 4
         assert 0 <= anchor and anchor + slide < L, "need anchor + slide < block_size"

@@ -15,6 +15,7 @@ from tqdm import tqdm
 
 
 BOS_PITCH, EOS_PITCH = 128, 129       # special "notes" when special_tokens=True (pitch vocab 130)
+DRUM_PROGRAM = 128                    # programs.u8 value of drum notes (GM programs are 0-127)
 DEFAULT_CSV_STYLE = {'combined': 'classical'}   # style of CSV sources without a style/artist column
 DEFAULT_STORE_STYLE = 'none'
 
@@ -41,8 +42,8 @@ class MaestroDataset(Dataset):
     Eval mode (eval_stride): deterministic windows every eval_stride notes of every file.
 
     Output:
-        x = (pitch, velocity, duration, delta_time)
-        y = same streams shifted by 1 token
+        x = (pitch, velocity, duration, delta_time) [+ program] [+ style]
+        y = (pitch, velocity, duration, delta_time) [+ program], shifted by 1 token
     """
 
     def __init__(
@@ -67,6 +68,7 @@ class MaestroDataset(Dataset):
         aug_tempo=0.0,
         aug_velocity=0,
         aug_stores=None,
+        programs=False,
     ):
         """
         csv_path:    one or more sources separated by ',': a CSV (paths inside relative to root_dir or absolute),
@@ -89,6 +91,10 @@ class MaestroDataset(Dataset):
         aug_stores:  optional 0/1 per store (same order as source_weights): which stores get the tempo/velocity
                      augmentation (e.g. [1, 0] = only the fine-tune CSVs, the replay store stays real). Default: all.
                      Transposition applies to every store regardless
+        programs:    multi-instrument: also return the instrument stream (x and y), from the store's programs.u8
+                     (data/prepare_gigamidi.py); stores without one are piano = program 0. Drum notes are never
+                     transposed and their duration is set to 0 in x and masked (-1) in y. False = piano-only: stores
+                     with programs.u8 are refused, since their drum notes would be read as pitched notes
         """
         sources = [s.strip() for s in str(csv_path).split(',') if s.strip()]
         self.csv_paths = [Path(s) for s in sources if not s.startswith('store:')]
@@ -108,6 +114,7 @@ class MaestroDataset(Dataset):
         self.aug_stores = aug_stores
         self.cache_dir = Path(cache_dir)
         self.eval_stride = eval_stride
+        self.programs = programs
 
         self.pad = 1 if special_tokens else 0
         self.style_dropout = style_dropout
@@ -126,6 +133,7 @@ class MaestroDataset(Dataset):
             self.store_dirs.append(store)
             file_styles.append(self._store_styles(store, meta['n_files']))
         self._tokens = None  # memmaps, opened lazily in each DataLoader worker
+        self._programs = None
 
         store_ids, starts, lengths, styles_kept = [], [], [], []
         for i, store in enumerate(self.store_dirs):
@@ -246,18 +254,22 @@ class MaestroDataset(Dataset):
     @property
     def tokens(self):
         if self._tokens is None:
-            self._tokens = []
+            self._tokens, self._programs = [], []
             for store in self.store_dirs:
+                has_programs = (store / "programs.u8").exists()
                 # multi-instrument stores (data/prepare_gigamidi.py) keep drums in the stream: not for the piano model
-                assert not (store / "programs.u8").exists(), f"{store} has instrument programs; loader can't use them yet"
+                assert self.programs or not has_programs, f"{store} has instrument programs: pass programs=True"
                 n = int(np.load(store / "offsets.npy")[-1])
                 self._tokens.append(np.memmap(store / "tokens.u16", dtype=np.uint16, mode="r", shape=(n, 4)))
+                self._programs.append(np.memmap(store / "programs.u8", dtype=np.uint8, mode="r", shape=(n,))
+                                      if has_programs else None)  # None = piano, program 0
         return self._tokens
 
     def __getstate__(self):
         # never pickle the memmap into DataLoader workers, each worker opens its own
         state = self.__dict__.copy()
         state["_tokens"] = None
+        state["_programs"] = None
         return state
 
     # ------------------------------------------------------------------ sampling
@@ -272,17 +284,25 @@ class MaestroDataset(Dataset):
         return max(1, int(self.lengths.sum()) // self.block_size)
 
     def _read(self, file_idx, v):
-        """block_size + 1 rows of the file's virtual sequence ([BOS] + notes + [EOS] with special tokens) from v."""
+        """block_size + 1 rows of the file's virtual sequence ([BOS] + notes + [EOS] with special tokens) from v:
+        (rows, 4) tokens and, with programs, (rows,) instruments (BOS/EOS and piano stores = 0), else None."""
         store_id, start = int(self.store_ids[file_idx]), int(self.starts[file_idx])
         n = int(self.lengths[file_idx]) - 2 * self.pad
         tokens = self.tokens[store_id]
         lo, hi = v - self.pad, v - self.pad + self.block_size + 1  # real note range
-        rows = tokens[start + max(lo, 0):start + min(hi, n)].astype(np.int64)
+        a, b = start + max(lo, 0), start + min(hi, n)
+        rows = tokens[a:b].astype(np.int64)
+        programs = None
+        if self.programs:
+            store_programs = self._programs[store_id]
+            programs = store_programs[a:b].astype(np.int64) if store_programs is not None else np.zeros(b - a, np.int64)
         if lo < 0:
             rows = np.concatenate([np.array([[BOS_PITCH, 0, 0, 0]]), rows])
+            programs = None if programs is None else np.concatenate([[0], programs])
         if hi > n:
             rows = np.concatenate([rows, np.array([[EOS_PITCH, 0, 0, 0]])])
-        return torch.from_numpy(rows)
+            programs = None if programs is None else np.concatenate([programs, [0]])
+        return torch.from_numpy(rows), None if programs is None else torch.from_numpy(programs)
 
     def __getitem__(self, idx):
         if self.eval_stride:
@@ -305,15 +325,21 @@ class MaestroDataset(Dataset):
                 elif r < self.boundary_frac:
                     v = int(self.lengths[file_idx]) - self.block_size - 1  # ends with EOS
 
-        pitch, velocity, duration, delta_time = self._read(file_idx, v).unbind(1)
+        rows, program = self._read(file_idx, v)
+        pitch, velocity, duration, delta_time = rows.unbind(1)
+        drums = program == DRUM_PROGRAM if program is not None else None
+        if drums is not None:
+            duration = torch.where(drums, 0, duration)  # drum hits have no meaningful length
 
         if self.augment and not self.eval_stride:
             # transpose by up to ±5 semitones, limited so no note leaves 0..127 (clamping would bend them);
-            # BOS/EOS (pitch >= 128) stay as they are
+            # BOS/EOS (pitch >= 128) and drums (pitch = drum sound) stay as they are
             notes = pitch < 128
-            lo, hi = int(pitch[notes].min()), int(pitch[notes].max())
-            shift = random.randint(max(-5, -lo), min(5, 127 - hi))
-            pitch = torch.where(notes, pitch + shift, pitch)
+            pitched = notes if drums is None else notes & ~drums
+            if pitched.any():
+                lo, hi = int(pitch[pitched].min()), int(pitch[pitched].max())
+                shift = random.randint(max(-5, -lo), min(5, 127 - hi))
+                pitch = torch.where(pitched, pitch + shift, pitch)
             store_augmented = self.aug_stores is None or bool(self.aug_stores[int(self.store_ids[file_idx])])
             if self.aug_tempo and store_augmented:
                 s = (1 + self.aug_tempo) ** random.uniform(-1, 1)
@@ -325,7 +351,10 @@ class MaestroDataset(Dataset):
                 shift = random.randint(-self.aug_velocity, self.aug_velocity)
                 velocity = torch.where(notes, (velocity + shift).clamp(0, self.velocity_bins - 1), velocity)
 
-        x, y = self._split_xy((pitch, velocity, duration, delta_time))
+        streams = (pitch, velocity, duration, delta_time) + ((program,) if program is not None else ())
+        x, y = self._split_xy(streams)
+        if drums is not None:
+            y = (y[0], y[1], torch.where(drums[1:], -1, y[2])) + y[3:]  # no duration loss on drum notes
         if self.file_style is not None:
             style = int(self.file_style[file_idx])
             if self.augment and not self.eval_stride and random.random() < self.style_dropout:
