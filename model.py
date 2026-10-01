@@ -22,6 +22,23 @@ class LayerNorm(nn.Module):
         return F.layer_norm(x, self.weight.shape, self.weight, self.bias, self.eps)
 
 
+def rope_tables(positions, head_size, base):
+    """RoPE (Su et al. 2021): cos/sin of the angle pos * theta_i for the head_size/2 rotation pairs, (T, head_size)
+    each (the angles repeated for both halves, matching apply_rope's rotate-half layout). fp32, cast by the caller."""
+    inv_freq = base ** (-torch.arange(0, head_size, 2, dtype=torch.float32, device=positions.device) / head_size)
+    angles = positions.float()[:, None] * inv_freq[None, :]
+    angles = torch.cat([angles, angles], dim=-1)
+    return angles.cos(), angles.sin()
+
+
+def apply_rope(x, cos, sin):
+    """Rotate pair i = (x[..., i], x[..., i + hs/2]) by its angle. q·k of two rotated vectors then depends only on the
+    distance of their positions. x: (B, nh, T, hs), cos/sin: (T, hs)."""
+    x1, x2 = x.chunk(2, dim=-1)
+    rotated = torch.cat([-x2, x1], dim=-1)
+    return x * cos.to(x.dtype) + rotated * sin.to(x.dtype)
+
+
 class CausalSelfAttention(nn.Module):
 
     def __init__(self, config):
@@ -43,10 +60,11 @@ class CausalSelfAttention(nn.Module):
             self.register_buffer("bias", torch.tril(torch.ones(config.block_size, config.block_size))
                                         .view(1, 1, config.block_size, config.block_size))
 
-    def forward(self, x, cache=None, layer=0):
+    def forward(self, x, cache=None, layer=0, rope=None):
         """cache (inference only): a KVCache with preallocated k/v buffers. x is either a prefill from position 0
         (T > 1, causal) or one new position at cache.pos that attends to positions <= cache.pos (T == 1).
-        Shapes never change, so the one-position step can be captured in a CUDA graph."""
+        Shapes never change, so the one-position step can be captured in a CUDA graph.
+        rope: (cos, sin) tables of x's positions (pos_emb='rope'); keys are cached already rotated."""
         B, T, C = x.size() # batch size, sequence length, embedding dimensionality (n_embd)
 
         # calculate query, key, values for all heads in batch and move head forward to be the batch dim
@@ -54,6 +72,8 @@ class CausalSelfAttention(nn.Module):
         k = k.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
         q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
         v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
+        if rope is not None:
+            q, k = apply_rope(q, *rope), apply_rope(k, *rope)
         causal, mask = True, None
         if cache is not None:
             ck, cv = cache.k[layer], cache.v[layer]
@@ -148,8 +168,8 @@ class Block(nn.Module):
         self.ln_2 = LayerNorm(config.n_embd, bias=config.bias)
         self.mlp = MoEMLP(config) if config.moe_experts else MLP(config)
 
-    def forward(self, x, cache=None, layer=0):
-        x = x + self.attn(self.ln_1(x), cache, layer)
+    def forward(self, x, cache=None, layer=0, rope=None):
+        x = x + self.attn(self.ln_1(x), cache, layer, rope)
         x = x + self.mlp(self.ln_2(x))
         return x
 
@@ -191,6 +211,10 @@ class MusicConfig:
     # multi-instrument: a 5th note attribute, the instrument (GM program 0-127, DRUM_PROGRAM = drums); 0 = off.
     # Added to the input embedding (zero init, like the style table) and predicted by a cascade head after dt.
     n_programs: int = 0
+    # positions: 'learned' = absolute table wpe (block_size rows, added to the input; old checkpoints), 'rope' = rotary
+    # embedding of q/k in every attention layer (relative, no parameters, so block_size can change after training)
+    pos_emb: str = 'learned'
+    rope_base: float = 10000.0
 
 
 BOS_PITCH, EOS_PITCH = 128, 129
@@ -340,13 +364,15 @@ class GPT(nn.Module):
 
         self.config = config
 
+        assert config.pos_emb in ('learned', 'rope'), config.pos_emb
         self.transformer = nn.ModuleDict(dict(
             music_embeddings = MusicEmbeddings(config),
-            wpe = nn.Embedding(config.block_size, config.n_embd),
             drop = nn.Dropout(config.dropout),
             h = nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
             ln_f = LayerNorm(config.n_embd, bias=config.bias),
         ))
+        if config.pos_emb == 'learned':
+            self.transformer['wpe'] = nn.Embedding(config.block_size, config.n_embd)
         if config.n_styles:
             self.transformer['style'] = nn.Embedding(config.n_styles, config.n_embd)
         if config.n_programs:
@@ -386,8 +412,12 @@ class GPT(nn.Module):
         the conditioning they were trained with (function-preserving growth to multi-instrument), and so is the
         instrument head's output layer."""
         own = self.state_dict()
-        changed = [k for k in own if k not in state_dict]
-        for k in changed:
+        # a learned-position checkpoint loaded into a RoPE model: the position table has no place to go
+        dropped = [k for k in state_dict if k.startswith('transformer.wpe.') and k not in own]
+        for k in dropped:
+            del state_dict[k]
+        changed = [k for k in own if k not in state_dict] + [f'{k} (dropped)' for k in dropped]
+        for k in [k for k in own if k not in state_dict]:
             # the new instrument head's output also starts at zero = a uniform guess (ln 129), not a random one
             if k.startswith('cascade.cond_emb.program.') or k == 'cascade.heads.program.out.weight':
                 state_dict[k] = torch.zeros_like(own[k])
@@ -410,7 +440,7 @@ class GPT(nn.Module):
         params are actually used as weights in the final layer, so we include them.
         """
         n_params = sum(p.numel() for p in self.parameters())
-        if non_embedding:
+        if non_embedding and 'wpe' in self.transformer:
             n_params -= self.transformer.wpe.weight.numel()
         return n_params
 
@@ -432,9 +462,12 @@ class GPT(nn.Module):
             cache.mask.copy_((cache.slots <= cache.pos).view(1, 1, 1, -1))
         else:
             seq_pos = torch.arange(0, t, dtype=torch.long, device=device)
-        tok_emb = self.transformer.music_embeddings(pitch, velocity, duration, delta_time)
-        pos_emb = self.transformer.wpe(seq_pos)
-        x = tok_emb + pos_emb
+        x = self.transformer.music_embeddings(pitch, velocity, duration, delta_time)
+        rope = None
+        if self.config.pos_emb == 'rope':
+            rope = rope_tables(seq_pos, self.config.n_embd // self.config.n_head, self.config.rope_base)
+        else:
+            x = x + self.transformer.wpe(seq_pos)
         if self.config.n_programs:
             # program: (B, T) instrument of each input note; models with programs need it (piano stores send 0)
             x = x + self.transformer['program'](program)
@@ -442,7 +475,7 @@ class GPT(nn.Module):
             x = x + self.transformer['style'](style).unsqueeze(1)  # style: (B,) -> added at every position
         x = self.transformer.drop(x)
         for i, block in enumerate(self.transformer.h):
-            x = block(x, cache, i)
+            x = block(x, cache, i, rope)
         return self.transformer.ln_f(x)
 
     def _head_logits(self, x, targets=None):
@@ -491,7 +524,9 @@ class GPT(nn.Module):
 
     def crop_block_size(self, block_size):
         assert block_size <= self.config.block_size
-        self.transformer.wpe.weight = nn.Parameter(self.transformer.wpe.weight[:block_size])
+        self.config.block_size = block_size
+        if 'wpe' in self.transformer:
+            self.transformer.wpe.weight = nn.Parameter(self.transformer.wpe.weight[:block_size])
         for block in self.transformer.h:
             if hasattr(block.attn, 'bias'):
                 block.attn.bias = block.attn.bias[:, :, :block_size, :block_size]

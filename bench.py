@@ -31,6 +31,7 @@ def parse_args():
     p.add_argument('--n_embd', type=int, default=512)
     p.add_argument('--n_head', type=int, default=8)
     p.add_argument('--block', type=int, default=512)
+    p.add_argument('--pos_emb', default='learned', choices=['learned', 'rope'])
     p.add_argument('--tokens_per_step', type=int, default=30720)
     p.add_argument('--micro', type=int, nargs='+', default=[6, 12, 30, 60])
     p.add_argument('--compile', type=int, nargs='+', default=[0, 1])
@@ -44,7 +45,7 @@ def parse_args():
 def bench(args, micro, compiled, attn, fp8, profile=False):
     torch.manual_seed(0)
     cfg = MusicConfig(n_layer=args.n_layer, n_embd=args.n_embd, n_head=args.n_head, block_size=args.block,
-                      dropout=0.0, label_smoothing=0.0)
+                      pos_emb=args.pos_emb, dropout=0.0, label_smoothing=0.0)
     model = GPT(cfg).cuda()
     if fp8:
         from torchao.float8 import convert_to_float8_training
@@ -107,7 +108,7 @@ def main():
     args = parse_args()
     n = sum(p.numel() for p in GPT(MusicConfig(n_layer=args.n_layer, n_embd=args.n_embd,
                                                n_head=args.n_head)).parameters())
-    print(f"model {args.n_layer}L x {args.n_embd} ({n / 1e6:.1f}M), block {args.block}, "
+    print(f"model {args.n_layer}L x {args.n_embd} ({n / 1e6:.1f}M), block {args.block} {args.pos_emb}, "
           f"{args.tokens_per_step:,} tokens/step, {torch.cuda.get_device_name()}")
     print(f"{'micro':>6}{'compile':>8}{'attn':>10}{'fp8':>5}{'tok/s':>11}{'ms/step':>9}{'peak GB':>9}")
     if args.profile:
