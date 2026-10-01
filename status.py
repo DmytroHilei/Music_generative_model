@@ -10,6 +10,7 @@ the running jobs.
 
 import argparse
 import csv
+import json
 import os
 import re
 import shutil
@@ -137,8 +138,39 @@ def training_table(done_keep=None):
     return t
 
 
+GIGA_BAR = re.compile(r'^(\w+):\s+(\d+)%\|[^|]*\|\s*(\d+)/(\d+) \[([\d:]+)<([\d:?]+),\s*([\d.?]+)file/s'
+                      r'(?:, notes=(\w+), per_file=\d+, proj_gb=([\d.]+))?', re.M)
+GIGA_DONE = re.compile(r'^(\w+): ([\d,]+) files, ([\d,]+) notes, (\d+) failed', re.M)
+
+
+def gigamidi_row(t):
+    """data/prepare_gigamidi.py: splits finished (from the progress file) and the one being tokenized (from its log)."""
+    progress_path = ROOT / 'data/gigamidi/gigamidi_progress.json'
+    if not progress_path.exists():
+        return
+    done = [split for split, st in json.loads(progress_path.read_text()).items() if st.get('done')]
+    is_running = running('data/prepare_gigamidi.py')
+    text = tail_text(LOGS / 'prepare_gigamidi.log') or ''
+    bars = GIGA_BAR.findall(text)
+    stopped = 'STOP:' in text[-2000:]
+    state = (Text('running', style='bold yellow') if is_running else Text('stopped (disk)', style='red') if stopped
+             else Text('done', style='green') if 'train' in done else Text('idle', style='dim'))
+    detail = f"done: {', '.join(done) or '—'}"
+    if bars and is_running:
+        split, _, cur, tot, _, eta, rate, notes, proj = bars[-1]
+        detail += f"; {split}: {rate} files/s, ETA {eta}" + (f", {notes} notes, ~{proj} GB projected" if proj else '')
+        t.add_row('GigaMIDI tokenize', state, ProgressBar(total=int(tot), completed=int(cur)),
+                  f'{split} {int(cur):,}/{int(tot):,}', detail)
+        return
+    finished = GIGA_DONE.findall(text)
+    if finished:
+        detail += '; ' + ', '.join(f'{sp} {nf} files / {int(nn.replace(",", "")) / 1e6:.0f}M notes'
+                                   for sp, nf, nn, _ in finished)
+    t.add_row('GigaMIDI tokenize', state, ProgressBar(total=3, completed=len(done)), f'{len(done)}/3 splits', detail)
+
+
 def pipeline_table():
-    t = Table(title='Fine-tune data pipeline', expand=True, title_justify='left')
+    t = Table(title='Data pipeline', expand=True, title_justify='left')
     for col in ('stage', 'state', 'progress', 'count', 'detail'):
         t.add_column(col, ratio=2 if col == 'progress' else None)
 
@@ -193,6 +225,7 @@ def pipeline_table():
     failed = sum((tail_text(LOGS / n) or '').count('FAILED') for n in ('reduce.log', 'reduce2.log'))
     t.add_row('piano reduction', red_state, ProgressBar(total=max(1, len(reduced) + pending), completed=len(reduced)),
               f'{len(reduced)}/{len(reduced) + pending}', rate + (f'; {failed} failed' if failed else ''))
+    gigamidi_row(t)
     return t
 
 

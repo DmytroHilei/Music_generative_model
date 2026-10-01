@@ -5,10 +5,12 @@ Tokenize GigaMIDI straight from its downloaded archive into token stores, withou
     python data/prepare_gigamidi.py --zip ... --name gigamidi_probe --max-files 20000 --splits validation  # size probe
 
 The archive (HF repo file Final_GigaMIDI_V2.0_Final.zip, content V1.1) holds three deflated inner zips
-(training-80% / validation-10% / test-10%), each with drums-only/, no-drums/, all-instruments-with-drums/ folders.
+(training-80% / validation-10% / test-10%). Validation and test have drums-only/, no-drums/, all-instruments-with-drums/
+folders; training nests one level deeper, with one more zip per category (drums-only.zip etc., up to 3.4 GB each).
 An inner zip is compressed inside the outer one, so it can't be seeked cheaply: its central directory is read once,
-then the inner zip is streamed forward once and every member is sliced out at its header offset. Decompression and
-tokenization run in worker processes from memory.
+then the inner zip is streamed forward once and every member is sliced out at its header offset. A nested category
+zip is decompressed into memory whole (one at a time) and sliced the same way. Decompression and tokenization of the
+MIDI files run in worker processes from memory.
 
 Writes data/cache/<name>_{train,validation,test}/ with
     tokens.u16    (n_notes, 4) pitch, velocity, duration, delta_time -- same layout as the other stores
@@ -111,6 +113,40 @@ def iter_inner(outer, member, infos):
             yield info, info.compress_type, raw
 
 
+def midi_infos(infos, max_bytes, categories=None):
+    """The .mid members (of the wanted categories, if given) in header-offset order, i.e. archive order."""
+    return sorted((i for i in infos if i.filename.lower().endswith('.mid') and not i.filename.startswith('__MACOSX')
+                   and (categories is None or i.filename.split('/')[1] in categories) and i.file_size <= max_bytes),
+                  key=lambda i: i.header_offset)
+
+
+def iter_split(outer, member, categories, max_bytes):
+    """Yield (category, info, compress_type, raw bytes) of every MIDI file of one split, in a fixed order.
+    Flat split: <split>/<category>/*.mid. Nested split: <split>/<category>.zip, each decompressed into memory."""
+    with outer.open(member) as f:
+        infos = zipfile.ZipFile(f).infolist()
+    nested = sorted((i for i in infos if i.filename.endswith('.zip') and not i.filename.startswith('__MACOSX')
+                     and Path(i.filename).stem in categories), key=lambda i: i.header_offset)
+    if not nested:
+        for info, method, raw in iter_inner(outer, member, midi_infos(infos, max_bytes, categories)):
+            yield info.filename.split('/')[1], info, method, raw
+        return
+    for cat_info, method, raw in iter_inner(outer, member, nested):
+        category = Path(cat_info.filename).stem
+        print(f'  {category}: decompressing {cat_info.file_size / 1e9:.1f} GB into memory ...', flush=True)
+        data = zlib.decompress(raw, -15) if method == zipfile.ZIP_DEFLATED else raw
+        del raw
+        view = memoryview(data)
+        for info in midi_infos(zipfile.ZipFile(io.BytesIO(data)).infolist(), max_bytes):
+            o = info.header_offset
+            if data[o:o + 4] != b'PK\x03\x04':
+                raise ValueError(f'bad local header for {info.filename}')
+            name_len, extra_len = struct.unpack('<HH', data[o + 26:o + 30])
+            o += 30 + name_len + extra_len
+            yield category, info, info.compress_type, bytes(view[o:o + info.compress_size])
+        del view, data
+
+
 class ResumableStore:
     """tokens.u16 + programs.u8 + offsets.npy, checkpointed so a crash loses one checkpoint interval at most."""
 
@@ -167,15 +203,15 @@ def main():
             if state['done']:
                 continue
             print(f'{split}: reading the central directory of {members[prefix]} ...', flush=True)
-            with outer.open(members[prefix]) as f:
-                infos = zipfile.ZipFile(f).infolist()
-            infos = sorted((i for i in infos if i.filename.lower().endswith('.mid')
-                            and not i.filename.startswith('__MACOSX') and i.filename.split('/')[1] in categories
-                            and i.file_size <= args.max_bytes), key=lambda i: i.header_offset)
-            infos = infos[:args.max_files]
+            # (category, filename) per file index k, filled as the archive is streamed
+            names = []
+            # files per split, for the progress bar and the size projection (nested splits aren't listed up front)
+            expected = {'train': 1_709_000}.get(split, 213_600)
+            if args.max_files:
+                expected = min(expected, args.max_files)
             store = ResumableStore(Path(args.cache_dir) / f'{args.name}_{split}', resume=state['files'] > 0)
             start = state['files']
-            pbar = tqdm(desc=split, unit='file', total=len(infos), initial=start, smoothing=0.05)
+            pbar = tqdm(desc=split, unit='file', total=expected, initial=start, smoothing=0.05)
             rows = []
 
             def save():
@@ -186,15 +222,22 @@ def main():
                 progress[split] = state
                 progress_path.write_text(json.dumps(progress, indent=1))
 
-            items = ((k, m, raw) for k, (info, m, raw) in enumerate(iter_inner(outer, members[prefix], infos))
-                     if k >= start)
-            for k, result in pool.imap(work, items, chunksize=64):  # imap keeps archive order
-                info = infos[k]
+            def items():
+                for k, (category, info, m, raw) in enumerate(
+                        iter_split(outer, members[prefix], categories, args.max_bytes)):
+                    if args.max_files is not None and k >= args.max_files:
+                        return
+                    names.append((category, info.filename))
+                    if k >= start:
+                        yield k, m, raw
+
+            for k, result in pool.imap(work, items(), chunksize=64):  # imap keeps archive order
+                category, filename = names[k]
                 if result is None:
                     state['failed'] += 1
                 else:
                     store.add(*result)
-                    rows.append(dict(md5=Path(info.filename).stem, split=split, category=info.filename.split('/')[1],
+                    rows.append(dict(md5=Path(filename).stem, split=split, category=category,
                                      n_notes=len(result[0]), n_programs=len(np.unique(result[1]))))
                 state['files'] = k + 1
                 pbar.update(1)
@@ -202,7 +245,7 @@ def main():
                     save()
                     notes = store.offsets[-1]
                     pbar.set_postfix(notes=f'{notes / 1e6:.0f}M', per_file=f'{notes / (len(store.offsets) - 1):.0f}',
-                                     proj_gb=f'{notes * 9 / 1e9 * len(infos) / state["files"]:.1f}')
+                                     proj_gb=f'{notes * 9 / 1e9 * expected / state["files"]:.1f}')
                     if shutil.disk_usage(work_dir).free / 1e9 < args.min_free_gb:
                         print(f'\nSTOP: less than {args.min_free_gb} GB free; rerun to resume', flush=True)
                         return

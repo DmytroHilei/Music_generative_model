@@ -204,8 +204,13 @@ Goal: one model over all instruments (GigaMIDI + Aria + reductions), grown from 
 Ukrainian multi-track songs. Generation gets `--instrument` (mask the instrument head to an allowed set).
 
 **Data**
-1. ☐ Disk: ~50 GB for tokenized GigaMIDI (mount the Windows NTFS partition, or an external drive). Blocker.
-2. ☐ Tokenize GigaMIDI (`data/prepare_gigamidi.py`, ready; ~3.5 h). Then the 5.5 GB zip can go (ask the user).
+1. ☑ Disk: /home resized to 115 GB (54 GB free on 2026-10-01); / is 97 GB (67 GB free, root-owned). Probe: ~21 KB/file,
+   validation = 213,621 files → ~4.7 GB, so all ~2.1M files ≈ 47 GB. Tight on /home.
+2. ◐ Tokenize GigaMIDI (`data/prepare_gigamidi.py`, log `logs/prepare_gigamidi.log`, `--min-free-gb 5`, on the dashboard).
+   Validation 209,500 files / 245M notes, test 209,492 / 244M (≈2% failed). **Train nests one level deeper** (category
+   .zips inside the training zip) and first came out empty; fixed (each category zip decompressed in memory), restarted
+   2026-10-01 23:00 (~1.7M files). Share kept by the loader (files > block_size): 92% of notes at 512, 80% at 2048
+   (the dropped files are mostly short drums-only loops). Then the 5.5 GB zip can go (ask the user).
 3. ☐ Expressive vs quantized label per file (GigaMIDI is ~70% machine-timed, constant velocity): compute an onset-on-grid
    fraction ourselves (the zip has no NOMML) → style label, so piano expressiveness isn't diluted. Optional: the HF metadata CSV
    (1.25 GB, gated) for genres.
@@ -216,7 +221,7 @@ Ukrainian multi-track songs. Generation gets `--instrument` (mask the instrument
 6. ☐ Mix weights (GigaMIDI / Aria piano / reductions) and a filter for pathological files (1-note, >30 min, drums-only share).
 
 **Tokens / model**
-7. ☐ Instrument attribute: 129 values (128 GM programs + drums) with an embedding added like the style table; head in the cascade
+7. ☑ (2026-10-01, `n_programs=129`; smoke-tested, see log) Instrument attribute: 129 values (128 GM programs + drums) with an embedding added like the style table; head in the cascade
    dt → instrument → pitch → dur → vel (pitch/dur/vel heads see the instrument). Drums: duration loss masked.
 8. ☐ Context: multi-track is ~3–5× denser per second, 512 notes = a few seconds of a band → 2048. Learned `wpe` stops at 512:
    either interpolate it (keeps weights, weak) or switch to RoPE (needs a re-adaptation phase). Decide with a pilot (13).
@@ -225,7 +230,9 @@ Ukrainian multi-track songs. Generation gets `--instrument` (mask the instrument
 10. ☐ Memory check on 8 GB: 400M + Muon at 2048 context likely needs activation checkpointing; fall back to ~250M.
 
 **Infra**
-11. ☐ Loader: `programs.u8` stores, 5-attribute batches (drop the guard in `MaestroDataset.tokens`), windows at 2048.
+11. ◐ Loader: `programs=True` reads `programs.u8` (piano stores = 0), drums not transposed, drum duration 0 in x / -1 in
+   y. train.py passes program/style as keyword inputs, logs `ce/program`, `ce/total_all` (`ce/total` stays the 4 note
+   heads). Left: windows at 2048 (needs item 8).
 12. ☐ Eval: per-head CE incl. instrument; val sets GigaMIDI val, Aria val (piano forgetting), Ukrainian reductions.
 13. ☐ Pilots (1–2 h each) before the long run: grown vs scratch at equal steps (does preserving weights pay?), RoPE vs interpolated
    wpe, 129 programs vs 17 families. Then size the multi-day run (compute-optimal ≈ 400M / 8B tokens per week on this laptop).
@@ -320,6 +327,7 @@ pretraining and the Skryabin fine-tune, so there's a strong AR baseline to compa
 | 2026-10-01 | ua-C (augmentation) | 7396237 | B3 ×30 recipe on the 448 songs, 600 it: `C_tempo` (`aug_tempo=0.1`, all stores), `C_tempovel` (+ `aug_velocity=2`), `C_seed2` (no aug, seed 2) | best Ukrainian val: seed2 **10.500 @400** then up to 10.515 (B3 ×30 seed 1: 10.489). tempo **10.479 @599**, tempovel 10.497 @599. val2 (Aria pop+rock) 5.90 → **6.07 / 6.27** | **Tempo aug stops the overfitting** (still falling at 600; no-aug peaks at 400 and rises). Seed noise ≈ ±0.01. Velocity aug hurts: drop it. Augmenting the replay store too inflates val2 (the replay should stay real) → `aug_stores` |
 | 2026-10-01 | ua-C3 (tempo on UA only) | c3950fb | as C_tempo with `aug_stores=1,0` (replay real): ±10% vs ±20%, then ±20% at 1,200 it (WSD over 1,200) | ±10% **10.481**, ±20% **10.480** @599 (tie), val2 5.87 (= no-aug level). 1,200 it: minimum **10.499 @600** (LR still high), then rises to 10.59 at the end while train falls 9.78 → 9.35; val2 5.89 | Keeping the replay real fixes val2 at no cost on the target. **±10% = ±20%**. On 448 songs **600 steps is the budget**: at 1,200 it overfits even with tempo aug, and the final decay doesn't recover it. For the bigger set, scale steps with the number of Ukrainian notes (~600 per 448 songs) |
 | 2026-10-01 | ua-D (full set) | 7024793 | from B1, 1,280 train / 165 val songs (`ukrainian_reduction_v2.csv`, 101 wrong hits excluded via `data/finetune/exclude.txt`), tempo ±10% on UA only, 1,700 it (600 × 1280/448) | **same-val comparison** (eval_only): old 48-song val C_tempo_ft 10.481 → **D 10.238 (−0.243)**; new 165-song val 10.787 → **10.551 (−0.236)**; val2 5.871 → 5.864 | **2.9× the songs = −0.24 CE, ~24× seed noise**, the biggest fine-tune gain so far (domain label / pop+rock stage / aug: ≤0.03 each). All heads improve, pitch most (−0.09). The dashboard's 10.551 is on the new, harder val (new artists) so it is not comparable to C's 10.481. Still falling at 1,700 (−0.008/100 it), no overfitting, no extra forgetting → more data / steps still pay. **New recommended fine-tuned model: `checkpoints/ua_D_big`** |
+| 2026-10-01 | multi-instrument smoke | (this commit) | big_107M grown to `n_programs=129` (`init_from=finetune`), Muon lr 3e-4, 5 warmup, 40 it × 4k notes, GigaMIDI test as train 0.7 + Aria 0.3 | step 0: Aria val 5.728 (4 heads identical to big_107M in a direct check), prog CE 4.860 = ln 129. Step 39: GigaMIDI val 6.676 → 5.299, prog 1.315, **Aria 5.728 → 6.667** | Growth is function-preserving. Piano forgetting is immediate at this LR/warmup: pilots need a long warmup, lower LR and/or more Aria replay |
 | 2026-09-29 | ladder-L-muon-lr1e-3 | d6c63c5 | L, Muon, lr 1e-3 (min 1e-4) | 1.913 / 1.961 / 2.684 / 1.473 = **8.032**; Aria **6.898** | **−0.16 vs Muon 6e-4**: Muon wants a higher LR (AdamW was flat 6e-4..1e-3). **New default: Muon lr 1e-3** |
 | 2026-09-29 | ladder-L-muon | 7c38542 | L with `optimizer_name=muon` (Moonlight-scaled, lr 6e-4, wd 0.1) | 1.974 / 1.978 / 2.713 / 1.497 = **8.162**; Aria **7.061** | **−0.54 Aria vs best AdamW**, only about 6% slower/step (25:41 vs 24:18). About 2× token efficiency (≈ AdamW iso-L at 194M tokens). **Adopt** |
 | 2026-09-29 | ladder-L-lr1e-3 | 7c38542 | L, AdamW lr 1e-3 (min 1e-4) | 2.286 / 1.999 / 2.777 / 1.564 = 8.626; Aria 7.598 | = lr 6e-4: flat optimum at ≥ 6e-4 |

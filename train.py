@@ -79,6 +79,7 @@ moe_top_k = 2
 moe_hidden_frac = 0.5
 moe_aux_weight = 0.01
 n_styles = 0              # set from style_map
+n_programs = 0            # multi-instrument: 129 = GM programs + drums (needs a programs.u8 store or reads piano as 0)
 
 # wandb logging
 wandb_log = True
@@ -136,26 +137,28 @@ ctx = nullcontext() if device_type == 'cpu' else torch.amp.autocast(device_type=
 
 
 def collate_fn(batch):
+    # X = (4 note streams, dict of the optional model inputs), Y = 4 streams (+ program)
     xs, ys = zip(*batch)
-    return (
-        tuple(torch.stack([x[i] for x in xs]) for i in range(len(xs[0]))),  # 4 streams (+ style ids)
-        tuple(torch.stack([y[i] for y in ys]) for i in range(4)),
-    )
+    x = [torch.stack([x[i] for x in xs]) for i in range(len(xs[0]))]
+    extra_names = (['program'] if n_programs else []) + (['style'] if styles else [])
+    assert len(x) == 4 + len(extra_names), f"{len(x)} input streams, expected 4 + {extra_names}"
+    return (tuple(x[:4]), dict(zip(extra_names, x[4:]))), tuple(torch.stack([y[i] for y in ys]) for i in range(len(ys[0])))
 
 
 # train: random windows (uniform over all note positions of all files), with augmentation
 train_dataset = MaestroDataset(csv_path, root_dir=root_dir, split='train', block_size=block_size,
                                augment=True, cache_dir=cache_dir, special_tokens=special_tokens,
                                styles=styles, style_dropout=style_dropout, boundary_frac=boundary_frac,
-                               aug_tempo=aug_tempo, aug_velocity=aug_velocity,
+                               aug_tempo=aug_tempo, aug_velocity=aug_velocity, programs=n_programs > 0,
                                aug_stores=[int(a) for a in str(aug_stores).strip('()[] ').split(',') if a.strip()] if aug_stores else None,
-                               source_weights=[float(w) for w in source_weights.split(',')] if source_weights else None)
+                               source_weights=[float(w) for w in str(source_weights).strip('()[] ').split(',') if w.strip()] if source_weights else None)
 
 
 def make_val_loader(sources):
     # fixed non-overlapping windows, evenly thinned to at most eval_iters batches -> identical every eval / run
     ds = MaestroDataset(sources, root_dir=root_dir, split='validation', block_size=block_size,
-                        cache_dir=cache_dir, eval_stride=block_size, special_tokens=special_tokens, styles=styles)
+                        cache_dir=cache_dir, eval_stride=block_size, special_tokens=special_tokens, styles=styles,
+                        programs=n_programs > 0)
     max_val_windows = eval_iters * batch_size
     if len(ds) > max_val_windows:
         step = len(ds) / max_val_windows
@@ -178,9 +181,9 @@ wandb_run_id = None
 arch_keys = ['n_layer', 'n_head', 'n_embd', 'block_size', 'bias', 'pitch_size', 'velocity_size',
              'duration_size', 'delta_time_size', 'cascade_heads', 'cascade_residual',
              'pitch_head_blocks', 'pitch_head_mult', 'moe_experts', 'moe_top_k', 'moe_hidden_frac', 'moe_aux_weight',
-             'n_styles']
+             'n_styles', 'n_programs']
 # what checkpoints that predate a key actually used
-legacy_defaults = {'cascade_heads': False, 'cascade_residual': False, 'n_styles': 0}
+legacy_defaults = {'cascade_heads': False, 'cascade_residual': False, 'n_styles': 0, 'n_programs': 0}
 model_args = {k: globals()[k] for k in arch_keys}
 checkpoint = None
 
@@ -191,8 +194,8 @@ if init_from in ('resume', 'finetune'):
     for k in arch_keys:
         wanted = model_args[k]
         model_args[k] = checkpoint['model_args'].get(k, legacy_defaults.get(k, model_args[k]))
-        if init_from == 'finetune' and k in ('pitch_size', 'n_styles') and wanted > model_args[k]:
-            model_args[k] = wanted  # grow: BOS/EOS rows, a style table
+        if init_from == 'finetune' and k in ('pitch_size', 'n_styles', 'n_programs') and wanted > model_args[k]:
+            model_args[k] = wanted  # grow: BOS/EOS rows, a style table, the instrument attribute
 else:
     print("Initializing a new model from scratch")
 
@@ -259,10 +262,22 @@ def to_device(batch):
     return tuple(t.to(device, non_blocking=True) for t in batch)
 
 
+def to_device_x(X):
+    streams, extra = X
+    return to_device(streams), {k: v.to(device, non_blocking=True) for k, v in extra.items()}
+
+
 def infinite_batches(loader):
     while True:
         for X, Y in loader:
-            yield to_device(X), to_device(Y)
+            yield to_device_x(X), to_device(Y)
+
+
+def summed_ce(metrics):
+    # ce/total = the 4 note attributes (comparable with the piano runs); ce/total_all also counts the instrument head
+    metrics['ce/total'] = sum(metrics[f'ce/{name}'] for name in STREAM_ORDER)
+    if 'ce/program' in metrics:
+        metrics['ce/total_all'] = metrics['ce/total'] + metrics['ce/program']
 
 
 @torch.no_grad()
@@ -271,16 +286,16 @@ def estimate_val_loss(loader):
     model.eval()
     sums, n = {}, 0
     for X, Y in loader:
-        X, Y = to_device(X), to_device(Y)
+        (streams, extra), Y = to_device_x(X), to_device(Y)
         with ctx:
-            parts, loss = model(*X, targets=Y)
+            parts, loss = model(*streams, **extra, targets=Y)
         sums['loss'] = sums.get('loss', 0.0) + loss.item()
         for name, v in parts.items():
             sums[f'ce/{name}'] = sums.get(f'ce/{name}', 0.0) + v.item()
         n += 1
     model.train()
     out = {k: v / n for k, v in sums.items()}
-    out['ce/total'] = sum(out[f'ce/{name}'] for name in STREAM_ORDER)
+    summed_ce(out)
     return out
 
 
@@ -352,11 +367,13 @@ for iter_num in pbar:
         val2 = estimate_val_loss(val2_loader) if val2_loader else {}
         train = {k: (v / train_n).item() for k, v in train_sums.items()} if train_n else {}
         if train:
-            train['ce/total'] = sum(train[f'ce/{name}'] for name in STREAM_ORDER)
+            summed_ce(train)
         heads = " ".join(f"{name[:3]} {val[f'ce/{name}']:.3f}" for name in STREAM_ORDER)
         tqdm.write(f"step {iter_num}: train loss {train.get('loss', float('nan')):.4f}, "
                    f"val loss {val['loss']:.4f} | val CE {val['ce/total']:.3f} ({heads})"
-                   + (f" | val2 CE {val2['ce/total']:.3f}" if val2 else ""))
+                   + (f" | val2 CE {val2['ce/total']:.3f}" if val2 else "")
+                   # instrument head last, so status.py's STEP pattern still matches the line
+                   + (f" | prog CE {val['ce/program']:.3f}" if 'ce/program' in val else ""))
         if wandb_log:
             wandb.log({"iter": iter_num, "lr": lr,
                        **{f"val/{k}": v for k, v in val.items()},
@@ -388,7 +405,7 @@ for iter_num in pbar:
     # forward backward update, with gradient accumulation
     for micro_step in range(gradient_accumulation_steps):
         with ctx:
-            parts, loss = model(*X, targets=Y)
+            parts, loss = model(*X[0], **X[1], targets=Y)
         # kept as GPU tensors to avoid a CPU sync per micro step
         train_sums['loss'] = train_sums.get('loss', 0.0) + loss.detach() / gradient_accumulation_steps
         for name, v in parts.items():
