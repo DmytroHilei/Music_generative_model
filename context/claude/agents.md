@@ -197,6 +197,45 @@ Summary of the agent's suggested order:
 4. Research: hybrid SSM / linear attention (flash-linear-attention is Triton, likely easier on sm_120 than mamba-ssm), masked diffusion.
 Tested and rejected: MoE FFN, bigger pitch head. Speed work (not architecture) lives in `context/claude/optimizations.md`.
 
+## Multi-instrument pretraining: to-do (2026-10-01)
+
+Goal: one model over all instruments (GigaMIDI + Aria + reductions), grown from `big_107M` so the piano knowledge is kept
+(function-preserving init: new parts start at zero, step-0 loss on piano val must equal the old model's), then fine-tuned on
+Ukrainian multi-track songs. Generation gets `--instrument` (mask the instrument head to an allowed set).
+
+**Data**
+1. ☐ Disk: ~50 GB for tokenized GigaMIDI (mount the Windows NTFS partition, or an external drive). Blocker.
+2. ☐ Tokenize GigaMIDI (`data/prepare_gigamidi.py`, ready; ~3.5 h). Then the 5.5 GB zip can go (ask the user).
+3. ☐ Expressive vs quantized label per file (GigaMIDI is ~70% machine-timed, constant velocity): compute an onset-on-grid
+   fraction ourselves (the zip has no NOMML) → style label, so piano expressiveness isn't diluted. Optional: the HF metadata CSV
+   (1.25 GB, gated) for genres.
+4. ☐ Existing piano stores (Aria, MAESTRO, GiantMIDI, reductions) = program 0 implicitly (no re-tokenizing).
+5. ☐ Ukrainian multi-track data: the mp3s were deleted after reduction → re-download from `data/audio/songs.csv` (minus
+   `exclude.txt`), Demucs stems → basic-pitch per stem (bass → 33, vocals → melody program, other → guitar/keys), drums need a
+   drum transcriber (ADTOF / Omnizart). Process + delete per song, like `--delete-audio`.
+6. ☐ Mix weights (GigaMIDI / Aria piano / reductions) and a filter for pathological files (1-note, >30 min, drums-only share).
+
+**Tokens / model**
+7. ☐ Instrument attribute: 129 values (128 GM programs + drums) with an embedding added like the style table; head in the cascade
+   dt → instrument → pitch → dur → vel (pitch/dur/vel heads see the instrument). Drums: duration loss masked.
+8. ☐ Context: multi-track is ~3–5× denser per second, 512 notes = a few seconds of a band → 2048. Learned `wpe` stops at 512:
+   either interpolate it (keeps weights, weak) or switch to RoPE (needs a re-adaptation phase). Decide with a pilot (13).
+9. ☐ Growth path in `load_grown`: zero-init instrument embedding + new input columns of the heads (function-preserving),
+   optional depth/width up-scaling (duplicate layers with zero-init output projections) for 250–400M.
+10. ☐ Memory check on 8 GB: 400M + Muon at 2048 context likely needs activation checkpointing; fall back to ~250M.
+
+**Infra**
+11. ☐ Loader: `programs.u8` stores, 5-attribute batches (drop the guard in `MaestroDataset.tokens`), windows at 2048.
+12. ☐ Eval: per-head CE incl. instrument; val sets GigaMIDI val, Aria val (piano forgetting), Ukrainian reductions.
+13. ☐ Pilots (1–2 h each) before the long run: grown vs scratch at equal steps (does preserving weights pay?), RoPE vs interpolated
+   wpe, 129 programs vs 17 families. Then size the multi-day run (compute-optimal ≈ 400M / 8B tokens per week on this laptop).
+14. ☐ Long run with `ckpt_interval_min` (test crash-resume first), dashboard rows.
+
+**Generation**
+15. ☐ `generate.py`: sample the instrument head, `--instrument` allowed set (mask logits), write one MIDI track per program
+   (drums on channel 10), per-instrument polyphony limits.
+16. ☐ Ukrainian multi-track fine-tune (data from 5), same recipe as ua-D (replay, tempo aug, steps ∝ songs).
+
 ## Diffusion idea (discussed 2026-09-28, not started)
 
 Diffusion would **add** a capability (arrangement and editing) rather than replace the AR model. The natural time is after the 24 h
