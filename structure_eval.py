@@ -179,7 +179,7 @@ def sample(model, cfg, args, style, device, job, base):
     torch.manual_seed(args.seed)
     with torch.no_grad():
         out = model.generate(*seed, max_new_tokens=args.max_new, temperature=args.temperature,
-                             top_p=args.top_p, cfg_scale=args.cfg, dt_bias=args.dt_bias, style=style, min_new=args.min_notes, cuda_graph=False,
+                             top_p=args.top_p, cfg_scale=args.cfg, dt_bias=args.dt_bias, eos_t1=args.eos_t1, style=style, min_new=args.min_notes, cuda_graph=False,
                              progress=lambda n: job.update(base + n * B))
     pieces = []
     for r in range(B):
@@ -220,6 +220,7 @@ def main():
     ap.add_argument('--top-p', type=float, default=None)
     ap.add_argument('--cfg', type=float, default=1.0, help='classifier-free guidance on the style (1 = off)')
     ap.add_argument('--dt-bias', type=float, default=0.0, help='density bias (generate.py --dt-bias)')
+    ap.add_argument('--eos-t1', action='store_true', help='EOS keeps its temperature-1 probability')
     ap.add_argument('--tag', default='', help='suffix for the row names (e.g. the sampling setting)')
     ap.add_argument('--seed', type=int, default=1)
     ap.add_argument('--device', choices=['cpu', 'cuda'], default='cpu')
@@ -233,7 +234,7 @@ def main():
     header = (f"{'':40s}{'n':>4s}{'sec':>7s}{'nps':>7s}{'chord%':>7s}{'ends%':>6s}{'key%':>6s}{'melRep':>8s}"
               f"{'pitRep':>8s}{'recur':>7s}{'dDens':>7s}{'dReg':>7s}{'OA':>7s}{'dist':>7s}")
     lines = [f"structure: {args.samples} samples/checkpoint, BOS + style ({args.style}), T={args.temperature}, "
-             f"top_p={args.top_p}, cfg={args.cfg}, dt_bias={args.dt_bias}, seed={args.seed}, "
+             f"top_p={args.top_p}, cfg={args.cfg}, dt_bias={args.dt_bias}, eos_t1={args.eos_t1}, seed={args.seed}, "
              f"EOS after {args.min_notes}, max {args.max_new} notes; reference = {Path(args.real[0]).stem}", header]
     ref = None
     for csv in args.real:  # the first CSV is the reference, others are scored against it
