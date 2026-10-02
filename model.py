@@ -215,6 +215,11 @@ class MusicConfig:
     # embedding of q/k in every attention layer (relative, no parameters, so block_size can change after training)
     pos_emb: str = 'learned'
     rope_base: float = 10000.0
+    # future prediction (training only, dropped at inference): small heads on h_t predict, for each time horizon after
+    # note t's onset ('a-b' seconds), the pitch-class histogram, log note count and mean pitch of the notes sounding
+    # there; loss += future_weight * mean over horizons. 0 = off (no parameters)
+    future_weight: float = 0.0
+    future_horizons: str = '0-2,2-4,4-8'
 
 
 BOS_PITCH, EOS_PITCH = 128, 129
@@ -227,6 +232,71 @@ CASCADE_ORDER = ('delta_time', 'pitch', 'duration', 'velocity')
 CASCADE_ORDER_PROGRAMS = ('delta_time', 'program', 'pitch', 'duration', 'velocity')
 # order of the attribute streams everywhere else (inputs, targets, datasets)
 STREAM_ORDER = ('pitch', 'velocity', 'duration', 'delta_time')
+
+
+DT_BINS_PER_SEC = 50  # delta_time bins are 20 ms
+
+
+def future_targets(pitch, dt, valid, real, horizons):
+    """Targets of the future heads from the window's own notes (no extra data).
+    pitch, dt: (B, N) the window's notes 0..T (N = T + 1: the first input note, then the targets); valid: (B, N) pitched
+    real notes (no BOS/EOS, padding or drums); real: (B, N) any real token (not padding). horizons: [(a, b)] in bins.
+    Position t (0..T-1) has seen notes 0..t; its horizon (a, b) holds the notes i > t with onset in [on_t + a, on_t + b).
+    Returns per horizon (hist (B, T, 12) counts, count (B, T), pitch sum (B, T), ok (B, T)); ok = the horizon ends
+    before the window's last real onset (else the window can't tell what is there) and position t is a real token."""
+    B, N = pitch.shape
+    T = N - 1
+    onset = torch.cumsum(dt.clamp(min=0), 1)                                    # (B, N) int bins, non-decreasing
+    t_on = onset[:, :T]
+    pc = F.one_hot(pitch.clamp(0, 127) % 12, 12).float() * valid.unsqueeze(-1)
+    P = F.pad(torch.cumsum(pc, 1), (0, 0, 1, 0))                                # P[i] = sum over notes < i
+    Cn = F.pad(torch.cumsum(valid.float(), 1), (1, 0))
+    R = F.pad(torch.cumsum(pitch.float() * valid, 1), (1, 0))
+    last_on = torch.where(real, onset, torch.zeros_like(onset)).amax(1, keepdim=True)
+    nxt = torch.arange(1, T + 1, device=pitch.device).expand(B, T)
+    out = []
+    for a, b in horizons:
+        lo = torch.maximum(torch.searchsorted(onset, t_on + a), nxt)
+        hi = torch.maximum(torch.searchsorted(onset, t_on + b), lo)
+        hist = P.gather(1, hi.unsqueeze(-1).expand(B, T, 12)) - P.gather(1, lo.unsqueeze(-1).expand(B, T, 12))
+        count = Cn.gather(1, hi) - Cn.gather(1, lo)
+        psum = R.gather(1, hi) - R.gather(1, lo)
+        ok = (t_on + b <= last_on) & real[:, :T]
+        out.append((hist, count, psum, ok))
+    return out
+
+
+class FutureHeads(nn.Module):
+    """LN -> MLP -> per horizon 12 pitch-class logits + log(1 + count) + (mean pitch - 60) / 12."""
+
+    def __init__(self, config):
+        super().__init__()
+        self.horizons = [tuple(round(float(x) * DT_BINS_PER_SEC) for x in h.split('-'))
+                         for h in config.future_horizons.split(',')]
+        C = config.n_embd
+        self.ln = LayerNorm(C, bias=config.bias)
+        self.fc1 = nn.Linear(C, C, bias=config.bias)
+        self.fc2 = nn.Linear(C, 14 * len(self.horizons), bias=config.bias)
+
+    def forward(self, h):
+        B, T, _ = h.shape
+        return self.fc2(F.gelu(self.fc1(self.ln(h)))).view(B, T, len(self.horizons), 14)
+
+    def loss(self, h, pitch, dt, valid, real):
+        """Mean over horizons of pitch-class CE (soft targets) + count MSE + register MSE; also the mean pc CE alone."""
+        pred = self(h).float()
+        total, pc_ce = 0.0, 0.0
+        for k, (hist, count, psum, ok) in enumerate(future_targets(pitch, dt, valid, real, self.horizons)):
+            p = pred[:, :, k]
+            has = ok & (count > 0)
+            n_has, n_ok = has.sum().clamp(min=1), ok.sum().clamp(min=1)
+            ce = -(hist / count.clamp(min=1).unsqueeze(-1) * F.log_softmax(p[..., :12], -1)).sum(-1)
+            ce = (ce * has).sum() / n_has
+            cnt = (((p[..., 12] - torch.log1p(count)) ** 2) * ok).sum() / n_ok
+            reg = (((p[..., 13] - (psum / count.clamp(min=1) - 60) / 12) ** 2) * has).sum() / n_has
+            total = total + (ce + cnt + reg) / len(self.horizons)
+            pc_ce = pc_ce + ce.detach() / len(self.horizons)
+        return total, pc_ce
 
 
 class ResidualHead(nn.Module):
@@ -385,6 +455,8 @@ class GPT(nn.Module):
             self.head_velocity   = nn.Linear(config.n_embd, config.velocity_size,   bias=False)
             self.head_duration   = nn.Linear(config.n_embd, config.duration_size,   bias=False)
             self.head_delta_time = nn.Linear(config.n_embd, config.delta_time_size, bias=False)
+        if config.future_weight:
+            self.future = FutureHeads(config)
 
         self.apply(self._init_weights)
         for pn, p in self.named_parameters():
@@ -516,6 +588,18 @@ class GPT(nn.Module):
                 loss = loss + F.cross_entropy(lg, t, ignore_index=-1, label_smoothing=ls)
                 with torch.no_grad():
                     parts[name] = F.cross_entropy(lg.float(), t, ignore_index=-1)
+            if self.config.future_weight:
+                # the window's notes 0..T: the first input note, then the targets (-1 = padding)
+                seq = lambda first, t: torch.cat([first[:, :1], t.clamp(min=0)], 1)
+                fp, fdt = seq(pitch, tgt['pitch']), seq(delta_time, tgt['delta_time'])
+                real = torch.cat([torch.ones_like(pitch[:, :1], dtype=torch.bool), tgt['pitch'] >= 0], 1)
+                valid = real & (fp < BOS_PITCH)
+                if self.config.n_programs:
+                    valid = valid & (seq(program, tgt['program']) != DRUM_PROGRAM)
+                fut, fut_pc = self.future.loss(x, fp, fdt, valid, real)
+                loss = loss + self.config.future_weight * fut
+                parts['future'] = fut.detach()
+                parts['future_pc'] = fut_pc
             if self.config.moe_experts:
                 aux = sum(b.mlp.aux for b in self.transformer.h) / len(self.transformer.h)
                 loss = loss + self.config.moe_aux_weight * aux

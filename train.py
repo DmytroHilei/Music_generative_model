@@ -85,6 +85,8 @@ pos_emb = 'learned'       # 'learned' (absolute table, old checkpoints) | 'rope'
 rope_base = 10000.0
 pad_short = False         # keep files shorter than block_size as one padded whole-file window (masked targets)
 min_notes = 64            # with pad_short: shorter files are still dropped
+future_weight = 0.0       # > 0: auxiliary future-prediction heads (pitch classes / density / register 0-2-4-8 s ahead)
+future_horizons = '0-2,2-4,4-8'
 n_programs = 0            # multi-instrument: 129 = GM programs + drums (needs a programs.u8 store or reads piano as 0)
 
 # wandb logging
@@ -188,10 +190,10 @@ wandb_run_id = None
 arch_keys = ['n_layer', 'n_head', 'n_embd', 'block_size', 'bias', 'pitch_size', 'velocity_size',
              'duration_size', 'delta_time_size', 'cascade_heads', 'cascade_residual',
              'pitch_head_blocks', 'pitch_head_mult', 'moe_experts', 'moe_top_k', 'moe_hidden_frac', 'moe_aux_weight',
-             'n_styles', 'n_programs', 'pos_emb', 'rope_base']
+             'n_styles', 'n_programs', 'pos_emb', 'rope_base', 'future_weight', 'future_horizons']
 # what checkpoints that predate a key actually used
 legacy_defaults = {'cascade_heads': False, 'cascade_residual': False, 'n_styles': 0, 'n_programs': 0,
-                   'pos_emb': 'learned', 'rope_base': 10000.0}
+                   'pos_emb': 'learned', 'rope_base': 10000.0, 'future_weight': 0.0, 'future_horizons': '0-2,2-4,4-8'}
 model_args = {k: globals()[k] for k in arch_keys}
 checkpoint = None
 
@@ -206,6 +208,8 @@ if init_from in ('resume', 'finetune'):
             model_args[k] = wanted  # grow: BOS/EOS rows, a style table, the instrument attribute
         if init_from == 'finetune' and k == 'pos_emb' and wanted == 'rope':
             model_args[k] = wanted  # switch to RoPE: the position table is dropped (not function-preserving)
+        if init_from == 'finetune' and k in ('future_weight', 'future_horizons'):
+            model_args[k] = wanted  # a training-time choice: the heads are added or dropped per run
     if init_from == 'finetune' and model_args['pos_emb'] == 'rope':
         model_args['block_size'] = block_size  # nothing in a RoPE model depends on the context length
     elif init_from == 'finetune' and block_size > model_args['block_size']:
@@ -386,6 +390,7 @@ for iter_num in pbar:
         tqdm.write(f"step {iter_num}: train loss {train.get('loss', float('nan')):.4f}, "
                    f"val loss {val['loss']:.4f} | val CE {val['ce/total']:.3f} ({heads})"
                    + (f" | val2 CE {val2['ce/total']:.3f}" if val2 else "")
+                   + (f" | future pc CE {val['ce/future_pc']:.3f}" if 'ce/future_pc' in val else "")
                    # instrument head last, so status.py's STEP pattern still matches the line
                    + (f" | prog CE {val['ce/program']:.3f}" if 'ce/program' in val else ""))
         if wandb_log:
