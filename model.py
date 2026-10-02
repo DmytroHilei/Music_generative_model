@@ -568,7 +568,7 @@ class GPT(nn.Module):
     @torch.no_grad()
     def generate(self, pitch, velocity, duration, delta_time, max_new_tokens, temperature=0.85, top_k=None,
                  anchor=0, slide=None, progress=None, dt_bias=0.0, target_nps=None, dt_seconds=0.02,
-                 cuda_graph=True, style=None, min_new=0):
+                 cuda_graph=True, style=None, min_new=0, program=0):
         """
         Batched sampling (B rows, same prompt length) with a preallocated KV cache: each new note costs one position
         through the model, not a full re-run. On CUDA the one-note transformer step is captured once as a CUDA graph
@@ -584,11 +584,12 @@ class GPT(nn.Module):
           target_nps: notes per second to track (a float, or one per row). A controller nudges each row's bias after
             every note from the density of its last 64 notes, starting at dt_bias. dt_seconds = seconds per bin.
         style: (B,) style ids (models with n_styles; 0 = none/unconditional).
+        program: models with n_programs: every note is played by this one instrument (0 = piano); its head isn't
+          sampled. Sampling the instrument per note is to-do 15.
         Special tokens (pitch vocab 130): BOS is never sampled; EOS (end of piece) not before min_new notes. Rows keep
         running after their EOS (batch shapes stay fixed); cut them at the first EOS when writing MIDI.
         Nothing here syncs the GPU with the CPU inside the loop.
         """
-        assert not self.config.n_programs, "generation with instruments isn't implemented yet (to-do 15)"
         L = self.config.block_size
         slide = slide or L // 4
         assert 0 <= anchor and anchor + slide < L, "need anchor + slide < block_size"
@@ -613,8 +614,12 @@ class GPT(nn.Module):
         step_i = [0]
         if style is not None:
             style = torch.as_tensor(style, dtype=torch.long, device=device).reshape(-1).expand(B).contiguous()
+        fixed_program = torch.full((B, 1), int(program), dtype=torch.long, device=device) \
+            if self.config.n_programs else None
 
         def sample(logits, name=None):  # (B, 1, vocab) → (B, 1)
+            if name == 'program':
+                return fixed_program
             logits = logits[:, -1, :].float() / temperature
             if name == 'pitch' and specials:
                 logits[:, BOS_PITCH] = -float('Inf')
@@ -641,7 +646,8 @@ class GPT(nn.Module):
             w = window[0].size(1)
             if w == 1:
                 cache.pos.fill_(0)  # a 1-note window goes through the single-step path at slot 0
-            return self._encode(*window, style=style, cache=cache)[:, [-1], :], w
+            prog = None if fixed_program is None else fixed_program.expand(B, w)
+            return self._encode(*window, style=style, program=prog, cache=cache)[:, [-1], :], w
 
         # the one-note step: static inputs -> static output, optionally captured as a CUDA graph
         step_in = [torch.zeros(B, 1, dtype=torch.long, device=device) for _ in range(4)]
@@ -652,11 +658,11 @@ class GPT(nn.Module):
             stream.wait_stream(torch.cuda.current_stream())
             with torch.cuda.stream(stream):  # warm-up outside the graph (allocator, kernel selection)
                 for _ in range(2):
-                    self._encode(*step_in, style=step_style, cache=cache)
+                    self._encode(*step_in, style=step_style, program=fixed_program, cache=cache)
             torch.cuda.current_stream().wait_stream(stream)
             graph = torch.cuda.CUDAGraph()
             with torch.cuda.graph(graph):
-                step_out = self._encode(*step_in, style=step_style, cache=cache)
+                step_out = self._encode(*step_in, style=step_style, program=fixed_program, cache=cache)
             # the warm-up and capture wrote junk into slot 0; prefill below overwrites every slot it uses
 
         def step(new, pos):
@@ -666,7 +672,7 @@ class GPT(nn.Module):
             if graph is not None:
                 graph.replay()
                 return step_out
-            return self._encode(*step_in, style=step_style, cache=cache)
+            return self._encode(*step_in, style=step_style, program=fixed_program, cache=cache)
 
         h, filled = prefill(n0)
         for i in range(max_new_tokens):

@@ -10,6 +10,7 @@ import numpy as np
 import pandas as pd
 import pretty_midi
 import torch
+import torch.nn.functional as F
 from torch.utils.data import Dataset
 from tqdm import tqdm
 
@@ -69,6 +70,8 @@ class MaestroDataset(Dataset):
         aug_velocity=0,
         aug_stores=None,
         programs=False,
+        pad_short=False,
+        min_notes=64,
     ):
         """
         csv_path:    one or more sources separated by ',': a CSV (paths inside relative to root_dir or absolute),
@@ -91,6 +94,9 @@ class MaestroDataset(Dataset):
         aug_stores:  optional 0/1 per store (same order as source_weights): which stores get the tempo/velocity
                      augmentation (e.g. [1, 0] = only the fine-tune CSVs, the replay store stays real). Default: all.
                      Transposition applies to every store regardless
+        pad_short:   keep files shorter than the window (>= min_notes notes) as one whole-file window, zero-padded at the
+                     end with masked (-1) targets; a short file is sampled as often per note as a long one. Without it
+                     they are dropped (at block_size 2048: 99% of the Ukrainian songs, 57% of Aria's notes)
         programs:    multi-instrument: also return the instrument stream (x and y), from the store's programs.u8
                      (data/prepare_gigamidi.py); stores without one are piano = program 0. Drum notes are never
                      transposed and their duration is set to 0 in x and masked (-1) in y. False = piano-only: stores
@@ -117,6 +123,8 @@ class MaestroDataset(Dataset):
         self.programs = programs
 
         self.pad = 1 if special_tokens else 0
+        self.pad_short = pad_short
+        self.min_notes = min_notes
         self.style_dropout = style_dropout
         self.boundary_frac = boundary_frac if special_tokens else 0.0
         self.style_ids = {name: i for i, name in enumerate(styles)} if styles else None
@@ -140,6 +148,8 @@ class MaestroDataset(Dataset):
             offsets = np.load(store / "offsets.npy")
             n = np.diff(offsets) + 2 * self.pad  # virtual length incl. BOS/EOS
             keep = n > self.block_size  # need block_size + 1 notes because targets are shifted by one
+            if self.pad_short:
+                keep = n >= self.min_notes + 2 * self.pad
             store_ids.append(np.full(int(keep.sum()), i, dtype=np.int32))
             starts.append(offsets[:-1][keep])
             lengths.append(n[keep])
@@ -164,14 +174,16 @@ class MaestroDataset(Dataset):
         if aug_stores is not None:
             assert len(aug_stores) == len(self.store_dirs), f"{len(aug_stores)} aug_stores for {len(self.store_dirs)} stores"
         # number of valid window starts per file, cumulative (for uniform sampling over all positions)
-        self.cum_valid = np.cumsum(self.lengths - self.block_size)
+        # a short (padded) file counts as block_size starts: the per-note rate a long file approaches
+        self.short = self.lengths <= self.block_size
+        self.cum_valid = np.cumsum(np.where(self.short, self.block_size, self.lengths - self.block_size))
 
         if eval_stride:
             # (file index, offset in the file's virtual sequence); order = sources in order, files in store order
             self.windows = np.concatenate([
                 np.stack([np.full(len(r), fi), r], axis=1)
                 for fi, n in enumerate(self.lengths)
-                for r in [np.arange(0, n - self.block_size, eval_stride)]
+                for r in [np.arange(0, n - self.block_size, eval_stride) if n > self.block_size else np.zeros(1, np.int64)]
             ])
 
     # ------------------------------------------------------------------ storage
@@ -317,8 +329,8 @@ class MaestroDataset(Dataset):
                 pos = base + random.randrange(int(self.cum_valid[hi - 1]) - base)
             file_idx = int(np.searchsorted(self.cum_valid, pos, side="right"))
             prev = int(self.cum_valid[file_idx - 1]) if file_idx > 0 else 0
-            v = pos - prev
-            if self.boundary_frac:
+            v = 0 if self.short[file_idx] else pos - prev
+            if self.boundary_frac and not self.short[file_idx]:
                 r = random.random()
                 if r < self.boundary_frac / 2:
                     v = 0                                                   # starts with BOS
@@ -352,9 +364,16 @@ class MaestroDataset(Dataset):
                 velocity = torch.where(notes, (velocity + shift).clamp(0, self.velocity_bins - 1), velocity)
 
         streams = (pitch, velocity, duration, delta_time) + ((program,) if program is not None else ())
+        n_rows = len(pitch)
+        if n_rows < self.block_size + 1:  # a short file: pad after EOS (causal, so nothing before it changes)
+            streams = tuple(F.pad(t, (0, self.block_size + 1 - n_rows)) for t in streams)
+            if drums is not None:
+                drums = F.pad(drums, (0, self.block_size + 1 - n_rows))
         x, y = self._split_xy(streams)
         if drums is not None:
             y = (y[0], y[1], torch.where(drums[1:], -1, y[2])) + y[3:]  # no duration loss on drum notes
+        if n_rows < self.block_size + 1:
+            y = tuple(torch.cat([t[:n_rows - 1], torch.full_like(t[n_rows - 1:], -1)]) for t in y)
         if self.file_style is not None:
             style = int(self.file_style[file_idx])
             if self.augment and not self.eval_stride and random.random() < self.style_dropout:
