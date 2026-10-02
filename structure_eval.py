@@ -18,6 +18,12 @@ Each checkpoint samples --samples pieces from BOS (+ --style), EOS allowed after
   dens drift, reg drift    |log| density ratio and |mean pitch| difference between the first and last third
 A model that wanders scores low on the repeat columns, recur and key stab; one that loops a single bar scores
 near 100% repeat.
+Note level, pooled over all pieces of a set (eval_samples.py features, from tokens on both sides):
+  OA                       mean histogram overlap with the reference set (first --real CSV): pitch, pitch class,
+                           velocity, duration, onset gap, polyphony, melodic interval (1 = identical)
+  dist                     distance to the reference, lower = closer: mean of (1 - OA), |d key|/50, |d melRep|/25,
+                           |d pitRep|/20, |d recur|/0.15, |log nps ratio|/0.5, |d chord|/40, |d ends|/100
+--style is a preference list ('cover,reduction'): each model gets the first one its style table has, else none.
 Compare with the real row, not with 1. Optional --out-dir writes the samples as MIDI for listening.
 """
 
@@ -90,6 +96,60 @@ def metrics(t, ended):
     return out
 
 
+FEATURE_BINS = {
+    'pitch': np.arange(0, 129), 'pitch_class': np.arange(0, 13), 'velocity': np.arange(0, 33),
+    'duration': np.concatenate([[0], np.geomspace(0.02, 10, 40)]),
+    'ioi': np.concatenate([[0, 0.01], np.geomspace(0.02, 10, 40)]),
+    'polyphony': np.arange(0, 17), 'interval': np.arange(-24, 26),
+}
+
+
+def note_features(t):
+    """Per-note feature arrays of one piece from tokens (velocity in bins, times in seconds)."""
+    pitch, dur = t[:, 0], np.maximum(t[:, 2] * DT, 0.08)  # 0.08 s minimum, as tokens_to_midi writes it
+    start = np.cumsum(t[:, 3]) * DT
+    end = start + dur
+    poly = np.searchsorted(start, start, side='right') - np.searchsorted(np.sort(end), start, side='right')
+    return dict(pitch=pitch, pitch_class=pitch % 12, velocity=t[:, 1], duration=dur, ioi=np.diff(start),
+                polyphony=np.clip(poly, 0, 16), interval=np.clip(np.diff(pitch), -24, 24))
+
+
+def pooled(pieces):
+    feats = [note_features(p) for p in pieces if len(p) > 1]
+    return {k: np.concatenate([f[k] for f in feats]) for k in FEATURE_BINS}
+
+
+def overlap(a, b):
+    """Mean histogram overlap of two pooled feature sets."""
+    oas = []
+    for k, bins in FEATURE_BINS.items():
+        ha = np.histogram(np.clip(a[k], bins[0], bins[-1]), bins=bins)[0]
+        hb = np.histogram(np.clip(b[k], bins[0], bins[-1]), bins=bins)[0]
+        oas.append(np.minimum(ha / max(ha.sum(), 1), hb / max(hb.sum(), 1)).sum())
+    return float(np.mean(oas))
+
+
+SCALES = dict(key=50, mel_rep=25, pit_rep=20, recur=0.15, chord=40, ends=100)
+
+
+def distance(m, ref, oa):
+    d = [1 - oa, abs(np.log(m['nps'] / ref['nps'])) / 0.5]
+    d += [abs(m[k] - ref[k]) / s for k, s in SCALES.items()]
+    return float(np.mean(d))
+
+
+def pick_style(model, cfg, prefs):
+    """First preferred style the model has trained (its row in the style table isn't still all zeros), else none."""
+    if not cfg.n_styles:
+        return None, '-'
+    names = load_styles()
+    table = model.transformer['style'].weight
+    for name in prefs:
+        if name in names and names.index(name) < cfg.n_styles and table[names.index(name)].abs().sum() > 0:
+            return names.index(name), name
+    return 0, 'none'
+
+
 def real_pieces(csvs):
     pieces = []
     for csv in csvs:
@@ -131,11 +191,19 @@ def sample(model, cfg, args, style, device, job, base):
     return pieces
 
 
-def summarize(name, ms):
-    keys = ['sec', 'nps', 'chord', 'ends', 'key', 'mel_rep', 'pit_rep', 'recur', 'dens_drift', 'reg_drift']
-    m = {k: np.nanmean([x[k] for x in ms]) for k in keys}
-    return (f"{name:34s}{len(ms):4d}{m['sec']:7.0f}{m['nps']:7.2f}{m['chord']:7.1f}{m['ends']:6.0f}"
-            f"{m['key']:6.0f}{m['mel_rep']:8.1f}{m['pit_rep']:8.1f}{m['recur']:7.3f}{m['dens_drift']:7.2f}{m['reg_drift']:7.1f}")
+KEYS = ['sec', 'nps', 'chord', 'ends', 'key', 'mel_rep', 'pit_rep', 'recur', 'dens_drift', 'reg_drift']
+
+
+def summarize(name, ms, pieces, ref=None):
+    """One table row; ref = (reference means, reference pooled features) for OA and dist, None for the reference."""
+    m = {k: np.nanmean([x[k] for x in ms]) for k in KEYS}
+    feats = pooled(pieces)
+    oa = overlap(feats, ref[1]) if ref else 1.0
+    dist = distance(m, ref[0], oa) if ref else 0.0
+    row = (f"{name:40s}{len(ms):4d}{m['sec']:7.0f}{m['nps']:7.2f}{m['chord']:7.1f}{m['ends']:6.0f}"
+           f"{m['key']:6.0f}{m['mel_rep']:8.1f}{m['pit_rep']:8.1f}{m['recur']:7.3f}{m['dens_drift']:7.2f}"
+           f"{m['reg_drift']:7.1f}{oa:7.3f}{dist:7.3f}")
+    return row, (m, feats), dist
 
 
 def main():
@@ -143,7 +211,8 @@ def main():
     ap.add_argument('--checkpoints', nargs='*', default=[], help='files or run dirs')
     ap.add_argument('--real', nargs='*', default=['data/finetune/ukrainian_covers.csv'],
                     help='CSVs whose validation songs are the reference')
-    ap.add_argument('--style', default=None, help="style name for models with styles (e.g. 'cover')")
+    ap.add_argument('--style', default='cover,reduction',
+                    help="style preference list: each model gets the first one in its table (else none)")
     ap.add_argument('--samples', type=int, default=8)
     ap.add_argument('--max-new', type=int, default=1600)
     ap.add_argument('--min-notes', type=int, default=200, help='no EOS before this many notes')
@@ -156,32 +225,40 @@ def main():
     args = ap.parse_args()
     torch.set_num_threads(args.threads)
 
-    header = (f"{'':34s}{'n':>4s}{'sec':>7s}{'nps':>7s}{'chord%':>7s}{'ends%':>6s}{'key%':>6s}{'melRep':>8s}{'pitRep':>8s}"
-              f"{'recur':>7s}{'dDens':>7s}{'dReg':>7s}")
-    lines = [f"structure: {args.samples} samples/checkpoint, BOS + style {args.style}, T={args.temperature}, "
-             f"EOS after {args.min_notes}, max {args.max_new} notes", header]
-    reals = real_pieces(args.real)
-    lines.append(summarize('real (' + '+'.join(Path(c).stem for c in args.real) + ')',
-                           [metrics(p[:args.max_new], True) for p in reals]))
+    prefs = [x.strip() for x in args.style.split(',') if x.strip()]
+    header = (f"{'':40s}{'n':>4s}{'sec':>7s}{'nps':>7s}{'chord%':>7s}{'ends%':>6s}{'key%':>6s}{'melRep':>8s}"
+              f"{'pitRep':>8s}{'recur':>7s}{'dDens':>7s}{'dReg':>7s}{'OA':>7s}{'dist':>7s}")
+    lines = [f"structure: {args.samples} samples/checkpoint, BOS + style ({args.style}), T={args.temperature}, "
+             f"EOS after {args.min_notes}, max {args.max_new} notes; reference = {Path(args.real[0]).stem}", header]
+    ref = None
+    for csv in args.real:  # the first CSV is the reference, others are scored against it
+        reals = [p[:args.max_new] for p in real_pieces([csv])]
+        row, stats, _ = summarize(f"real {Path(csv).stem}", [metrics(p, True) for p in reals], reals, ref)
+        ref = ref or stats
+        lines.append(row)
     print('\n'.join(lines), flush=True)
+    ranking = []
 
     job = JobStatus('structure', max(1, len(args.checkpoints) * args.samples * args.max_new),
                     f'{len(args.checkpoints)} checkpoints')
     for ci, path in enumerate(args.checkpoints):
         model, cfg, it = load_model(path, args.device)
-        style = None
-        if cfg.n_styles:
-            names = load_styles()
-            style = names.index(args.style or 'none')
+        style, style_name = pick_style(model, cfg, prefs)
         pieces = sample(model, cfg, args, style, args.device, job, ci * args.samples * args.max_new)
-        lines.append(summarize(f"{Path(path).name} @{it}", [metrics(p, e) for p, e in pieces]))
-        print(lines[-1], flush=True)
+        name = f"{Path(path).name} @{it} [{style_name}]"
+        row, _, dist = summarize(name, [metrics(p, e) for p, e in pieces], [p for p, _ in pieces], ref)
+        lines.append(row)
+        ranking.append((dist, name))
+        print(row, flush=True)
         if args.out_dir:
             d = Path(args.out_dir) / Path(path).name
             d.mkdir(parents=True, exist_ok=True)
             for i, (p, _) in enumerate(pieces):
                 tokens_to_midi(*[p[:, j].tolist() for j in range(4)]).write(str(d / f'sample_{i + 1}.mid'))
         del model
+    if ranking:
+        lines += ['', 'closest to the reference: ' + ' < '.join(f"{n} ({d:.3f})" for d, n in sorted(ranking))]
+        print(lines[-1])
     job.finish('done')
     if args.out:
         Path(args.out).parent.mkdir(parents=True, exist_ok=True)
