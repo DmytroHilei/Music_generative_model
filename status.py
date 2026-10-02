@@ -72,6 +72,7 @@ RUNS = [
     ('pilot-mi scratch (RoPE 2048, 129 prog)', 'pilot_mi_scratch.log', '108M 197Mt'),
     ('pilot-mi grown (stretched wpe 2048, 129 prog)', 'pilot_mi_wpe.log', '108M 197Mt'),
     ('ua-2048 covers + reductions (whole songs)', 'ua_2048.log', 'FT from pilot grown'),
+    ('ua-2048 covers only (whole songs)', 'ua_2048_covers.log', 'FT from pilot grown'),
 ]
 
 TQDM = re.compile(r'Training:\s+(\d+)%\|[^|]*\|\s*(\d+)/(\d+) \[([\d:]+)<([\d:?]+),\s*([\d.?]+)(it/s|s/it)')
