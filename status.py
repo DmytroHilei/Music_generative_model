@@ -77,6 +77,8 @@ RUNS = [
     ('future heads 0.2 seed 1337 (ua-D recipe, 400 it)', 'fut_w0.2_s1337.log', 'FT from B1'),
     ('future heads 0.0 seed 2 (ua-D recipe, 400 it)', 'fut_w0.0_s2.log', 'FT from B1'),
     ('future heads 0.2 seed 2 (ua-D recipe, 400 it)', 'fut_w0.2_s2.log', 'FT from B1'),
+    ('future heads 1.0 seed 1337 (ua-D recipe, 400 it)', 'fut_w1.0_s1337.log', 'FT from B1'),
+    ('future heads 1.0 seed 2 (ua-D recipe, 400 it)', 'fut_w1.0_s2.log', 'FT from B1'),
 ]
 
 TQDM = re.compile(r'Training:\s+(\d+)%\|[^|]*\|\s*(\d+)/(\d+) \[([\d:]+)<([\d:?]+),\s*([\d.?]+)(it/s|s/it)')
