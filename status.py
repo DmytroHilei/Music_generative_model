@@ -73,6 +73,10 @@ RUNS = [
     ('pilot-mi grown (stretched wpe 2048, 129 prog)', 'pilot_mi_wpe.log', '108M 197Mt'),
     ('ua-2048 covers + reductions (whole songs)', 'ua_2048.log', 'FT from pilot grown'),
     ('ua-2048 covers only (whole songs)', 'ua_2048_covers.log', 'FT from pilot grown'),
+    ('future heads 0.0 seed 1337 (ua-D recipe, 400 it)', 'fut_w0.0_s1337.log', 'FT from B1'),
+    ('future heads 0.2 seed 1337 (ua-D recipe, 400 it)', 'fut_w0.2_s1337.log', 'FT from B1'),
+    ('future heads 0.0 seed 2 (ua-D recipe, 400 it)', 'fut_w0.0_s2.log', 'FT from B1'),
+    ('future heads 0.2 seed 2 (ua-D recipe, 400 it)', 'fut_w0.2_s2.log', 'FT from B1'),
 ]
 
 TQDM = re.compile(r'Training:\s+(\d+)%\|[^|]*\|\s*(\d+)/(\d+) \[([\d:]+)<([\d:?]+),\s*([\d.?]+)(it/s|s/it)')
