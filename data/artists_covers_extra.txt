@@ -1,0 +1,18 @@
+# Extra artists for the piano-cover search only (fetch_songs.py --mode covers): Ukrainian pop with many piano covers.
+# Cyrillic name first: covers mode ignores one-word Latin aliases (they hit unrelated songs).
+Джамала|Jamala
+Казка|KAZKA
+Тіна Кароль|Tina Karol
+Монатік|MONATIK
+Макс Барських|Max Barskih
+Джеррі Хейл|Jerry Heil
+Таяна|TAYANNA
+Артем Пивоваров|Artem Pivovarov
+Злата Огнєвич|Zlata Ognevich
+Клавдія Петрівна|Klavdia Petrivna
+Віктор Павлік
+Go_A|Го_А
+Оля Полякова
+Kalush Orchestra|Калуш
+Скрябін і Ірина Білик
+Ірина Білик
