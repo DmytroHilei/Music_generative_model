@@ -652,7 +652,8 @@ class GPT(nn.Module):
     @torch.no_grad()
     def generate(self, pitch, velocity, duration, delta_time, max_new_tokens, temperature=0.85, top_k=None,
                  anchor=0, slide=None, progress=None, dt_bias=0.0, target_nps=None, dt_seconds=0.02,
-                 cuda_graph=True, style=None, min_new=0, program=0, top_p=None, cfg_scale=1.0):
+                 cuda_graph=True, style=None, min_new=0, program=0, top_p=None, cfg_scale=1.0,
+                 eos_t1=False):
         """
         Batched sampling (B rows, same prompt length) with a preallocated KV cache: each new note costs one position
         through the model, not a full re-run. On CUDA the one-note transformer step is captured once as a CUDA graph
@@ -674,6 +675,8 @@ class GPT(nn.Module):
         cfg_scale != 1 (needs a style): classifier-free guidance. The batch runs twice, with the style and with
           style 0 (none, which style dropout trained), and every head samples from uncond + s * (cond - uncond); both
           halves are fed the same note. Not combined with target_nps.
+        eos_t1: EOS keeps its probability at temperature 1 (and outside top-k/top-p); the other pitches use the
+          tempered distribution, rescaled to the remaining mass. Lower temperatures otherwise starve the rare EOS.
         Special tokens (pitch vocab 130): BOS is never sampled; EOS (end of piece) not before min_new notes. Rows keep
         running after their EOS (batch shapes stay fixed); cut them at the first EOS when writing MIDI.
         Nothing here syncs the GPU with the CPU inside the loop.
@@ -718,6 +721,9 @@ class GPT(nn.Module):
             logits = logits[:, -1, :].float()
             if guided:
                 logits = logits[Bo:] + cfg_scale * (logits[:Bo] - logits[Bo:])
+            p_eos = None
+            if name == 'pitch' and specials and eos_t1 and step_i[0] >= min_new:
+                p_eos = F.softmax(logits, dim=-1)[:, [EOS_PITCH]]  # the model's own chance of ending here
             logits = logits / temperature
             if name == 'pitch' and specials:
                 logits[:, BOS_PITCH] = -float('Inf')
@@ -733,6 +739,10 @@ class GPT(nn.Module):
                 sorted_p, order = torch.sort(probs, dim=-1, descending=True)
                 drop = sorted_p.cumsum(-1) - sorted_p > top_p  # mass before this value already reaches top_p
                 probs = probs.scatter(-1, order, sorted_p.masked_fill(drop, 0.0))
+            if p_eos is not None:
+                probs[:, EOS_PITCH] = 0.0
+                probs = probs / probs.sum(-1, keepdim=True).clamp(min=1e-12) * (1 - p_eos)
+                probs[:, EOS_PITCH] = p_eos.squeeze(-1)
             nxt = torch.multinomial(probs, num_samples=1)
             return torch.cat([nxt, nxt]) if guided else nxt
 
