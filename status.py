@@ -68,6 +68,8 @@ RUNS = [
     ('ua-C tempo ±20%, UA only', 'ua_C_tempo20_ft.log', 'FT from B1'),
     ('ua-C winner, 1200 steps', 'ua_C_long1200.log', 'FT from B1'),
     ('ua-D full Ukrainian set, tempo ±10%', 'ua_D_big.log', 'FT from B1'),
+    ('pilot-mi grown (RoPE 2048, 129 prog)', 'pilot_mi_grown.log', '108M 197Mt'),
+    ('pilot-mi scratch (RoPE 2048, 129 prog)', 'pilot_mi_scratch.log', '108M 197Mt'),
 ]
 
 TQDM = re.compile(r'Training:\s+(\d+)%\|[^|]*\|\s*(\d+)/(\d+) \[([\d:]+)<([\d:?]+),\s*([\d.?]+)(it/s|s/it)')
