@@ -67,6 +67,10 @@ def parse_args():
     parser.add_argument('--dry-run', action='store_true')
     parser.add_argument('--mode', choices=['songs', 'covers'], default='songs')
     parser.add_argument('--songs-csv', default='data/audio/songs.csv', help='covers mode: known song titles')
+    parser.add_argument('--per-song-queries', action='store_true',
+                        help="covers mode: also one search per known song ('<artist> <song> піаніно', --song-search-size "
+                             "results), not only per artist")
+    parser.add_argument('--song-search-size', type=int, default=8)
     parser.add_argument('--per-song', type=int, default=2, help='covers mode: max videos of the same song')
     return parser.parse_args()
 
@@ -101,11 +105,11 @@ def song_title(video_title, names, covers=False, known=()):
     return rest or None
 
 
-def search_with_retry(names, n, mode='songs', attempts=4):
+def search_with_retry(names, n, mode='songs', song_queries=(), song_n=8, attempts=4):
     """Network hiccups (DNS, timeouts) shouldn't kill a multi-hour run: retry with backoff, then skip the artist."""
     for attempt in range(attempts):
         try:
-            return search(names, n, mode)
+            return search(names, n, mode, song_queries, song_n)
         except Exception as e:
             wait = 30 * 2 ** attempt
             print(f'  search failed ({type(e).__name__}), retry {attempt + 1}/{attempts} in {wait}s')
@@ -114,15 +118,15 @@ def search_with_retry(names, n, mode='songs', attempts=4):
     return []
 
 
-def search(names, n, mode='songs'):
+def search(names, n, mode='songs', song_queries=(), song_n=8):
     opts = {'quiet': True, 'extract_flat': True, 'skip_download': True}
     found = {}
     templates = ('{} official audio', '{} офіційне відео', '{} пісня') if mode == 'songs' else \
         ('{} piano cover', '{} на піаніно', '{} piano tutorial', '{} фортепіано')
-    queries = [t.format(name) for name in names for t in templates]
+    queries = [(t.format(name), n) for name in names for t in templates] + [(q, song_n) for q in song_queries]
     with yt_dlp.YoutubeDL(opts) as ydl:
-        for query in queries:
-            info = ydl.extract_info(f'ytsearch{n}:{query}', download=False)
+        for query, k in queries:
+            info = ydl.extract_info(f'ytsearch{k}:{query}', download=False)
             for e in info.get('entries') or []:
                 if e and e.get('id'):
                     found.setdefault(e['id'], e)
@@ -179,10 +183,12 @@ def main():
     out_root.mkdir(parents=True, exist_ok=True)
     csv_path = out_root / 'songs.csv'
     known = {}  # covers mode: the songs we already have per artist (titles as in data/audio/songs.csv)
+    raw_titles = {}  # the same titles unnormalized, for per-song queries
     if args.mode == 'covers' and Path(args.songs_csv).exists():
         with open(args.songs_csv, newline='', encoding='utf-8') as f:
             for row in csv.DictReader(f):
                 known.setdefault(row['artist'], set()).add(normalize(row['song']))
+                raw_titles.setdefault(row['artist'], set()).add(row['song'])
     done = set()
     if csv_path.exists():
         with open(csv_path, newline='', encoding='utf-8') as f:
@@ -195,8 +201,10 @@ def main():
             writer.writeheader()
         for names in artists:
             artist = names[0]
-            chosen = select(search_with_retry(names, args.search_size, args.mode), names, args,
-                            known.get(artist, ()))
+            song_queries = [f'{artist} {t} піаніно' for t in sorted(raw_titles.get(artist, ()))] \
+                if args.mode == 'covers' and args.per_song_queries else []
+            chosen = select(search_with_retry(names, args.search_size, args.mode, song_queries, args.song_search_size),
+                            names, args, known.get(artist, ()))
             print(f'\n{artist}: {len(chosen)} songs')
             for item in chosen:
                 status = 'have' if item['id'] in done else ('dry' if args.dry_run else 'get ')

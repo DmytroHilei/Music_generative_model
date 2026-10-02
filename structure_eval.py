@@ -179,7 +179,7 @@ def sample(model, cfg, args, style, device, job, base):
     torch.manual_seed(args.seed)
     with torch.no_grad():
         out = model.generate(*seed, max_new_tokens=args.max_new, temperature=args.temperature,
-                             style=style, min_new=args.min_notes, cuda_graph=False,
+                             top_p=args.top_p, cfg_scale=args.cfg, dt_bias=args.dt_bias, style=style, min_new=args.min_notes, cuda_graph=False,
                              progress=lambda n: job.update(base + n * B))
     pieces = []
     for r in range(B):
@@ -217,6 +217,10 @@ def main():
     ap.add_argument('--max-new', type=int, default=1600)
     ap.add_argument('--min-notes', type=int, default=200, help='no EOS before this many notes')
     ap.add_argument('--temperature', type=float, default=1.0)
+    ap.add_argument('--top-p', type=float, default=None)
+    ap.add_argument('--cfg', type=float, default=1.0, help='classifier-free guidance on the style (1 = off)')
+    ap.add_argument('--dt-bias', type=float, default=0.0, help='density bias (generate.py --dt-bias)')
+    ap.add_argument('--tag', default='', help='suffix for the row names (e.g. the sampling setting)')
     ap.add_argument('--seed', type=int, default=1)
     ap.add_argument('--device', choices=['cpu', 'cuda'], default='cpu')
     ap.add_argument('--threads', type=int, default=8)
@@ -229,6 +233,7 @@ def main():
     header = (f"{'':40s}{'n':>4s}{'sec':>7s}{'nps':>7s}{'chord%':>7s}{'ends%':>6s}{'key%':>6s}{'melRep':>8s}"
               f"{'pitRep':>8s}{'recur':>7s}{'dDens':>7s}{'dReg':>7s}{'OA':>7s}{'dist':>7s}")
     lines = [f"structure: {args.samples} samples/checkpoint, BOS + style ({args.style}), T={args.temperature}, "
+             f"top_p={args.top_p}, cfg={args.cfg}, dt_bias={args.dt_bias}, seed={args.seed}, "
              f"EOS after {args.min_notes}, max {args.max_new} notes; reference = {Path(args.real[0]).stem}", header]
     ref = None
     for csv in args.real:  # the first CSV is the reference, others are scored against it
@@ -245,7 +250,7 @@ def main():
         model, cfg, it = load_model(path, args.device)
         style, style_name = pick_style(model, cfg, prefs)
         pieces = sample(model, cfg, args, style, args.device, job, ci * args.samples * args.max_new)
-        name = f"{Path(path).name} @{it} [{style_name}]"
+        name = f"{Path(path).name} @{it} [{style_name}]{args.tag}"
         row, _, dist = summarize(name, [metrics(p, e) for p, e in pieces], [p for p, _ in pieces], ref)
         lines.append(row)
         ranking.append((dist, name))
