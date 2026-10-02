@@ -1,0 +1,192 @@
+"""
+Song-structure metrics for whole generated pieces, next to the same metrics on real songs (the reference).
+
+    python structure_eval.py --checkpoints checkpoints/ua_2048_covers checkpoints/ua_2048_mix --style cover \\
+        --real data/finetune/ukrainian_covers.csv --samples 8 --device cpu --out-dir samples/structure
+
+Each checkpoint samples --samples pieces from BOS (+ --style), EOS allowed after --min-notes, up to --max-new notes
+(one window at 2048, so no sliding). Real reference = the validation songs of the --real CSVs, cropped to the same
+--max-new notes (recurrence and key stability grow with length). Per piece:
+  sec, notes/s, chord %    length, density, notes on the same onset as the previous note
+  ends                     the sample emitted EOS itself (real songs: always)
+  key stab                 share of 15 s segments whose Krumhansl-Schmuckler key is the piece's global key
+  mel rep                  share of 4-note melody patterns (top note per onset) seen earlier in the piece: hooks,
+                           choruses. First 400 notes: real covers 25.6%, real reductions 2.0% (transcription noise
+                           breaks every repeat), samples of a reduction model 0.9%
+  pit rep                  the same over all pitches in order (chords included): covers 18.4, reductions 2.2
+  recur                    per 2 s window, cosine (pitch histogram) to its best match 8-60 s earlier, averaged
+  dens drift, reg drift    |log| density ratio and |mean pitch| difference between the first and last third
+A model that wanders scores low on the repeat columns, recur and key stab; one that loops a single bar scores
+near 100% repeat.
+Compare with the real row, not with 1. Optional --out-dir writes the samples as MIDI for listening.
+"""
+
+import argparse
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+import torch
+
+from data_loader import load_styles, tokenize_midi
+from generate import resolve_checkpoint, tokens_to_midi
+from jobstatus import JobStatus
+from model import BOS_PITCH, EOS_PITCH, GPT, MusicConfig
+
+DT = 0.02
+MAJOR = np.array([6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88])
+MINOR = np.array([6.33, 2.68, 3.52, 5.38, 2.60, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17])
+PROFILES = np.stack([np.roll(MAJOR, k) for k in range(12)] + [np.roll(MINOR, k) for k in range(12)])  # (24, 12)
+
+
+def key_of(pitch, dur):
+    """Krumhansl-Schmuckler: duration-weighted pitch-class profile vs the 24 rotated key profiles -> key index."""
+    h = np.bincount(pitch % 12, weights=dur + 1e-3, minlength=12)
+    if h.sum() == 0:
+        return -1
+    return int(np.argmax([np.corrcoef(h, p)[0, 1] for p in PROFILES]))
+
+
+def repeats(seq, n=4):
+    """% of n-grams of seq that already occurred earlier in it."""
+    seen, rep = set(), 0
+    for i in range(len(seq) - n + 1):
+        g = tuple(seq[i:i + n])
+        rep += g in seen
+        seen.add(g)
+    return 100 * rep / max(len(seq) - n + 1, 1)
+
+
+def metrics(t, ended):
+    """t: (n, 4) pitch, velocity bin, duration bin, delta bin of one piece (no BOS/EOS)."""
+    pitch, dur, dt = t[:, 0], t[:, 2] * DT, t[:, 3]
+    onset = np.cumsum(dt) * DT
+    sec = max(onset[-1], 1e-3)
+    out = dict(sec=sec, nps=len(t) / sec, chord=100 * (dt[1:] == 0).mean(), ends=100.0 * ended)
+    # key stability over 15 s segments (segments with < 8 notes skipped)
+    g = key_of(pitch, dur)
+    seg = (onset // 15).astype(int)
+    keys = [key_of(pitch[seg == s], dur[seg == s]) for s in np.unique(seg) if (seg == s).sum() >= 8]
+    out['key'] = 100 * np.mean([k == g for k in keys]) if keys else np.nan
+    # repeated 4-note patterns: the melody (top note of each onset) and all pitches in order
+    on_ids = np.cumsum(dt > 0)
+    melody = np.array([pitch[on_ids == o].max() for o in np.unique(on_ids)])
+    out['mel_rep'], out['pit_rep'] = repeats(melody), repeats(pitch)
+    # recurrence of 2 s windows (pitch histograms), best match 8-60 s earlier
+    win = (onset // 2).astype(int)
+    W = np.zeros((win.max() + 1, 128))
+    np.add.at(W, (win, pitch.clip(0, 127)), 1)
+    norms = np.linalg.norm(W, axis=1)
+    keep = norms > 0
+    V = W / np.where(keep, norms, 1)[:, None]
+    best = [(V[max(0, i - 30):i - 3] @ V[i]).max() for i in range(4, len(V))
+            if keep[i] and keep[max(0, i - 30):i - 3].any()]
+    out['recur'] = float(np.mean(best)) if best else np.nan
+    # drift between the first and last third
+    a, b = len(t) // 3, len(t) - len(t) // 3
+    nps = lambda s, e: (e - s) / max((onset[e - 1] - onset[s]), 1e-3)
+    out['dens_drift'] = abs(np.log(nps(b, len(t)) / nps(0, a))) if a > 2 else np.nan
+    out['reg_drift'] = abs(pitch[b:].mean() - pitch[:a].mean()) if a > 0 else np.nan
+    return out
+
+
+def real_pieces(csvs):
+    pieces = []
+    for csv in csvs:
+        df = pd.read_csv(csv)
+        for f in df.loc[df['split'] == 'validation', 'midi_filename']:
+            toks = tokenize_midi(f)
+            if toks is not None:
+                pieces.append(np.stack([x.numpy() for x in toks], 1))
+    return pieces
+
+
+def load_model(path, device):
+    ck = torch.load(resolve_checkpoint(path), map_location=device)
+    cfg = MusicConfig(**{k: v for k, v in ck['model_args'].items() if k in MusicConfig.__dataclass_fields__},
+                      dropout=0.0)
+    model = GPT(cfg)
+    model.load_state_dict({k.replace('_orig_mod.', ''): v.float() for k, v in ck['model'].items()}, strict=False)
+    return model.eval().to(device), cfg, ck.get('iter_num', '?')
+
+
+def sample(model, cfg, args, style, device, job, base):
+    B = args.samples
+    if cfg.pitch_size > BOS_PITCH:
+        seed = [torch.full((B, 1), BOS_PITCH if j == 0 else 0, dtype=torch.long, device=device) for j in range(4)]
+    else:  # models without BOS: a silent note, as in generate.py
+        seed = [torch.full((B, 1), v, dtype=torch.long, device=device) for v in (0, 0, 10, 0)]
+    torch.manual_seed(args.seed)
+    with torch.no_grad():
+        out = model.generate(*seed, max_new_tokens=args.max_new, temperature=args.temperature,
+                             style=style, min_new=args.min_notes, cuda_graph=False,
+                             progress=lambda n: job.update(base + n * B))
+    pieces = []
+    for r in range(B):
+        rows = np.stack([o[r, 1:].cpu().numpy() for o in out], 1)
+        ended = EOS_PITCH in rows[:, 0]
+        if ended:
+            rows = rows[:list(rows[:, 0]).index(EOS_PITCH)]
+        pieces.append((rows[rows[:, 0] < BOS_PITCH], ended))
+    return pieces
+
+
+def summarize(name, ms):
+    keys = ['sec', 'nps', 'chord', 'ends', 'key', 'mel_rep', 'pit_rep', 'recur', 'dens_drift', 'reg_drift']
+    m = {k: np.nanmean([x[k] for x in ms]) for k in keys}
+    return (f"{name:34s}{len(ms):4d}{m['sec']:7.0f}{m['nps']:7.2f}{m['chord']:7.1f}{m['ends']:6.0f}"
+            f"{m['key']:6.0f}{m['mel_rep']:8.1f}{m['pit_rep']:8.1f}{m['recur']:7.3f}{m['dens_drift']:7.2f}{m['reg_drift']:7.1f}")
+
+
+def main():
+    ap = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+    ap.add_argument('--checkpoints', nargs='*', default=[], help='files or run dirs')
+    ap.add_argument('--real', nargs='*', default=['data/finetune/ukrainian_covers.csv'],
+                    help='CSVs whose validation songs are the reference')
+    ap.add_argument('--style', default=None, help="style name for models with styles (e.g. 'cover')")
+    ap.add_argument('--samples', type=int, default=8)
+    ap.add_argument('--max-new', type=int, default=1600)
+    ap.add_argument('--min-notes', type=int, default=200, help='no EOS before this many notes')
+    ap.add_argument('--temperature', type=float, default=1.0)
+    ap.add_argument('--seed', type=int, default=1)
+    ap.add_argument('--device', choices=['cpu', 'cuda'], default='cpu')
+    ap.add_argument('--threads', type=int, default=8)
+    ap.add_argument('--out-dir', default=None, help='write the samples as MIDI here')
+    ap.add_argument('--out', default=None, help='also write the table here')
+    args = ap.parse_args()
+    torch.set_num_threads(args.threads)
+
+    header = (f"{'':34s}{'n':>4s}{'sec':>7s}{'nps':>7s}{'chord%':>7s}{'ends%':>6s}{'key%':>6s}{'melRep':>8s}{'pitRep':>8s}"
+              f"{'recur':>7s}{'dDens':>7s}{'dReg':>7s}")
+    lines = [f"structure: {args.samples} samples/checkpoint, BOS + style {args.style}, T={args.temperature}, "
+             f"EOS after {args.min_notes}, max {args.max_new} notes", header]
+    reals = real_pieces(args.real)
+    lines.append(summarize('real (' + '+'.join(Path(c).stem for c in args.real) + ')',
+                           [metrics(p[:args.max_new], True) for p in reals]))
+    print('\n'.join(lines), flush=True)
+
+    job = JobStatus('structure', max(1, len(args.checkpoints) * args.samples * args.max_new),
+                    f'{len(args.checkpoints)} checkpoints')
+    for ci, path in enumerate(args.checkpoints):
+        model, cfg, it = load_model(path, args.device)
+        style = None
+        if cfg.n_styles:
+            names = load_styles()
+            style = names.index(args.style or 'none')
+        pieces = sample(model, cfg, args, style, args.device, job, ci * args.samples * args.max_new)
+        lines.append(summarize(f"{Path(path).name} @{it}", [metrics(p, e) for p, e in pieces]))
+        print(lines[-1], flush=True)
+        if args.out_dir:
+            d = Path(args.out_dir) / Path(path).name
+            d.mkdir(parents=True, exist_ok=True)
+            for i, (p, _) in enumerate(pieces):
+                tokens_to_midi(*[p[:, j].tolist() for j in range(4)]).write(str(d / f'sample_{i + 1}.mid'))
+        del model
+    job.finish('done')
+    if args.out:
+        Path(args.out).parent.mkdir(parents=True, exist_ok=True)
+        Path(args.out).write_text('\n'.join(lines) + '\n')
+
+
+if __name__ == '__main__':
+    main()
