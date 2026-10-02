@@ -652,7 +652,7 @@ class GPT(nn.Module):
     @torch.no_grad()
     def generate(self, pitch, velocity, duration, delta_time, max_new_tokens, temperature=0.85, top_k=None,
                  anchor=0, slide=None, progress=None, dt_bias=0.0, target_nps=None, dt_seconds=0.02,
-                 cuda_graph=True, style=None, min_new=0, program=0):
+                 cuda_graph=True, style=None, min_new=0, program=0, top_p=None, cfg_scale=1.0):
         """
         Batched sampling (B rows, same prompt length) with a preallocated KV cache: each new note costs one position
         through the model, not a full re-run. On CUDA the one-note transformer step is captured once as a CUDA graph
@@ -670,6 +670,10 @@ class GPT(nn.Module):
         style: (B,) style ids (models with n_styles; 0 = none/unconditional).
         program: models with n_programs: every note is played by this one instrument (0 = piano); its head isn't
           sampled. Sampling the instrument per note is to-do 15.
+        top_p: nucleus sampling, keep the smallest set of values whose probability reaches top_p (after top_k).
+        cfg_scale != 1 (needs a style): classifier-free guidance. The batch runs twice, with the style and with
+          style 0 (none, which style dropout trained), and every head samples from uncond + s * (cond - uncond); both
+          halves are fed the same note. Not combined with target_nps.
         Special tokens (pitch vocab 130): BOS is never sampled; EOS (end of piece) not before min_new notes. Rows keep
         running after their EOS (batch shapes stay fixed); cut them at the first EOS when writing MIDI.
         Nothing here syncs the GPU with the CPU inside the loop.
@@ -678,6 +682,11 @@ class GPT(nn.Module):
         slide = slide or L // 4
         assert 0 <= anchor and anchor + slide < L, "need anchor + slide < block_size"
         device = pitch.device
+        Bo = pitch.size(0)  # rows asked for; with guidance the model runs 2 * Bo (conditional, then unconditional)
+        guided = cfg_scale != 1.0 and style is not None
+        assert not (guided and target_nps is not None), "guidance with a density target isn't supported"
+        if guided:
+            pitch, velocity, duration, delta_time = (torch.cat([t, t]) for t in (pitch, velocity, duration, delta_time))
         B, n0 = pitch.shape
         total = n0 + max_new_tokens
         # output buffers, filled in place (no growing torch.cat)
@@ -689,7 +698,7 @@ class GPT(nn.Module):
         # keeps its odds against the shortest gap, so chords aren't broken up into arpeggios
         dt_shape = torch.log(torch.arange(self.config.delta_time_size, dtype=torch.float32,
                                           device=device).clamp(min=1))
-        bias = torch.full((B, 1), float(dt_bias), device=device)
+        bias = torch.full((Bo, 1), float(dt_bias), device=device)
         target = None
         if target_nps is not None:
             target = torch.as_tensor(target_nps, dtype=torch.float32, device=device).reshape(-1, 1).expand(B, 1)
@@ -697,14 +706,19 @@ class GPT(nn.Module):
         specials = self.config.pitch_size > BOS_PITCH
         step_i = [0]
         if style is not None:
-            style = torch.as_tensor(style, dtype=torch.long, device=device).reshape(-1).expand(B).contiguous()
+            style = torch.as_tensor(style, dtype=torch.long, device=device).reshape(-1).expand(Bo).contiguous()
+            if guided:
+                style = torch.cat([style, torch.zeros_like(style)])
         fixed_program = torch.full((B, 1), int(program), dtype=torch.long, device=device) \
             if self.config.n_programs else None
 
         def sample(logits, name=None):  # (B, 1, vocab) → (B, 1)
             if name == 'program':
                 return fixed_program
-            logits = logits[:, -1, :].float() / temperature
+            logits = logits[:, -1, :].float()
+            if guided:
+                logits = logits[Bo:] + cfg_scale * (logits[:Bo] - logits[Bo:])
+            logits = logits / temperature
             if name == 'pitch' and specials:
                 logits[:, BOS_PITCH] = -float('Inf')
                 if step_i[0] < min_new:
@@ -714,7 +728,13 @@ class GPT(nn.Module):
             if top_k is not None:
                 v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
                 logits[logits < v[:, [-1]]] = -float('Inf')
-            return torch.multinomial(F.softmax(logits, dim=-1), num_samples=1)
+            probs = F.softmax(logits, dim=-1)
+            if top_p is not None:
+                sorted_p, order = torch.sort(probs, dim=-1, descending=True)
+                drop = sorted_p.cumsum(-1) - sorted_p > top_p  # mass before this value already reaches top_p
+                probs = probs.scatter(-1, order, sorted_p.masked_fill(drop, 0.0))
+            nxt = torch.multinomial(probs, num_samples=1)
+            return torch.cat([nxt, nxt]) if guided else nxt
 
         dtype = next(self.parameters()).dtype
         C = self.config.n_embd
@@ -786,4 +806,4 @@ class GPT(nn.Module):
             else:
                 h, filled = prefill(n)
 
-        return tuple(out)
+        return tuple(o[:Bo] for o in out)
