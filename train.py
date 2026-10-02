@@ -80,7 +80,8 @@ moe_hidden_frac = 0.5
 moe_aux_weight = 0.01
 n_styles = 0              # set from style_map
 pos_emb = 'learned'       # 'learned' (absolute table, old checkpoints) | 'rope' (rotary; a finetune may switch to it
-                          # and then also raise block_size above the checkpoint's)
+                          # and then also raise block_size above the checkpoint's). A 'learned' finetune may raise
+                          # block_size too: the table is stretched by linear interpolation
 rope_base = 10000.0
 n_programs = 0            # multi-instrument: 129 = GM programs + drums (needs a programs.u8 store or reads piano as 0)
 
@@ -204,6 +205,8 @@ if init_from in ('resume', 'finetune'):
             model_args[k] = wanted  # switch to RoPE: the position table is dropped (not function-preserving)
     if init_from == 'finetune' and model_args['pos_emb'] == 'rope':
         model_args['block_size'] = block_size  # nothing in a RoPE model depends on the context length
+    elif init_from == 'finetune' and block_size > model_args['block_size']:
+        model_args['block_size'] = block_size  # learned positions: the table is stretched (position interpolation)
 else:
     print("Initializing a new model from scratch")
 
