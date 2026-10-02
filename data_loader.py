@@ -77,8 +77,8 @@ class MaestroDataset(Dataset):
         csv_path:    one or more sources separated by ',': a CSV (paths inside relative to root_dir or absolute),
                      or 'store:<prefix>' = a prebuilt token store <prefix>_<split>/ (e.g. from data/prepare_aria.py)
         eval_stride: if set, the dataset is deterministic (no randomness, no augmentation): use it for validation
-        source_weights: optional sampling weight per store (the CSV sources form one store, first; then each
-                     'store:' source in order). Default: uniform over all note positions, i.e. by size. Use it to mix a
+        source_weights: optional sampling weight per store (each CSV is its own store, CSVs first in order; then
+                     each 'store:' source in order). Default: uniform over all note positions, i.e. by size. Use it to mix a
                      small fine-tune set with replay, e.g. [0.8, 0.2]
         special_tokens: every file is read as [BOS] + notes + [EOS] (pitch BOS_PITCH / EOS_PITCH, other attributes 0),
                      without touching the token stores
@@ -129,10 +129,10 @@ class MaestroDataset(Dataset):
         self.boundary_frac = boundary_frac if special_tokens else 0.0
         self.style_ids = {name: i for i, name in enumerate(styles)} if styles else None
         self.store_dirs, file_styles = [], []
-        if self.csv_paths:
-            self.midi_paths = self._load_midi_paths()
-            file_styles.append(self.midi_styles)
-            self.store_dirs.append(self._build_store())
+        for csv in self.csv_paths:  # one store per CSV, so source_weights can weight each CSV
+            paths, csv_styles = self._load_midi_paths(csv)
+            file_styles.append(csv_styles)
+            self.store_dirs.append(self._build_store(csv, paths))
         for store in prebuilt:
             if not (store / "meta.json").exists():
                 raise FileNotFoundError(f"Prebuilt token store {store} missing or incomplete")
@@ -199,23 +199,22 @@ class MaestroDataset(Dataset):
         df = pd.read_csv(meta_csv, dtype=str, keep_default_na=False)
         return list(df.loc[df["split"] == self.split, "genre"])
 
-    def _load_midi_paths(self):
-        paths, styles = [], []
-        for csv_path in self.csv_paths:
-            if not csv_path.exists():
-                raise FileNotFoundError(f"CSV file not found: {csv_path}")
-            df = pd.read_csv(csv_path)
-            if "split" not in df.columns or "midi_filename" not in df.columns:
-                raise ValueError(f"{csv_path} must contain 'split' and 'midi_filename' columns.")
-            df = df[df["split"] == self.split]
-            if self.debug:
-                df = df.head(5)
-            paths += [self.root_dir / f for f in df["midi_filename"]]
-            col = "style" if "style" in df.columns else "artist" if "artist" in df.columns else None
-            styles += list(df[col]) if col else [DEFAULT_CSV_STYLE.get(csv_path.stem, "none")] * len(df)
+    def _load_midi_paths(self, csv_path):
+        """(MIDI paths, styles) of one CSV's rows in this split."""
+        if not csv_path.exists():
+            raise FileNotFoundError(f"CSV file not found: {csv_path}")
+        df = pd.read_csv(csv_path)
+        if "split" not in df.columns or "midi_filename" not in df.columns:
+            raise ValueError(f"{csv_path} must contain 'split' and 'midi_filename' columns.")
+        df = df[df["split"] == self.split]
+        if self.debug:
+            df = df.head(5)
+        paths = [self.root_dir / f for f in df["midi_filename"]]
+        col = "style" if "style" in df.columns else "artist" if "artist" in df.columns else None
+        styles = list(df[col]) if col else [DEFAULT_CSV_STYLE.get(csv_path.stem, "none")] * len(df)
 
         if len(paths) == 0:
-            raise ValueError(f"No MIDI files found for split='{self.split}'.")
+            raise ValueError(f"No MIDI files found in {csv_path} for split='{self.split}'.")
 
         missing = [p for p in paths if not p.exists()]
         if missing:
@@ -225,16 +224,15 @@ class MaestroDataset(Dataset):
             paths = [p for p in paths if p.exists()]
             if not paths:
                 raise FileNotFoundError(f"All MIDI files for split='{self.split}' are missing.")
-        self.midi_styles = styles
-        return paths
+        return paths, styles
 
-    def _build_store(self):
+    def _build_store(self, csv_path, midi_paths):
         key = repr((
-            [str(p) for p in self.midi_paths],
+            [str(p) for p in midi_paths],
             self.velocity_bins, self.time_resolution, self.max_duration_bin, self.max_delta_bin,
         ))
         digest = hashlib.sha1(key.encode()).hexdigest()[:16]
-        name = "+".join(p.stem for p in self.csv_paths)  # unchanged for a single CSV -> old stores still match
+        name = csv_path.stem  # same name and key as before for a single CSV -> existing stores still match
         store = self.cache_dir / f"{name}_{self.split}_{digest}"
         if (store / "meta.json").exists():
             meta = json.loads((store / "meta.json").read_text())
@@ -245,11 +243,11 @@ class MaestroDataset(Dataset):
         parse = partial(_tokenize_to_array, velocity_bins=self.velocity_bins,
                         time_resolution=self.time_resolution,
                         max_duration_bin=self.max_duration_bin, max_delta_bin=self.max_delta_bin)
-        workers = min(len(self.midi_paths), os.cpu_count() or 1)
+        workers = min(len(midi_paths), os.cpu_count() or 1)
         offsets, n_notes, n_failed = [0], 0, 0
         # streamed to disk in order, so memory stays flat no matter how large the dataset is
         with open(store / "tokens.u16", "wb") as f, ProcessPoolExecutor(max_workers=workers) as pool:
-            for arr in tqdm(pool.map(parse, self.midi_paths, chunksize=16), total=len(self.midi_paths),
+            for arr in tqdm(pool.map(parse, midi_paths, chunksize=16), total=len(midi_paths),
                             desc=f"Tokenizing {self.split} ({workers} workers)"):
                 if arr is None:
                     n_failed += 1
@@ -258,7 +256,7 @@ class MaestroDataset(Dataset):
                     n_notes += len(arr)
                 offsets.append(n_notes)
         np.save(store / "offsets.npy", np.array(offsets, dtype=np.int64))
-        meta = dict(n_files=len(self.midi_paths), n_notes=n_notes, n_empty_or_failed=n_failed)
+        meta = dict(n_files=len(midi_paths), n_notes=n_notes, n_empty_or_failed=n_failed)
         (store / "meta.json").write_text(json.dumps(meta))  # written last = store is complete
         print(f"Tokenized {self.split}: {n_notes:,} notes, {n_failed} empty/broken files skipped -> {store}")
         return store
