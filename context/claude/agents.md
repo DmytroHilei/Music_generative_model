@@ -268,6 +268,27 @@ pretraining and the Skryabin fine-tune, so there's a strong AR baseline to compa
      representation (hypothesis 7).
   3. **Hybrid / hierarchical:** diffusion plans the structure (bars, chords, melody outline) and the AR model renders the expressive notes.
 
+## Future ideas (discussed 2026-10-02, not started)
+
+1. **Future prediction (auxiliary heads), first test of "see the future".** Next to the next-note cascade, small heads
+   on the trunk state h_t predict the *near future*. Note-level targets (note t+k, Gloeckle et al. 2024) are fragile in
+   our tokens: chord notes are ordered by pitch, so "4 notes ahead" is sometimes the same chord and sometimes the next
+   bar. Time-based summaries are more musical: for horizons 0–2 s / 2–4 s / 4–8 s after note t's onset, a pitch-class
+   histogram (12, soft-target CE), a register (mean pitch) and a log note count. Targets come from the loader (onsets =
+   cumsum(dt), prefix sums per pitch class, searchsorted for the horizon edges); positions whose horizon runs past the
+   window or the EOS are masked. loss = main + λ·aux (λ ≈ 0.1–0.3); the heads are dropped at inference. Caveat: in text,
+   MTP helped only from ~1B params up, so judge by structure (key-sim over 1,000+ generated notes, repetition, EOS), not
+   only by val CE. Test: the ua-2048 recipe with vs without the heads (1 h each).
+2. **Bidirectional teacher → causal student (DINO / data2vec / Twin Networks / Belief State Transformer).** Distil the
+   teacher's *representations* of the future (the student's h_t regresses an EMA or masked-LM teacher's summary of the
+   next bars), not its output distribution: P(note | past, future) is sharper than any causal model can be, so logit
+   distillation teaches unjustified confidence. Needs a MusicBERT-style teacher (a second pretraining run); only if 1 helps.
+3. **Text prompts.** (a) Now-feasible: attribute tokens like the style table (MuseCoco): computed from the MIDI (key/mode,
+   tempo, density, register, polyphony) + LLM/web tags per song (we know artist and title of every Ukrainian song); at
+   inference an LLM maps free text to the attributes. (b) Research-grade, for the multi-instrument run: condition on the
+   CLaMP 3 embedding of each MIDI file (no text needed in training), feed the text embedding at inference; bridge the
+   modality gap with embedding noise (LAFITE). MidiCaps (Lakh captions) may overlap GigaMIDI: check license/overlap.
+
 ## Working conventions for agents
 
 - **Git remote:** `origin` = `github.com/DmytroHilei/Music_generative_model` (public). This project is branch **`transformer-v2`**
