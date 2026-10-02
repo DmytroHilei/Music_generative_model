@@ -41,6 +41,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--val-percent', type=int, default=10)
     ap.add_argument('--source', choices=['reductions', 'covers'], default='reductions')
+    ap.add_argument('--train-only-artists', default='', help="artists file (fetch_songs.py format) whose songs all go "
+                    "to train: their titles can't be matched to known songs, so a song could otherwise land in both")
     ap.add_argument('--out', default=str(ROOT / 'data/finetune/ukrainian.csv'))
     ap.add_argument('--style', default='', help="write a 'style' column with this label for every song (e.g. "
                     "'reduction' = one domain label); without it the loader uses the artist as the style")
@@ -58,6 +60,8 @@ def main():
     exclude_txt = ROOT / 'data/finetune/exclude.txt'
     excluded = {line.split('#')[0].strip() for line in exclude_txt.read_text(encoding='utf-8').splitlines()} - {''} \
         if exclude_txt.exists() else set()
+    train_only = {line.split('|')[0].strip() for line in open(args.train_only_artists, encoding='utf-8')
+                  if line.strip() and not line.startswith('#')} if args.train_only_artists else set()
     rows, seen, dupes, n_excluded = [], {}, [], 0
     for midi in sorted(base.glob('*/midi/*.mid')):
         folder = midi.parent.parent.name
@@ -79,7 +83,8 @@ def main():
             dupes.append((midi.name, seen[key]))
             continue
         seen[key] = midi.name
-        split = 'validation' if zlib.crc32(key[1].encode()) % 100 < args.val_percent else 'train'
+        split = 'validation' if zlib.crc32(key[1].encode()) % 100 < args.val_percent and artist not in train_only \
+            else 'train'
         rows.append(dict(split=split, midi_filename=str(midi), artist=artist, title=title.strip(),
                          **({'style': args.style} if args.style else {})))
 
