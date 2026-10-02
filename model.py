@@ -422,7 +422,13 @@ class GPT(nn.Module):
             if k.startswith('cascade.cond_emb.program.') or k == 'cascade.heads.program.out.weight':
                 state_dict[k] = torch.zeros_like(own[k])
         for k, v in state_dict.items():
-            if k in own and own[k].shape != v.shape:
+            if k == 'transformer.wpe.weight' and own[k].shape[0] > v.shape[0]:
+                # longer context with learned positions: stretch the table (position interpolation), so position p
+                # gets the old embedding at p * old/new, linearly between neighbouring rows
+                state_dict[k] = F.interpolate(v.float().t()[None], size=own[k].shape[0], mode='linear',
+                                              align_corners=True)[0].t().to(v.dtype)
+                changed.append(f'{k} (stretched {v.shape[0]} -> {own[k].shape[0]})')
+            elif k in own and own[k].shape != v.shape:
                 assert own[k].shape[1:] == v.shape[1:] and own[k].shape[0] >= v.shape[0], \
                     f"{k}: can't grow {tuple(v.shape)} -> {tuple(own[k].shape)}"
                 grown = own[k].clone()
