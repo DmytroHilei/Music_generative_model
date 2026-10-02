@@ -83,6 +83,8 @@ pos_emb = 'learned'       # 'learned' (absolute table, old checkpoints) | 'rope'
                           # and then also raise block_size above the checkpoint's). A 'learned' finetune may raise
                           # block_size too: the table is stretched by linear interpolation
 rope_base = 10000.0
+pad_short = False         # keep files shorter than block_size as one padded whole-file window (masked targets)
+min_notes = 64            # with pad_short: shorter files are still dropped
 n_programs = 0            # multi-instrument: 129 = GM programs + drums (needs a programs.u8 store or reads piano as 0)
 
 # wandb logging
@@ -154,6 +156,7 @@ train_dataset = MaestroDataset(csv_path, root_dir=root_dir, split='train', block
                                augment=True, cache_dir=cache_dir, special_tokens=special_tokens,
                                styles=styles, style_dropout=style_dropout, boundary_frac=boundary_frac,
                                aug_tempo=aug_tempo, aug_velocity=aug_velocity, programs=n_programs > 0,
+                               pad_short=pad_short, min_notes=min_notes,
                                aug_stores=[int(a) for a in str(aug_stores).strip('()[] ').split(',') if a.strip()] if aug_stores else None,
                                source_weights=[float(w) for w in str(source_weights).strip('()[] ').split(',') if w.strip()] if source_weights else None)
 
@@ -162,7 +165,7 @@ def make_val_loader(sources):
     # fixed non-overlapping windows, evenly thinned to at most eval_iters batches -> identical every eval / run
     ds = MaestroDataset(sources, root_dir=root_dir, split='validation', block_size=block_size,
                         cache_dir=cache_dir, eval_stride=block_size, special_tokens=special_tokens, styles=styles,
-                        programs=n_programs > 0)
+                        programs=n_programs > 0, pad_short=pad_short, min_notes=min_notes)
     max_val_windows = eval_iters * batch_size
     if len(ds) > max_val_windows:
         step = len(ds) / max_val_windows

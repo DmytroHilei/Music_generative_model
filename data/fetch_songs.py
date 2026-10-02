@@ -11,6 +11,11 @@ Private research use only: don't redistribute the audio.
     .venv-audio/bin/python data/fetch_songs.py --per-artist 25
 Then:
     .venv-audio/bin/python data/audio_to_piano.py --input data/audio/<artist> --output data/finetune/<artist>
+
+--mode covers: solo piano covers / tutorials of the same artists instead (real human arrangements, transcribed with
+data/transcribe_covers.py rather than reduced): the title must name the artist and a piano word, other instruments and
+vocal covers are skipped, and a song may come from up to --per-song different videos (different pianists).
+    .venv-audio/bin/python data/fetch_songs.py --mode covers --per-artist 60 --dry-run
 """
 
 import argparse
@@ -30,6 +35,25 @@ BAD_WORDS = [
 ]
 
 
+# covers mode: a piano word is required, covers/tutorials are fine, other instruments and singing are not
+PIANO_WORDS = ['piano', 'піаніно', 'фортепіано', 'фортепиано', 'пианино', 'рояль', 'synthesia']
+COVER_BAD_WORDS = [
+    'live', 'концерт', 'concert', 'interview', 'інтерв', 'karaoke', 'караоке', 'мінус', 'минус', 'reaction', 'реакція',
+    'guitar', 'гітар', 'гитар', 'vocal', 'вокал', 'sing', 'співа', 'пою', 'drum', 'барабан', 'violin', 'скрипк',
+    'cello', 'віолончел', 'ukulele', 'укулеле', 'accordion', 'акордеон', 'баян', 'bayan', 'sax', 'саксофон', 'flute',
+    'флейт', 'бандур', 'bandura', 'orchestra', 'оркестр', 'kalimba', 'калімба', 'harp', 'арф', 'organ', 'орган',
+    'hang drum', 'handpan', 'mix', 'mashup', 'медлі', 'medley', 'попурі', 'хіти', 'hits', 'playlist', 'shorts',
+    'ft.', 'feat', 'remix', 'ремікс', 'beat', 'бит', 'chords only', 'акорди', 'how to play chords',
+]
+# a cover/tutorial cue, so a band's own video (Pianoбой, the song 'Fortepiano') isn't taken for a cover
+COVER_CUES = re.compile(r'cover|кавер|caver|сover|tutorial|туторіал|урок|synthesia|ноти|ноты|midi|sheet music|'
+                        r'piano version|piano solo|piano arrangement|\(piano\)|на піаніно|на фортепіано|на пианино|'
+                        r'на фортепиано')
+COVER_WORDS = r'piano|піаніно|фортепіано|фортепиано|пианино|рояль|synthesia|cover|кавер|caver|сover|tutorial|' \
+              r'урок|туторіал|на|by|easy|легко|ноти|ноты|notes|sheet|music|midi|instrumental|version|версія|' \
+              r'arrangement|аранжування|solo|безкоштовні|free|and|the'
+
+
 def parse_args():
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser.add_argument('--artists', default='data/artists.txt')
@@ -41,6 +65,9 @@ def parse_args():
     parser.add_argument('--quality', default='192', help='mp3 kbps (128 is enough for Demucs + basic-pitch)')
     parser.add_argument('--sleep', type=float, default=3.0, help='seconds between downloads (be polite)')
     parser.add_argument('--dry-run', action='store_true')
+    parser.add_argument('--mode', choices=['songs', 'covers'], default='songs')
+    parser.add_argument('--songs-csv', default='data/audio/songs.csv', help='covers mode: known song titles')
+    parser.add_argument('--per-song', type=int, default=2, help='covers mode: max videos of the same song')
     return parser.parse_args()
 
 
@@ -53,24 +80,32 @@ def normalize(text):
     return re.sub(r'\s+', ' ', text).strip()
 
 
-def song_title(video_title, names):
+def song_title(video_title, names, covers=False, known=()):
     """'Скрябін - Місця щасливих людей (Official Video)' -> 'місця щасливих людей', or None if not this artist.
     names: the artist name and its aliases (e.g. 'Танок на Майдані Конго', 'ТНМК')."""
     norm_title = normalize(video_title)
+    if covers:  # one-word Latin aliases ('Karna') hit unrelated songs in other languages
+        names = [n for n in names if re.search('[а-яіїєґ]', n.lower()) or len(normalize(n).split()) > 1]
     matched = [normalize(n) for n in names if normalize(n) in norm_title]
     if not matched:
         return None
     rest = norm_title.replace(max(matched, key=len), ' ')
     rest = re.sub(r'\bft\b.*|\bfeat\b.*', ' ', rest)
+    if covers:
+        # the artist's known song title when the cover names one, so a song keeps one key (and one split)
+        hits = [k for k in known if k and re.search(rf'\b{re.escape(k)}\b', rest)]
+        if hits:
+            return max(hits, key=len)
+        rest = re.sub(rf'\b({COVER_WORDS})\b', ' ', rest)
     rest = re.sub(r'\s+', ' ', rest).strip()
     return rest or None
 
 
-def search_with_retry(names, n, attempts=4):
+def search_with_retry(names, n, mode='songs', attempts=4):
     """Network hiccups (DNS, timeouts) shouldn't kill a multi-hour run: retry with backoff, then skip the artist."""
     for attempt in range(attempts):
         try:
-            return search(names, n)
+            return search(names, n, mode)
         except Exception as e:
             wait = 30 * 2 ** attempt
             print(f'  search failed ({type(e).__name__}), retry {attempt + 1}/{attempts} in {wait}s')
@@ -79,10 +114,12 @@ def search_with_retry(names, n, attempts=4):
     return []
 
 
-def search(names, n):
+def search(names, n, mode='songs'):
     opts = {'quiet': True, 'extract_flat': True, 'skip_download': True}
     found = {}
-    queries = [q for name in names for q in (f'{name} official audio', f'{name} офіційне відео', f'{name} пісня')]
+    templates = ('{} official audio', '{} офіційне відео', '{} пісня') if mode == 'songs' else \
+        ('{} piano cover', '{} на піаніно', '{} piano tutorial', '{} фортепіано')
+    queries = [t.format(name) for name in names for t in templates]
     with yt_dlp.YoutubeDL(opts) as ydl:
         for query in queries:
             info = ydl.extract_info(f'ytsearch{n}:{query}', download=False)
@@ -92,19 +129,28 @@ def search(names, n):
     return list(found.values())
 
 
-def select(entries, names, args):
-    chosen, seen_titles = [], set()
+def select(entries, names, args, known=()):
+    covers = args.mode == 'covers'
+    chosen, seen_titles = [], {}
     for e in entries:
         title = e.get('title') or ''
         duration = e.get('duration') or 0
         if not (args.min_sec <= duration <= args.max_sec):
             continue
-        if any(w in title.lower() for w in BAD_WORDS):
+        low = title.lower()
+        if covers:
+            # piano word and cover cue outside the artist's name ('Pianoбой', 'Pianoboy')
+            bare = low
+            for n in sorted(names, key=len, reverse=True):
+                bare = bare.replace(n.lower(), ' ')
+            if not any(w in bare for w in PIANO_WORDS) or not COVER_CUES.search(bare):
+                continue
+        if any(w in low for w in (COVER_BAD_WORDS if covers else BAD_WORDS)):
             continue
-        song = song_title(title, names)
-        if not song or song in seen_titles:
+        song = song_title(title, names, covers, known)
+        if not song or seen_titles.get(song, 0) >= (args.per_song if covers else 1):
             continue
-        seen_titles.add(song)
+        seen_titles[song] = seen_titles.get(song, 0) + 1
         chosen.append({'artist': names[0], 'song': song, 'video_title': title, 'id': e['id'],
                        'url': f"https://www.youtube.com/watch?v={e['id']}", 'duration': duration})
         if len(chosen) >= args.per_artist:
@@ -132,6 +178,11 @@ def main():
     out_root = Path(args.output)
     out_root.mkdir(parents=True, exist_ok=True)
     csv_path = out_root / 'songs.csv'
+    known = {}  # covers mode: the songs we already have per artist (titles as in data/audio/songs.csv)
+    if args.mode == 'covers' and Path(args.songs_csv).exists():
+        with open(args.songs_csv, newline='', encoding='utf-8') as f:
+            for row in csv.DictReader(f):
+                known.setdefault(row['artist'], set()).add(normalize(row['song']))
     done = set()
     if csv_path.exists():
         with open(csv_path, newline='', encoding='utf-8') as f:
@@ -144,7 +195,8 @@ def main():
             writer.writeheader()
         for names in artists:
             artist = names[0]
-            chosen = select(search_with_retry(names, args.search_size), names, args)
+            chosen = select(search_with_retry(names, args.search_size, args.mode), names, args,
+                            known.get(artist, ()))
             print(f'\n{artist}: {len(chosen)} songs')
             for item in chosen:
                 status = 'have' if item['id'] in done else ('dry' if args.dry_run else 'get ')

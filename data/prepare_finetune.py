@@ -9,6 +9,11 @@ Builds the fine-tune CSV from the piano reductions in data/finetune/<artist>/mid
 - Dedupe: one file per (artist, title). skryabin_local counts as artist Скрябін.
 - Split by song title (crc32 hash, --val-percent), so no song is in both train and validation.
 Columns: split, midi_filename (absolute), artist, title.
+
+--source covers: the transcribed piano covers in data/covers/<artist>/midi/ (data/transcribe_covers.py), titles from
+data/covers/songs.csv. Several covers of one song (different pianists) are all kept; the split uses the same title hash,
+so a song is validation for both sources or for neither.
+    python data/prepare_finetune.py --source covers --style cover --out data/finetune/ukrainian_covers.csv
 """
 
 import argparse
@@ -35,13 +40,16 @@ def norm_title(text):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--val-percent', type=int, default=10)
+    ap.add_argument('--source', choices=['reductions', 'covers'], default='reductions')
     ap.add_argument('--out', default=str(ROOT / 'data/finetune/ukrainian.csv'))
     ap.add_argument('--style', default='', help="write a 'style' column with this label for every song (e.g. "
                     "'reduction' = one domain label); without it the loader uses the artist as the style")
     args = ap.parse_args()
 
     by_id = {}
-    songs_csv = ROOT / 'data/audio/songs.csv'
+    covers = args.source == 'covers'
+    base = ROOT / ('data/covers' if covers else 'data/finetune')
+    songs_csv = base / 'songs.csv' if covers else ROOT / 'data/audio/songs.csv'
     if songs_csv.exists():
         with open(songs_csv, newline='', encoding='utf-8') as f:
             by_id = {row['id']: row['song'] for row in csv.DictReader(f)}
@@ -51,7 +59,7 @@ def main():
     excluded = {line.split('#')[0].strip() for line in exclude_txt.read_text(encoding='utf-8').splitlines()} - {''} \
         if exclude_txt.exists() else set()
     rows, seen, dupes, n_excluded = [], {}, [], 0
-    for midi in sorted((ROOT / 'data/finetune').glob('*/midi/*.mid')):
+    for midi in sorted(base.glob('*/midi/*.mid')):
         folder = midi.parent.parent.name
         if folder == 'skryabin_test':
             continue
@@ -66,7 +74,7 @@ def main():
             title = re.sub(r'\(meloua\.com\)', '', midi.stem)
             title = re.sub(r'^(iryna-bilyk-)?skryabin-', '', title).replace('-', ' ') if 'meloua' in midi.stem \
                 else re.split(r'\s[-–—]\s', title, maxsplit=1)[-1]  # "Скрябін - Title" / "Скрябін, X - Title"
-        key = (artist, norm_title(title))
+        key = (artist, norm_title(title)) + ((midi.name,) if covers else ())
         if key in seen:
             dupes.append((midi.name, seen[key]))
             continue
