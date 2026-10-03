@@ -123,6 +123,32 @@ def _cached_float8_linear_class():
     return _CACHED_FP8_LINEAR
 
 
+def density_level(notes_per_s, n_density=16):
+    """Notes per second -> level 1..n_density-1 (two per octave from 0.5 to 64 notes/s; 0 = none)."""
+    nps = torch.as_tensor(notes_per_s, dtype=torch.float32)
+    return (1 + (2 * torch.log2(nps.clamp(min=1e-3)) + 2).floor().clamp(0, n_density - 2)).long()
+
+
+def window_conditions(pitch, delta_time, program, n_programs, n_density, drop_p=0.0, dt_seconds=0.02):
+    """Conditioning of whole windows (B, T): instrument multi-hot (B, n_programs) and density level (B,), from the
+    notes themselves (BOS/EOS rows ignored). drop_p: per row, both conditions are replaced by 'none' (zeros / 0)."""
+    real = pitch < BOS_PITCH
+    inst = torch.zeros(pitch.size(0), n_programs, device=pitch.device)
+    if program is not None:
+        inst.scatter_add_(1, program.masked_fill(~real, 0), real.float()).clamp_(max=1.0)
+    else:
+        inst[:, 0] = 1.0  # piano-only data
+    n = real.sum(1).float()
+    secs = (delta_time * real).sum(1).float() * dt_seconds
+    density = density_level(n / secs.clamp(min=0.5), n_density).to(pitch.device) if n_density else \
+        torch.zeros(pitch.size(0), dtype=torch.long, device=pitch.device)
+    if drop_p > 0:
+        keep = torch.rand(pitch.size(0), device=pitch.device) >= drop_p
+        inst = inst * keep[:, None]
+        density = density * keep
+    return inst, density
+
+
 class LayerNorm(nn.Module):
     def __init__(self, features, bias, eps=1e-6):
         super().__init__()
@@ -358,6 +384,11 @@ class MusicConfig:
     # conditioning: a learned style embedding (genre / artist, index 0 = none) added at every position; 0 = off.
     # pitch_size 130 = special tokens: pitch 128 = BOS (start of piece), 129 = EOS (end of piece)
     n_styles: int = 0
+    # window conditioning (architecture.md B2), both added at every position like the style, zero-init, dropped in
+    # training (cond_dropout) so 'none' stays usable: cond_inst = the set of instruments in the window (multi-hot over
+    # n_programs, via a linear map), n_density = notes-per-second levels of the window (0 = off; 16 = 15 + 'none')
+    cond_inst: bool = False
+    n_density: int = 0
     # multi-instrument: a 5th note attribute, the instrument (GM program 0-127, DRUM_PROGRAM = drums); 0 = off.
     # Added to the input embedding (zero init, like the style table) and predicted by a cascade head after dt.
     n_programs: int = 0
@@ -605,6 +636,11 @@ class GPT(nn.Module):
             self.transformer['wpe'] = nn.Embedding(config.block_size, config.n_embd)
         if config.n_styles:
             self.transformer['style'] = nn.Embedding(config.n_styles, config.n_embd)
+        if config.cond_inst:
+            assert config.n_programs, 'cond_inst needs n_programs'
+            self.transformer['cond_inst'] = nn.Linear(config.n_programs, config.n_embd, bias=False)
+        if config.n_density:
+            self.transformer['cond_density'] = nn.Embedding(config.n_density, config.n_embd)
         if config.n_programs:
             self.transformer['program'] = nn.Embedding(config.n_programs, config.n_embd)
 
@@ -631,6 +667,9 @@ class GPT(nn.Module):
         if config.n_programs:
             # zero: a piano model grown to programs starts with exactly its old input embedding
             torch.nn.init.zeros_(self.transformer['program'].weight)
+        for name in ('cond_inst', 'cond_density'):
+            if name in self.transformer:
+                torch.nn.init.zeros_(self.transformer[name].weight)  # starts as the unconditioned model
 
     @property
     def head_names(self):
@@ -690,7 +729,7 @@ class GPT(nn.Module):
         elif isinstance(module, nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
-    def _encode(self, pitch, velocity, duration, delta_time, style=None, program=None, cache=None):
+    def _encode(self, pitch, velocity, duration, delta_time, style=None, program=None, cache=None, cond=None):
         """cache=None: plain forward. With a KVCache: T > 1 = prefill from position 0, T == 1 = one step at cache.pos."""
         device = pitch.device
         b, t = pitch.size()
@@ -711,6 +750,12 @@ class GPT(nn.Module):
             x = x + self.transformer['program'](program)
         if style is not None and self.config.n_styles:
             x = x + self.transformer['style'](style).unsqueeze(1)  # style: (B,) -> added at every position
+        if cond is not None:  # (instrument multi-hot (B, n_programs), density level (B,)) -> every position
+            inst, density = cond
+            if self.config.cond_inst:
+                x = x + self.transformer['cond_inst'](inst.to(x.dtype)).unsqueeze(1)
+            if self.config.n_density:
+                x = x + self.transformer['cond_density'](density).unsqueeze(1)
         x = self.transformer.drop(x)
         n_ckpt = len(self.transformer.h) if self.act_ckpt < 0 else self.act_ckpt
         ckpt_kw = dict(context_fn=partial(_sac_context, self.act_ckpt_save)) if self.act_ckpt_save else {}
@@ -729,7 +774,7 @@ class GPT(nn.Module):
         return dict(pitch=self.head_pitch(x), velocity=self.head_velocity(x),
                     duration=self.head_duration(x), delta_time=self.head_delta_time(x))
 
-    def forward(self, pitch, velocity, duration, delta_time, style=None, program=None, targets=None):
+    def forward(self, pitch, velocity, duration, delta_time, style=None, program=None, targets=None, cond=None):
         """
         With targets: returns (parts, loss). loss = sum of the 4 CEs with label smoothing (what we optimize),
         parts = dict name -> CE without label smoothing (detached, for honest logging / comparing runs).
@@ -739,7 +784,7 @@ class GPT(nn.Module):
         program: (B, T) instrument per input note when the model has n_programs; targets then has a 5th entry, the
         next note's program (see head_names). Duration targets of drum notes are expected as -1 (masked).
         """
-        x = self._encode(pitch, velocity, duration, delta_time, style=style, program=program)
+        x = self._encode(pitch, velocity, duration, delta_time, style=style, program=program, cond=cond)
 
         if targets is not None:
             assert len(targets) == len(self.head_names), f"{len(targets)} targets for heads {self.head_names}"
@@ -819,7 +864,8 @@ class GPT(nn.Module):
     def generate(self, pitch, velocity, duration, delta_time, max_new_tokens, temperature=0.85, top_k=None,
                  anchor=0, slide=None, progress=None, dt_bias=0.0, target_nps=None, dt_seconds=0.02,
                  cuda_graph=True, style=None, min_new=0, program=0, top_p=None, cfg_scale=1.0,
-                 eos_t1=False, programs=None, allowed_programs=None, return_programs=False, program_temperature=None):
+                 eos_t1=False, programs=None, allowed_programs=None, return_programs=False, program_temperature=None,
+                 cond=None):
         """
         Batched sampling (B rows, same prompt length) with a preallocated KV cache: each new note costs one position
         through the model, not a full re-run. On CUDA the one-note transformer step is captured once as a CUDA graph
@@ -840,6 +886,8 @@ class GPT(nn.Module):
         programs: (B, T) instruments of the prompt notes (default: all `program`, or 0 when sampling).
         allowed_programs: with program=None, only these instruments can be sampled (e.g. [0, 33, 128]).
         return_programs: also return the (B, T) instrument of every note as a fifth tensor.
+        cond: models with cond_inst / n_density: (instrument multi-hot (B, n_programs), density level (B,)), see
+          window_conditions; None = 'none' for both.
         program_temperature: temperature of the instrument head only (default: temperature). Lower = fewer switches to
           new instruments; at 0.9 the instrument choice drifted to dozens of rare instruments.
         top_p: nucleus sampling, keep the smallest set of values whose probability reaches top_p (after top_k).
@@ -883,6 +931,8 @@ class GPT(nn.Module):
             style = torch.as_tensor(style, dtype=torch.long, device=device).reshape(-1).expand(Bo).contiguous()
             if guided:
                 style = torch.cat([style, torch.zeros_like(style)])
+        if cond is not None and guided:
+            cond = tuple(torch.cat([c, c]) for c in cond)
         n_prog = self.config.n_programs
         sample_programs = bool(n_prog) and program is None
         fixed_program = torch.full((B, 1), int(program), dtype=torch.long, device=device) \
@@ -950,7 +1000,7 @@ class GPT(nn.Module):
             if prog_out is not None:
                 prog = prog_out[:, :n] if n <= L else torch.cat([prog_out[:, :anchor],
                                                                  prog_out[:, n - (L - slide - anchor):n]], dim=1)
-            return self._encode(*window, style=style, program=prog, cache=cache)[:, [-1], :], w
+            return self._encode(*window, style=style, program=prog, cache=cache, cond=cond)[:, [-1], :], w
 
         # the one-note step: static inputs -> static output, optionally captured as a CUDA graph
         step_in = [torch.zeros(B, 1, dtype=torch.long, device=device) for _ in range(4)]
@@ -962,11 +1012,11 @@ class GPT(nn.Module):
             stream.wait_stream(torch.cuda.current_stream())
             with torch.cuda.stream(stream):  # warm-up outside the graph (allocator, kernel selection)
                 for _ in range(2):
-                    self._encode(*step_in, style=step_style, program=step_prog, cache=cache)
+                    self._encode(*step_in, style=step_style, program=step_prog, cache=cache, cond=cond)
             torch.cuda.current_stream().wait_stream(stream)
             graph = torch.cuda.CUDAGraph()
             with torch.cuda.graph(graph):
-                step_out = self._encode(*step_in, style=step_style, program=step_prog, cache=cache)
+                step_out = self._encode(*step_in, style=step_style, program=step_prog, cache=cache, cond=cond)
             # the warm-up and capture wrote junk into slot 0; prefill below overwrites every slot it uses
 
         def step(new, pos, prog=None):
@@ -978,7 +1028,7 @@ class GPT(nn.Module):
             if graph is not None:
                 graph.replay()
                 return step_out
-            return self._encode(*step_in, style=step_style, program=step_prog, cache=cache)
+            return self._encode(*step_in, style=step_style, program=step_prog, cache=cache, cond=cond)
 
         h, filled = prefill(n0)
         for i in range(max_new_tokens):

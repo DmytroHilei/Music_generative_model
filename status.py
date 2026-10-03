@@ -107,6 +107,7 @@ RUNS = [
     ('AdamW newblock seed 2', 'abl_adamw_nb_s2.log', '42M 98Mt'),
     ('AdamW newblock seed 3', 'abl_adamw_nb_s3.log', '42M 98Mt'),
     ('abl iso-S, new block (C=3.2e16)', 'abl_iso_S_nb.log', '6Lx256 681Mt'),
+    ('conditioning A/B: newblock + instruments + density', 'abl_cond.log', '42M 98Mt'),
 ]
 
 TQDM = re.compile(r'Training:\s+(\d+)%\|[^|]*\|\s*(\d+)/(\d+) \[([\d:]+)<([\d:?]+),\s*([\d.?]+)(it/s|s/it)')
