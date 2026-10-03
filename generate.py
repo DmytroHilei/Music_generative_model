@@ -12,7 +12,7 @@ import torch
 
 from jobstatus import JobStatus
 from model import GPT, MusicConfig
-from data_loader import tokenize_midi, load_styles, BOS_PITCH, EOS_PITCH
+from data_loader import tokenize_midi, load_styles, BOS_PITCH, EOS_PITCH, DRUM_PROGRAM
 
 
 def parse_args():
@@ -47,10 +47,21 @@ def parse_args():
     parser.add_argument("--prompt", type=str, default=None,
                         help="MIDI file whose first --prompt-notes notes seed the generation "
                              "(default: a single artificial seed note, which is out of distribution)")
-    parser.add_argument("--val-prompt", choices=["combined", "aria"], default=None,
+    parser.add_argument("--val-prompt", choices=["combined", "aria", "gigamidi"], default=None,
                         help="take the prompt from a validation piece (never trained on): 'combined' = MAESTRO + "
-                             "GiantMIDI val MIDI files, 'aria' = Aria val token store. Random piece per sample "
+                             "GiantMIDI val MIDI files, 'aria' = Aria val token store, 'gigamidi' = clean GigaMIDI "
+                             "val store (multi-instrument, with its instruments). Random piece per sample "
                              "unless --val-index is given")
+    parser.add_argument("--sample-instruments", action="store_true",
+                        help="multi-instrument models: sample the instrument of every note (default: all piano)")
+    parser.add_argument("--instruments", type=str, default=None,
+                        help="with --sample-instruments: allowed GM programs, e.g. '0,33,25,128' (128 = drums), or "
+                             "'prompt' = only the instruments of each row's prompt")
+    parser.add_argument("--instrument-temperature", type=float, default=None,
+                        help="with --sample-instruments: temperature of the instrument choice only (default: "
+                             "--temperature); lower = fewer jumps to new instruments")
+    parser.add_argument("--min-instruments", type=int, default=1,
+                        help="--val-prompt gigamidi: only prompts with at least this many instruments")
     parser.add_argument("--val-index", type=int, default=None, help="which validation piece (see --list-val)")
     parser.add_argument("--val-genre", type=str, default=None, help="aria only: restrict to a genre, e.g. pop")
     parser.add_argument("--list-val", action="store_true", help="print the --val-prompt pieces with indices and exit")
@@ -82,19 +93,29 @@ def parse_args():
 
 def tokens_to_midi(pitches, velocities, durations, delta_times,
                    velocity_bins=32, time_resolution=0.02,
-                   max_polyphony=None, max_delta=None):
+                   max_polyphony=None, max_delta=None, programs=None):
+    """programs (optional, one per note, 128 = drums): one MIDI track per instrument, drums on channel 10 with a
+    fixed short length (the model's drum durations are untrained: their loss is masked)."""
     midi = pretty_midi.PrettyMIDI()
-    piano = pretty_midi.Instrument(program=0)
+    tracks = {}
+
+    def track(program):
+        if program not in tracks:
+            drum = program == DRUM_PROGRAM
+            name = 'Drums' if drum else pretty_midi.program_to_instrument_name(program)
+            tracks[program] = pretty_midi.Instrument(program=0 if drum else program, is_drum=drum, name=name)
+        return tracks[program]
+    programs = programs if programs is not None else [0] * len(pitches)
 
     current_time = 0.0
     pending = []  # notes at the current time slot, flushed when time advances
 
     def flush(pending):
-        pending.sort(key=lambda n: n.velocity, reverse=True)
-        for note in pending[:max_polyphony] if max_polyphony else pending:
-            piano.notes.append(note)
+        pending.sort(key=lambda n: n[1].velocity, reverse=True)
+        for prog, note in pending[:max_polyphony] if max_polyphony else pending:
+            track(prog).notes.append(note)
 
-    for p, v, d, dt in zip(pitches, velocities, durations, delta_times):
+    for p, v, d, dt, prog in zip(pitches, velocities, durations, delta_times, programs):
         delta = dt * time_resolution
         if max_delta is not None:
             delta = min(delta, max_delta)  # cap runaway gaps
@@ -105,16 +126,16 @@ def tokens_to_midi(pitches, velocities, durations, delta_times,
             current_time += delta
 
         velocity = min(127, int(v * 128 / velocity_bins) + 2)
-        duration = max(0.08, d * time_resolution)
-        pending.append(pretty_midi.Note(
+        duration = 0.1 if prog == DRUM_PROGRAM else max(0.08, d * time_resolution)
+        pending.append((int(prog), pretty_midi.Note(
             velocity=velocity,
             pitch=int(p),
             start=current_time,
             end=current_time + duration,
-        ))
+        )))
 
     flush(pending)
-    midi.instruments.append(piano)
+    midi.instruments.extend(tracks[k] for k in sorted(tracks))
     return midi
 
 
@@ -129,7 +150,18 @@ def resolve_checkpoint(path):
 
 
 def val_pieces(source, genre=None):
-    """Validation pieces as a list of (label, loader); loader() returns an (n, 4) int array of tokens."""
+    """Validation pieces as a list of (label, loader); loader() returns an (n, 4) int array of tokens, or for
+    'gigamidi' a tuple (tokens, programs (n,))."""
+    if source == "gigamidi":
+        store = Path("data/cache/gigamidi_clean_validation")
+        offsets = np.load(store / "offsets.npy")
+        n = int(offsets[-1])
+        tokens = np.memmap(store / "tokens.u16", dtype=np.uint16, mode="r", shape=(n, 4))
+        programs = np.memmap(store / "programs.u8", dtype=np.uint8, mode="r", shape=(n,))
+        return [(f"gigamidi_clean val file {i}",
+                 lambda a=offsets[i], b=offsets[i + 1]: (np.asarray(tokens[a:b], dtype=np.int64),
+                                                         np.asarray(programs[a:b], dtype=np.int64)))
+                for i in range(len(offsets) - 1)]
     if source == "combined":
         df = pd.read_csv("data/combined.csv")
         paths = [Path(f) for f in df.loc[df["split"] == "validation", "midi_filename"] if Path(f).exists()]
@@ -203,46 +235,72 @@ def main():
 def prompt_rows(config, args, pieces, seed, n_rows, device):
     """(pitch, velocity, duration, delta_time) each (n_rows, T), one prompt per row, and a label per row.
     Models with BOS/EOS get BOS in front of a prompt that starts at the beginning of its piece, and BOS as the seed."""
-    streams, labels = _prompt_rows(config, args, pieces, seed, n_rows, device)
+    streams, labels, programs = _prompt_rows(config, args, pieces, seed, n_rows, device)
+    if programs is None:
+        programs = torch.zeros_like(streams[0])
     if config.pitch_size > BOS_PITCH and (args.prompt_start == 0 or streams[0].size(1) == 0):
         bos = [torch.full((n_rows, 1), BOS_PITCH if j == 0 else 0, dtype=torch.long, device=device) for j in range(4)]
         streams = tuple(torch.cat([b, s], dim=1) for b, s in zip(bos, streams))
-    return streams, labels
+        programs = torch.cat([torch.zeros_like(bos[0]), programs], dim=1)
+    return streams, labels, programs
+
+
+def instrument_names(programs):
+    names = sorted({int(p) for p in programs})
+    return ', '.join('Drums' if p == DRUM_PROGRAM else pretty_midi.program_to_instrument_name(p) for p in names)
 
 
 def _prompt_rows(config, args, pieces, seed, n_rows, device):
     a, b = args.prompt_start, args.prompt_start + args.prompt_notes
     if pieces:
         rng = random.Random(seed)
-        rows, labels = [], []
+        rows, progs, labels = [], [], []
         for _ in range(n_rows):
             while True:
                 idx = args.val_index if args.val_index is not None else rng.randrange(len(pieces))
                 label, load = pieces[idx]
                 toks = load()
-                if len(toks) >= b or args.val_index is not None:
-                    break  # random pick: retry pieces shorter than the prompt
+                prog = None
+                if isinstance(toks, tuple):
+                    toks, prog = toks
+                enough = len(toks) >= b and (prog is None or len(set(prog[a:b].tolist())) >= args.min_instruments)
+                if enough or args.val_index is not None:
+                    break  # random pick: retry pieces shorter than the prompt (or with too few instruments)
             rows.append(torch.from_numpy(toks[a:b]).long())
-            labels.append(f"notes {a}-{a + len(rows[-1])} of val piece #{idx}: {label}")
+            progs.append(None if prog is None else torch.from_numpy(prog[a:b]).long())
+            labels.append(f"notes {a}-{a + len(rows[-1])} of val piece #{idx}: {label}"
+                          + (f" [{instrument_names(prog[a:b])}]" if prog is not None else ""))
         n = min(len(r) for r in rows)  # rows must share a length; only a fixed short --val-index can differ
         toks = torch.stack([r[:n] for r in rows]).to(device)
-        return tuple(toks[:, :, j] for j in range(4)), labels
+        programs = torch.stack([p[:n] for p in progs]).to(device) if progs[0] is not None else None
+        return tuple(toks[:, :, j] for j in range(4)), labels, programs
     if args.prompt:
         tokens = tokenize_midi(args.prompt, velocity_bins=config.velocity_size,
                                max_duration_bin=config.duration_size - 1,
                                max_delta_bin=config.delta_time_size - 1)
         streams = tuple(t[a:b].unsqueeze(0).expand(n_rows, -1).contiguous().to(device) for t in tokens)
-        return streams, [f"notes {a}-{a + streams[0].size(1)} of {args.prompt}"] * n_rows
+        return streams, [f"notes {a}-{a + streams[0].size(1)} of {args.prompt}"] * n_rows, None
     if config.pitch_size > BOS_PITCH:
-        return tuple(torch.zeros((n_rows, 0), dtype=torch.long, device=device) for _ in range(4)), [None] * n_rows
+        return (tuple(torch.zeros((n_rows, 0), dtype=torch.long, device=device) for _ in range(4)), [None] * n_rows,
+                None)
     # single-token seed (silent note) for models without BOS
     z = lambda fill: torch.full((n_rows, 1), fill, dtype=torch.long, device=device)
-    return (z(0), z(0), z(10), z(0)), [None] * n_rows
+    return (z(0), z(0), z(10), z(0)), [None] * n_rows, None
 
 
 def generate_batch(model, config, args, pieces, seed, outs, device, progress=None):
     torch.manual_seed(seed)
-    (pitch, velocity, duration, delta_time), labels = prompt_rows(config, args, pieces, seed, len(outs), device)
+    (pitch, velocity, duration, delta_time), labels, prompt_programs = prompt_rows(config, args, pieces, seed,
+                                                                                  len(outs), device)
+    if args.sample_instruments and not config.n_programs:
+        raise SystemExit("--sample-instruments needs a multi-instrument checkpoint (n_programs > 0)")
+    allowed = None
+    if args.instruments == 'prompt':
+        if len({tuple(sorted(set(r.tolist()))) for r in prompt_programs}) > 1:
+            raise SystemExit("--instruments prompt needs rows with the same instrument set: use --batch-size 1")
+        allowed = sorted(set(prompt_programs[0].tolist()))
+    elif args.instruments:
+        allowed = [int(x) for x in args.instruments.split(',')]
     for out, label in zip(outs, labels):
         if label:
             print(f"Prompt for {out.name}: {label}")
@@ -271,7 +329,7 @@ def generate_batch(model, config, args, pieces, seed, outs, device, progress=Non
     print(f"Generating {args.max_new_tokens} notes x {len(outs)} rows on {device} (seed {seed})...")
     t0 = time.time()
     with torch.no_grad():
-        pitch, velocity, duration, delta_time = model.generate(
+        pitch, velocity, duration, delta_time, programs = model.generate(
             pitch, velocity, duration, delta_time,
             max_new_tokens=args.max_new_tokens,
             temperature=args.temperature,
@@ -284,8 +342,13 @@ def generate_batch(model, config, args, pieces, seed, outs, device, progress=Non
             cuda_graph=not args.no_cuda_graph,
             style=style,
             min_new=args.min_notes,
+            program=None if args.sample_instruments else 0,
+            programs=prompt_programs if config.n_programs else None,
+            allowed_programs=allowed,
+            return_programs=True,
+            program_temperature=args.instrument_temperature,
         )
-    streams = [t.cpu() for t in (pitch, velocity, duration, delta_time)]
+    streams = [t.cpu() for t in (pitch, velocity, duration, delta_time, programs)]
     print(f"  {len(outs) * args.max_new_tokens / (time.time() - t0):.0f} notes/s")
 
     for r, out in enumerate(outs):
@@ -298,10 +361,10 @@ def generate_batch(model, config, args, pieces, seed, outs, device, progress=Non
             print(f"  {out.name}: ended with EOS after {new.index(EOS_PITCH)} new notes")
         keep = [i for i, p in enumerate(rows[0]) if p < BOS_PITCH]
         rows = [[x[i] for i in keep] for x in rows]
-        midi = tokens_to_midi(*rows, max_polyphony=args.max_polyphony, max_delta=args.max_delta)
+        midi = tokens_to_midi(*rows[:4], programs=rows[4], max_polyphony=args.max_polyphony, max_delta=args.max_delta)
         out.parent.mkdir(parents=True, exist_ok=True)
         midi.write(str(out))
-        print(f"Saved MIDI → {out}")
+        print(f"Saved MIDI → {out}" + (f"  [{instrument_names(rows[4])}]" if config.n_programs else ""))
         if not args.no_mp3:
             _render_mp3(out, args.soundfont)
 
@@ -318,19 +381,31 @@ def _render_mp3(midi_path: Path, soundfont: str) -> None:
         print("Install with: sudo apt install fluid-soundfont-gm")
         return
 
-    wav_path = midi_path.with_suffix(".wav")
+    raw_path = midi_path.with_suffix(".raw")
     mp3_path = midi_path.with_suffix(".mp3")
+    # bounded render: fluidsynth's fast render once kept going on a 16 s multi-instrument MIDI until it had written
+    # 14.5 GB (2026-10-03). Raw 16-bit stereo PCM has no header to break, so the watchdog can stop it at the
+    # MIDI's length + 5 s of release tail and ffmpeg encodes exactly that much.
+    seconds = pretty_midi.PrettyMIDI(str(midi_path)).get_end_time() + 5.0
+    rate = 44100
+    limit = int(seconds * rate * 4)  # 2 channels x 2 bytes
 
     print("Rendering MP3 with fluidsynth...")
+    proc = subprocess.Popen(
+        ["fluidsynth", "-ni", "-r", str(rate), "-O", "s16", "-T", "raw", "-F", str(raw_path), soundfont,
+         str(midi_path)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    while proc.poll() is None:
+        if raw_path.exists() and raw_path.stat().st_size >= limit:
+            proc.kill()
+            break
+        time.sleep(0.05)
+    proc.wait()
     subprocess.run(
-        ["fluidsynth", "-a", "file", "-F", str(wav_path), soundfont, str(midi_path)],
+        ["ffmpeg", "-y", "-f", "s16le", "-ar", str(rate), "-ac", "2", "-i", str(raw_path), "-t", f"{seconds:.2f}",
+         "-q:a", "2", str(mp3_path)],
         check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
     )
-    subprocess.run(
-        ["ffmpeg", "-y", "-i", str(wav_path), "-q:a", "2", str(mp3_path)],
-        check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-    )
-    wav_path.unlink()
+    raw_path.unlink()
     print(f"Saved MP3  → {mp3_path}")
 
 
