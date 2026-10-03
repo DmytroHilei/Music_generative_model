@@ -11,13 +11,16 @@ Steps carry NVTX ranges; for a timeline in Nsight Systems:
 """
 
 import argparse
+import os
 import time
 from contextlib import nullcontext
 
+# same allocator setting as train.py (fewer fragmentation OOMs); PYTORCH_CUDA_ALLOC_CONF=expandable_segments:False to compare
+os.environ.setdefault('PYTORCH_CUDA_ALLOC_CONF', 'expandable_segments:True')
 import torch
 from torch.nn.attention import SDPBackend, sdpa_kernel
 
-from model import GPT, MusicConfig
+from model import GPT, MusicConfig, convert_fp8, refresh_fp8_weights
 
 BACKENDS = {
     'default': None,
@@ -44,6 +47,11 @@ def parse_args():
     p.add_argument('--optim', default='adamw', choices=['adamw', 'muon', 'muon_bf16'])
     p.add_argument('--act_ckpt', type=int, nargs='+', default=[0], help='checkpointed blocks (-1 = all)')
     p.add_argument('--n_programs', type=int, default=0, help='129 = the multi-instrument model')
+    p.add_argument('--ckpt_save', default='', help="selective checkpointing: 'attn' | 'attn,mm' (model.act_ckpt_save)")
+    p.add_argument('--fp8_recipe', default='tensorwise', choices=['tensorwise', 'rowwise', 'rowwise_with_gw_hp'])
+    p.add_argument('--fp8_skip', default='', help="Linear name suffixes kept in bf16, e.g. 'attn.c_proj'")
+    p.add_argument('--fp8_cache', type=int, default=0, help='cast each fp8 weight once per step (tensorwise)')
+    p.add_argument('--compile_ns', type=int, default=0, help='Muon: compile the batched Newton-Schulz')
     p.add_argument('--profile', action='store_true', help='profile one config (first of each list): top CUDA kernels')
     p.add_argument('--profile_steps', type=int, default=2, help='steps timed per phase in --profile')
     return p.parse_args()
@@ -55,16 +63,17 @@ def bench(args, micro, compiled, attn, fp8, profile=False, act_ckpt=0):
                       pos_emb=args.pos_emb, dropout=0.0, label_smoothing=0.0, n_programs=args.n_programs)
     model = GPT(cfg).cuda()
     model.act_ckpt = act_ckpt
-    if fp8:
-        from torchao.float8 import convert_to_float8_training
-        # only transformer matmuls; heads/embeddings stay bf16
-        convert_to_float8_training(model.transformer.h)
+    model.act_ckpt_save = args.ckpt_save
+    if fp8:  # only transformer matmuls; heads/embeddings stay bf16
+        convert_fp8(model.transformer.h, args.fp8_recipe, args.fp8_skip, cache_weights=bool(args.fp8_cache))
+        refresh_fp8_weights(model)
     if args.optim == 'adamw':
         opt = model.configure_optimizers(0.1, 6e-4, (0.9, 0.95), 'cuda')
     else:
         from optim import build_muon_optimizer
         opt = build_muon_optimizer(model, 0.1, 1e-3, (0.9, 0.95), 'cuda',
-                                   momentum_dtype=torch.bfloat16 if args.optim == 'muon_bf16' else None)
+                                   momentum_dtype=torch.bfloat16 if args.optim == 'muon_bf16' else None,
+                                   compile_ns=bool(args.compile_ns))
     fwd = torch.compile(model) if compiled else model
     accum = max(1, args.tokens_per_step // (micro * args.block))
     sizes = (cfg.pitch_size, cfg.velocity_size, cfg.duration_size, cfg.delta_time_size)
@@ -105,6 +114,7 @@ def bench(args, micro, compiled, attn, fp8, profile=False, act_ckpt=0):
         with phase('optimizer', timed):
             opt.step()
             opt.zero_grad(set_to_none=True)
+            refresh_fp8_weights(model)
 
     with backend:
         for _ in range(3):  # warmup (+ compilation)

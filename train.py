@@ -13,6 +13,8 @@ init_from:
 """
 
 import os
+# fewer fragmentation OOMs: the caching allocator grows segments instead of carving fixed blocks (set before CUDA starts)
+os.environ.setdefault('PYTORCH_CUDA_ALLOC_CONF', 'expandable_segments:True')
 import time
 import math
 import random
@@ -23,7 +25,7 @@ import torch
 from torch.utils.data import DataLoader, Subset
 from tqdm import tqdm
 
-from model import MusicConfig, GPT, STREAM_ORDER
+from model import MusicConfig, GPT, STREAM_ORDER, convert_fp8, refresh_fp8_weights, spill_to_cpu
 from data_loader import MaestroDataset
 
 # -----------------------------------------------------------------------------
@@ -83,8 +85,12 @@ pos_emb = 'learned'       # 'learned' (absolute table, old checkpoints) | 'rope'
                           # and then also raise block_size above the checkpoint's). A 'learned' finetune may raise
                           # block_size too: the table is stretched by linear interpolation
 rope_base = 10000.0
+norm = 'layernorm'        # trunk norm: 'layernorm' | 'rmsnorm'
+mlp = 'gelu'              # trunk MLP: 'gelu' (4x) | 'swiglu' (8/3x, same params)
+qk_norm = False           # RMSNorm on each head's q and k
 pad_short = False         # keep files shorter than block_size as one padded whole-file window (masked targets)
 act_ckpt = 0              # activation checkpointing: first N transformer blocks recompute in backward (-1 = all)
+act_ckpt_save = ''        # selective checkpointing: op outputs the checkpointed blocks keep ('attn' | 'attn,mm')
 muon_bf16 = False         # Muon momentum buffer in bf16 (half the Muon optimizer state)
 pack_short = False        # train only: short files fill their window with more short files (BOS..EOS each), no padding
 min_notes = 64            # with pad_short / pack_short: shorter files are still dropped
@@ -119,6 +125,12 @@ device = 'cuda' if torch.cuda.is_available() else 'cpu'
 dtype = 'bfloat16' if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else 'float16'
 compile = True
 fp8 = True                # torchao float8 training for the transformer matmuls; only pays off together with compile
+fp8_recipe = 'tensorwise' # torchao recipe: 'tensorwise' | 'rowwise' | 'rowwise_with_gw_hp'
+fp8_skip = ''             # comma-separated Linear name suffixes kept in bf16, e.g. 'attn.c_proj'
+fp8_cache_weights = False # tensorwise: cast each weight to fp8 once per optimizer step, not in every micro-batch pass
+oom_retries = 2           # CUDA OOM in a step: 1st retry = free the cache and redo it; 2nd = redo it eager with the
+                          # activations spilled to pinned RAM above oom_spill_frac of the GPU (slow, but it gets through)
+oom_spill_frac = 0.6
 sdpa_backend = ''         # '' = PyTorch default, or 'flash' | 'cudnn' | 'efficient'
 seed = 1337
 # -----------------------------------------------------------------------------
@@ -193,10 +205,12 @@ wandb_run_id = None
 arch_keys = ['n_layer', 'n_head', 'n_embd', 'block_size', 'bias', 'pitch_size', 'velocity_size',
              'duration_size', 'delta_time_size', 'cascade_heads', 'cascade_residual',
              'pitch_head_blocks', 'pitch_head_mult', 'moe_experts', 'moe_top_k', 'moe_hidden_frac', 'moe_aux_weight',
-             'n_styles', 'n_programs', 'pos_emb', 'rope_base', 'future_weight', 'future_horizons']
+             'n_styles', 'n_programs', 'pos_emb', 'rope_base', 'future_weight', 'future_horizons',
+             'norm', 'mlp', 'qk_norm']
 # what checkpoints that predate a key actually used
 legacy_defaults = {'cascade_heads': False, 'cascade_residual': False, 'n_styles': 0, 'n_programs': 0,
-                   'pos_emb': 'learned', 'rope_base': 10000.0, 'future_weight': 0.0, 'future_horizons': '0-2,2-4,4-8'}
+                   'pos_emb': 'learned', 'rope_base': 10000.0, 'future_weight': 0.0, 'future_horizons': '0-2,2-4,4-8',
+                   'norm': 'layernorm', 'mlp': 'gelu', 'qk_norm': False}
 model_args = {k: globals()[k] for k in arch_keys}
 checkpoint = None
 
@@ -247,15 +261,16 @@ if block_size < model.config.block_size:
     model_args['block_size'] = block_size
 model.to(device)
 model.act_ckpt = act_ckpt
+model.act_ckpt_save = act_ckpt_save
 
 # before the optimizer is built: fp8 conversion swaps the Linear modules
 if fp8 and not (device_type == 'cuda' and torch.cuda.get_device_capability() >= (8, 9)):
     print("fp8 needs an sm_89+ GPU, falling back to bf16")
     fp8 = False
 if fp8:
-    from torchao.float8 import convert_to_float8_training
     # only the transformer blocks: embeddings, heads and LayerNorms stay bf16/fp32
-    convert_to_float8_training(model.transformer.h)
+    convert_fp8(model.transformer.h, fp8_recipe, fp8_skip, cache_weights=fp8_cache_weights)
+    refresh_fp8_weights(model)  # no-op without fp8_cache_weights
     if not compile:
         print("WARNING: fp8 without compile is about 2x SLOWER (unfused scaling kernels)")
 if sdpa_backend:
@@ -268,7 +283,7 @@ if optimizer_name == 'muon':
     from optim import build_muon_optimizer
     optimizer = build_muon_optimizer(model, weight_decay, learning_rate, (beta1, beta2), device_type,
                                      momentum=muon_momentum, style_lr_mult=style_lr_mult,
-                                     momentum_dtype=torch.bfloat16 if muon_bf16 else None)
+                                     momentum_dtype=torch.bfloat16 if muon_bf16 else None, compile_ns=compile)
 else:
     optimizer = model.configure_optimizers(weight_decay, learning_rate, (beta1, beta2), device_type)
 if init_from == 'resume':
@@ -376,6 +391,7 @@ print(f"Planned epochs   : {tokens_per_iter * (max_iters - iter_num) / n_train_n
 batches = infinite_batches(train_loader)
 X, Y = next(batches)
 train_sums, train_n = {}, 0  # running train metrics since the last eval (with dropout + augmentation)
+oom_events = 0  # CUDA OOMs survived by retrying the step
 t0 = time.time()
 last_resumable = time.time()
 
@@ -427,15 +443,41 @@ for iter_num in pbar:
         break
 
     # forward backward update, with gradient accumulation
-    for micro_step in range(gradient_accumulation_steps):
-        with ctx:
-            parts, loss = model(*X[0], **X[1], targets=Y)
-        # kept as GPU tensors to avoid a CPU sync per micro step
-        train_sums['loss'] = train_sums.get('loss', 0.0) + loss.detach() / gradient_accumulation_steps
-        for name, v in parts.items():
-            train_sums[f'ce/{name}'] = train_sums.get(f'ce/{name}', 0.0) + v / gradient_accumulation_steps
+    def accumulate(X, Y, net):
+        sums = {}
+        for micro_step in range(gradient_accumulation_steps):
+            with ctx:
+                parts, loss = net(*X[0], **X[1], targets=Y)
+            # kept as GPU tensors to avoid a CPU sync per micro step
+            sums['loss'] = sums.get('loss', 0.0) + loss.detach() / gradient_accumulation_steps
+            for name, v in parts.items():
+                sums[f'ce/{name}'] = sums.get(f'ce/{name}', 0.0) + v / gradient_accumulation_steps
+            X, Y = next(batches)
+            scaler.scale(loss / gradient_accumulation_steps).backward()
+        return X, Y, sums
+
+    for attempt in range(oom_retries + 1):
+        spill = attempt >= 2 and device_type == 'cuda'
+        oom = False
+        try:
+            with spill_to_cpu(oom_spill_frac * torch.cuda.get_device_properties(device).total_memory) if spill \
+                    else nullcontext():
+                X, Y, sums = accumulate(X, Y, raw_model if spill else model)
+        except torch.OutOfMemoryError:
+            if attempt == oom_retries:
+                raise
+            oom = True
+        if not oom:
+            break
+        # outside the except block, so the traceback no longer holds the failed step's tensors
+        optimizer.zero_grad(set_to_none=True)
+        torch.cuda.empty_cache()
+        oom_events += 1
+        tqdm.write(f"iter {iter_num}: CUDA OOM ({oom_events} so far), retry {attempt + 1}/{oom_retries}"
+                   + (" eager with activations spilled to RAM" if attempt + 1 >= 2 else " after freeing the cache"))
         X, Y = next(batches)
-        scaler.scale(loss / gradient_accumulation_steps).backward()
+    for k, v in sums.items():
+        train_sums[k] = train_sums.get(k, 0.0) + v
     train_n += 1
     if grad_clip != 0.0:
         scaler.unscale_(optimizer)
@@ -443,6 +485,8 @@ for iter_num in pbar:
     scaler.step(optimizer)
     scaler.update()
     optimizer.zero_grad(set_to_none=True)
+    if fp8 and fp8_cache_weights:
+        refresh_fp8_weights(raw_model)  # the cached fp8 weights must follow every update
 
     if ckpt_interval_min > 0 and (time.time() - last_resumable > 60 * ckpt_interval_min or iter_num == max_iters - 1):
         save_resumable(iter_num + 1)
