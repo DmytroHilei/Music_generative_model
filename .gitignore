@@ -25,3 +25,4 @@ samples/
 # cloud run: credentials and local hash cache
 cloud/secrets.env
 cloud/.hash_cache.json
+.uv-cache/
