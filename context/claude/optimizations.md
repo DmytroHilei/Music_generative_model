@@ -11,6 +11,29 @@ first (item T1) before building anything. Hardware: RTX 5060 Laptop (sm_120, 8 G
   scaling), LayerNorm 5%, attention 9%, CE + optimizer < 1%.
 - The laptop runs at 101 W of 105 W, 82 °C.
 
+## T1 result: 350M at 2048 (2026-10-03, `logs/prof/t1_350M.*`)
+
+Config: 28L×1024 (365M), RoPE 2048, 129 programs, fp8 + compile, Muon bf16, checkpointing on all blocks, micro 4 × 8,
+65,536 notes/step: 4.95 s/step, 13.2k notes/s, 5.5 GB. Profiled with `nsys` (NVTX phases) + `ncu` (speed of light).
+- **GPU 100% busy** (4,955 ms of kernels per 4,952 ms step) and at its **~100 W power cap** (2.5 GHz, 80 °C, reason 0x4).
+- Phases: forward 24%, backward 68% (**including the checkpoint recompute ≈ one forward, ~24% of the step**), clip 0.3%,
+  optimizer 7%.
+- Kernels: fp8 GEMM (cuBLASLt `nvjet_sm120`, native Blackwell, TMA, 128×128 tiles) 32%; **flash attention 27%**
+  (FA2 kernels; bwd alone 14%); **Triton fused elementwise carrying the fp8 amax + casts 25%**; bf16 GEMM
+  (`cutlass_80`) 8.5%, of which 5.3% is Muon Newton-Schulz in the optimizer; other 7%.
+- `ncu`: fp8 GEMM 78–82% and flash bwd 90% of SM throughput, so the kernels themselves are near their limit. Speed can
+  only come from doing less work.
+- fp8 vs bf16: **13.2k vs 8.1k notes/s (fp8 = 1.63×)** at equal memory. cuDNN / efficient attention = flash (12.8k).
+
+Verdicts: T2 keep (optimizer 7%, NS on small Ampere-style tiles). **T3 drop** (the fp8 GEMMs already run on native
+sm_120 cuBLASLt kernels; the `cutlass_80` finding was bf16 at 42M). T4 done (micro 8 +6% but 7.2 GB). **T5 keep, top**
+(amax/cast kernels ~25%). **T6 drop** (eval ≈ 1% of wall time). **T7/T8/T9 drop** (GPU never idle). T10 at the power cap
+already; cooling can only hold clocks. **T11 drop** (~2 GB save every 30 min ≈ 0.4%). **T13 no backend gain**
+(attention is 27% but cuDNN/efficient = flash, flash is compute-bound): attention cost is now an architecture question
+(sliding-window layers, see the ML list). T14 low (2–3%). **New H1 keep, top**: selective checkpointing (keep the
+attention outputs, ~0.5 GB, to skip the flash forward in the recompute ≈ 6%; leave a few blocks un-checkpointed with the
+remaining 2.5 GB). New H2 low (offloading Muon momentum frees only 0.7 GB).
+
 ## Done
 
 | item | result |

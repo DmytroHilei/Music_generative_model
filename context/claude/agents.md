@@ -232,12 +232,17 @@ Ukrainian multi-track songs. Generation gets `--instrument` (mask the instrument
 9. ☐ Growth path in `load_grown`: zero-init instrument embedding + new input columns of the heads (function-preserving),
    optional depth/width up-scaling (duplicate layers with zero-init output projections) for 250–400M.
 10. ◐ Memory check on 8 GB (2026-10-03, see log): `act_ckpt=-1` (activation checkpointing, −4% speed at 107M) +
-   `muon_bf16` → **250M fits** (20L×1024, 4.3 GB, ~17k notes/s); **350M (28L×1024) still OOMs** while the desktop holds
-   2.3 GB of the GPU → needs the display on the iGPU (`prime-select on-demand`) or a rented GPU.
+   `muon_bf16` → **250M fits** (20L×1024, 4.3 GB, ~17k notes/s). **350M (28L×1024, 365M) fits once the display is on
+   the iGPU** (dGPU 13 MiB idle): Muon bf16 + ckpt all, micro 4 → 12.7k notes/s / 5.5 GB, micro 8 → 13.5k / 7.2 GB.
 10b. ☑ Packing (`pack_short`, 2026-10-03): short files fill their window with more short files (BOS..EOS each, same
    store, no attention mask at the joins). GigaMIDI + Aria usable at 2048: **1.81B → 2.50B notes**. Needs special_tokens.
 10c. ◐ More data: Discover MIDI (6.74M files, 29.4 GB tar.gz, CC-BY-NC-SA) to `/data/discover` on `/` (`/home` too small);
-   tokenize from the archive, dedupe vs GigaMIDI, measure the store size on a sample first.
+   tokenize from the archive, dedupe vs GigaMIDI, measure the store size on a sample first. `data/prepare_discover.py`
+   (2026-10-03): streams the tar.gz, dedupes in the same pass (md5 name, exact token hash, loose (onset, pitch) hash vs
+   GigaMIDI's cached hashes + itself). Smoke on 30k files: kept 77%, 21.4% exact + 0.6% loose dups of GigaMIDI, 0.9%
+   failed, 1,476 notes/kept file → **full set ≈ 7.7B notes ≈ 69 GB**, more than the free disk. The download died at the
+   10:42 reboot (xet can't resume the old partial) and restarted 11:57. **GigaMIDI itself**: 8.3% exact / 17.7% loose
+   duplicate files, and 53k (loose 109k) of its val/test files occur in its train → GigaMIDI val CE is optimistic.
 
 **Infra**
 11. ◐ Loader: `programs=True` reads `programs.u8` (piano stores = 0), drums not transposed, drum duration 0 in x / -1 in
@@ -246,6 +251,11 @@ Ukrainian multi-track songs. Generation gets `--instrument` (mask the instrument
 12. ☐ Eval: per-head CE incl. instrument; val sets GigaMIDI val, Aria val (piano forgetting), Ukrainian reductions.
 13. ☐ Pilots (1–2 h each) before the long run: grown vs scratch at equal steps (does preserving weights pay?), RoPE vs interpolated
    wpe, 129 programs vs 17 families. Then size the multi-day run (compute-optimal ≈ 400M / 8B tokens per week on this laptop).
+13b. ☐ **Size check before the long run (user: "important", 2026-10-03)**: 2-point iso-FLOP, 250M vs 350M at equal compute
+   (~1 h each), compared on GigaMIDI/Aria val (leak-free). Data isn't the limit: ~4.5B unique notes (GigaMIDI + Aria 2.5B
+   packed, Discover 27% ≈ 2.0B) vs ~7.7B notes per week at 350M (1.7 epochs, harmless per Muennighoff et al. 2023). Our
+   iso-FLOP ladder favoured ≥ 20 notes/param (iso-S-muon at ~220 beat iso-M at 20), so 250M (~10B notes/week, ~41 per
+   param) may beat 350M (~22 per param).
 14. ☐ Long run with `ckpt_interval_min` (test crash-resume first), dashboard rows.
 
 **Generation**
@@ -371,6 +381,8 @@ pretraining and the Skryabin fine-tune, so there's a strong AR baseline to compa
 | 2026-10-02 | mix grid | (this commit) | ua_2048 recipe, covers / reductions / Aria weights 0.3–0.6, 12 passes, seed 2; scored at T 1.0, then T 0.9 + `eos_t1` × 2 seeds | T 0.9 dist: mix_p12 (12 passes) **0.214**, seed2 0.219, c5r4a1 0.236, c3r5 0.238, covers-only 0.245, c4r4 0.257, ua_2048_mix 0.258, **c6r2 0.300, c6r3a1 0.309** | **Mix proportions don't matter** within seed noise, except covers ≥ 0.6 is worst (over-dense, 8.7–10 notes/s vs 7.4: overfits the small cover set) |
 | 2026-10-03 | ua-2048-v2 (more covers) | (this commit) | ua_2048_mix recipe on the bigger cover set: 553 covers (per-song search + 16 extra pop artists as train-only; old set kept as `ukrainian_covers_v1.csv`), 750 it ≈ 8 passes over the covers | covers val CE still falling at the end (5.667 @500 → 5.638 @749). Structure vs ua_2048_mix on the new val: T 0.9 **0.195 / 0.407** vs 0.233 / 0.306, T 1.0 0.491 / 0.507 vs 0.475 / 0.574. Listening batch (8 samples, ≤ 2,000 notes, T 0.9): **v2 0.184, ends 75%** vs mix 0.440 / 50%; MIDI in `samples/ua_2048_v2_T09/` | Tie on the 24-sample metrics, ahead on the listening batch. **User: "v2 sounds very solid"**. **Final piano model: `checkpoints/ua_2048_v2`, style `cover`, T 0.9, ≤ 2,000 notes** (the longer budget lifts endings 45 → 75%). Remaining defect: an occasional runaway sample (16–22 notes/s), so a density cap at sampling would fix it |
 | 2026-10-03 | memory bench + packing | (this commit) | `bench.py --n_programs 129 --optim muon[_bf16] --act_ckpt`, RoPE 2048, fp8 + compile, 65k notes/step, 2.3 GB taken by the desktop; loader `pack_short` | 107M micro 4: 38.5k notes/s 4.06 GB → ckpt all 37.0k / **2.22 GB**. 250M (20L×1024): AdamW OOM even at micro 1; Muon + ckpt micro 2 17.0k / 4.35 GB; **Muon bf16 + ckpt micro 4 16.8k / 4.26 GB**. 350M (28L×1024): OOM in every setting. Packing: usable notes 1.81B → **2.50B**, 1.5 ms/window | Checkpointing is almost free here (compile/fp8-bound) and gradient-identical (checked with dropout). bf16 Muon momentum saves 0.5 GB at 250M. 350M needs the desktop off the dGPU. At ~17k notes/s, 250M × 5B notes ≈ 3.4 days |
+| 2026-10-03 | 350M memory bench, free dGPU | (this commit) | same bench, 28L×1024 (365M), display moved to the iGPU (dGPU 13 MiB used) | Muon bf16 + ckpt all: micro 1 11.2k / 5.03 GB, micro 2 11.6k / 5.19, **micro 4 12.7k / 5.54**, micro 8 13.5k / 7.24. Muon fp32 + ckpt micro 4 13.3k / 6.20. Muon bf16, ckpt 14 of 28 blocks, micro 4: OOM | 350M trains on the laptop. Pick micro 4 (2.5 GB headroom for eval/fragmentation); micro 8 leaves only ~0.8 GB. At ~13k notes/s: 5B notes ≈ 4.5 days, 8B ≈ 7 days |
+| 2026-10-03 | T1 profile 350M | (this commit) | `bench.py --profile` (new: synchronized per-phase timing, NVTX ranges, nsys capture range) under `nsys`, plus `ncu` SOL on the top kernels; 350M config of the row above | 4.95 s/step: fwd 24%, bwd 68% (incl. recompute ≈ 24%), optimizer 7%. fp8 GEMM 32%, flash attention 27%, fp8 amax/cast fused elementwise 25%, Muon NS 5%. Kernels at 78–90% SM throughput, GPU at the 100 W cap. fp8 1.63× bf16; cuDNN attention = flash | Details and per-item verdicts in `optimizations.md`. Worth building: T5 (fp8 overhead), H1 (selective checkpointing), T2 (batched Muon NS). Dropped: T3, T6–T9, T11, T13 as a backend swap |
 | 2026-09-29 | ladder-L-muon-lr1e-3 | d6c63c5 | L, Muon, lr 1e-3 (min 1e-4) | 1.913 / 1.961 / 2.684 / 1.473 = **8.032**; Aria **6.898** | **−0.16 vs Muon 6e-4**: Muon wants a higher LR (AdamW was flat 6e-4..1e-3). **New default: Muon lr 1e-3** |
 | 2026-09-29 | ladder-L-muon | 7c38542 | L with `optimizer_name=muon` (Moonlight-scaled, lr 6e-4, wd 0.1) | 1.974 / 1.978 / 2.713 / 1.497 = **8.162**; Aria **7.061** | **−0.54 Aria vs best AdamW**, only about 6% slower/step (25:41 vs 24:18). About 2× token efficiency (≈ AdamW iso-L at 194M tokens). **Adopt** |
 | 2026-09-29 | ladder-L-lr1e-3 | 7c38542 | L, AdamW lr 1e-3 (min 1e-4) | 2.286 / 1.999 / 2.777 / 1.564 = 8.626; Aria 7.598 | = lr 6e-4: flat optimum at ≥ 6e-4 |

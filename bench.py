@@ -5,6 +5,9 @@ GPU-side training throughput benchmark on synthetic data (no data loader): forwa
     python bench.py --n_layer 6 --n_embd 256 --n_head 8 --micro 6 24 48 --compile 0 1
 
 Reports tokens/s, ms per optimizer step (at a fixed tokens-per-step budget) and peak memory.
+--profile: time per phase (forward / backward incl. checkpoint recompute / clip / optimizer) and the top CUDA kernels.
+Steps carry NVTX ranges; for a timeline in Nsight Systems:
+    nsys profile --trace=cuda,nvtx --capture-range=cudaProfilerApi -o logs/prof/x python bench.py ... --profile
 """
 
 import argparse
@@ -42,6 +45,7 @@ def parse_args():
     p.add_argument('--act_ckpt', type=int, nargs='+', default=[0], help='checkpointed blocks (-1 = all)')
     p.add_argument('--n_programs', type=int, default=0, help='129 = the multi-instrument model')
     p.add_argument('--profile', action='store_true', help='profile one config (first of each list): top CUDA kernels')
+    p.add_argument('--profile_steps', type=int, default=2, help='steps timed per phase in --profile')
     return p.parse_args()
 
 
@@ -72,24 +76,53 @@ def bench(args, micro, compiled, attn, fp8, profile=False, act_ckpt=0):
         Y = Y + (torch.randint(0, args.n_programs, (micro, args.block), device='cuda'),)
     backend = sdpa_kernel(BACKENDS[attn]) if BACKENDS[attn] is not None else nullcontext()
 
-    def step():
+    phases = {}
+
+    def phase(name, timed):
+        """NVTX range; with timed=True also synchronize and add the wall time to phases[name]."""
+        class Range:
+            def __enter__(self):
+                torch.cuda.nvtx.range_push(name)
+                if timed:
+                    torch.cuda.synchronize()
+                    self.t = time.perf_counter()
+
+            def __exit__(self, *exc):
+                if timed:
+                    torch.cuda.synchronize()
+                    phases[name] = phases.get(name, 0.0) + time.perf_counter() - self.t
+                torch.cuda.nvtx.range_pop()
+        return Range()
+
+    def step(timed=False):
         for _ in range(accum):
-            with torch.autocast('cuda', dtype=torch.bfloat16):
+            with phase('forward', timed), torch.autocast('cuda', dtype=torch.bfloat16):
                 _, loss = fwd(*X, targets=Y, **kw)
-            (loss / accum).backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-        opt.step()
-        opt.zero_grad(set_to_none=True)
+            with phase('backward', timed):
+                (loss / accum).backward()
+        with phase('clip', timed):
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+        with phase('optimizer', timed):
+            opt.step()
+            opt.zero_grad(set_to_none=True)
 
     with backend:
         for _ in range(3):  # warmup (+ compilation)
             step()
         torch.cuda.synchronize()
         if profile:
+            for _ in range(args.profile_steps):
+                step(timed=True)
+            total = sum(phases.values())
+            print(f'  time per step by phase ({args.profile_steps} steps, synchronized):')
+            for name, t_ in phases.items():
+                print(f'    {name:<12}{1000 * t_ / args.profile_steps:9.0f} ms {100 * t_ / total:6.1f}%')
             from torch.profiler import profile as prof, ProfilerActivity
+            torch.cuda.profiler.start()  # capture range for nsys --capture-range=cudaProfilerApi
             with prof(activities=[ProfilerActivity.CUDA]) as pr:
                 step()
                 torch.cuda.synchronize()
+            torch.cuda.profiler.stop()
             events = pr.key_averages()
             total = sum(e.device_time_total for e in events)
             groups = {}
@@ -98,6 +131,7 @@ def bench(args, micro, compiled, attn, fp8, profile=False, act_ckpt=0):
                 g = ('gemm' if any(k in n for k in ('gemm', 'cutlass', 'sm90', 'sm100', 'sm120', 'xmma', 'cublas'))
                      else 'attention' if any(k in n for k in ('flash', 'fmha', 'attention', 'cudnn'))
                      else 'cross-entropy/softmax' if any(k in n for k in ('softmax', 'nll', 'log_softmax', 'cross'))
+                     else 'fp8 scaling/casts' if any(k in n for k in ('amax', 'float8', 'fp8', 'e4m3', 'to_copy'))
                      else 'layernorm' if 'norm' in n else 'optimizer' if 'adam' in n or 'foreach' in n
                      else 'elementwise/other')
                 groups[g] = groups.get(g, 0) + e.device_time_total
@@ -105,7 +139,7 @@ def bench(args, micro, compiled, attn, fp8, profile=False, act_ckpt=0):
             for g, t_ in sorted(groups.items(), key=lambda x: -x[1]):
                 print(f'    {g:<24}{100 * t_ / total:6.1f}%')
             print('  top kernels:')
-            for e in sorted(events, key=lambda e: -e.device_time_total)[:12]:
+            for e in sorted(events, key=lambda e: -e.device_time_total)[:20]:
                 print(f'    {100 * e.device_time_total / total:5.1f}%  {e.count:>5}x  {e.key[:95]}')
         torch.cuda.reset_peak_memory_stats()
         t = time.perf_counter()
@@ -126,7 +160,8 @@ def main():
     print(f"optimizer {args.optim}, n_programs {args.n_programs}")
     print(f"{'micro':>6}{'compile':>8}{'attn':>10}{'fp8':>5}{'ckpt':>5}{'tok/s':>11}{'ms/step':>9}{'peak GB':>9}")
     if args.profile:
-        print(bench(args, args.micro[0], args.compile[0], args.attn[0], args.fp8[0], profile=True))
+        print(bench(args, args.micro[0], args.compile[0], args.attn[0], args.fp8[0], profile=True,
+                    act_ckpt=args.act_ckpt[0]))
         return
     for fp8 in args.fp8:
         for attn in args.attn:
