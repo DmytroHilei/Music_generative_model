@@ -20,6 +20,9 @@ mlp = 'swiglu'                  # hidden 3072
 qk_norm = True
 dropout = 0.0
 label_smoothing = 0.0
+cond_inst = True                # condition on the window's instrument set (A/B 2026-10-03: no CE cost, out-of-band
+n_density = 16                  # notes 50% -> 25-30%, density follows the request in the right direction)
+cond_dropout = 0.15
 special_tokens = True           # BOS/EOS: needed by pack_short and by the fine-tunes
 pack_short = True               # short files share windows: GigaMIDI + Aria usable notes 1.81B -> 2.50B
 
