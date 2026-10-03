@@ -34,8 +34,13 @@ command -v uv >/dev/null || curl -LsSf https://astral.sh/uv/install.sh | sh
 if [ ! -f .venv/.installed ] || [ cloud/requirements-lock.txt -nt .venv/.installed ]; then
     export UV_CACHE_DIR="$ROOT/.uv-cache"   # private cache, deleted below (never touches a shared uv cache)
     [ -d .venv ] || uv venv --python 3.12 --python-preference only-managed .venv
-    uv pip install --python .venv/bin/python -r cloud/requirements-lock.txt vastai \
-        --extra-index-url https://download.pytorch.org/whl/cu130 --index-strategy unsafe-best-match
+    export UV_HTTP_TIMEOUT=300
+    for attempt in 1 2 3; do   # network hiccups on large wheels happen: retry (uv keeps what it already fetched)
+        uv pip install --python .venv/bin/python -r cloud/requirements-lock.txt vastai \
+            --extra-index-url https://download.pytorch.org/whl/cu130 --index-strategy unsafe-best-match && break
+        [ $attempt = 3 ] && { echo "package install failed 3 times"; exit 1; }
+        echo "install failed, retry $((attempt + 1))/3 in 20 s"; sleep 20
+    done
     rm -rf "$ROOT/.uv-cache"
     touch .venv/.installed
 fi
