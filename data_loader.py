@@ -71,6 +71,7 @@ class MaestroDataset(Dataset):
         aug_stores=None,
         programs=False,
         pad_short=False,
+        pack_short=False,
         min_notes=64,
     ):
         """
@@ -97,6 +98,11 @@ class MaestroDataset(Dataset):
         pad_short:   keep files shorter than the window (>= min_notes notes) as one whole-file window, zero-padded at the
                      end with masked (-1) targets; a short file is sampled as often per note as a long one. Without it
                      they are dropped (at block_size 2048: 99% of the Ukrainian songs, 57% of Aria's notes)
+        pack_short:  training only (pretraining): keep short files too, but fill their window with further random
+                     short files of the same store, each read whole as [BOS] + notes + [EOS], until block_size + 1 rows
+                     (the last one is cut). No padding, so no wasted compute (GigaMIDI's median file is 160 notes).
+                     Attention is not masked at the joins: BOS marks a new piece. Files are sampled per note, short
+                     and long alike. The window's style is its first file's. Validation (eval_stride) still pads
         programs:    multi-instrument: also return the instrument stream (x and y), from the store's programs.u8
                      (data/prepare_gigamidi.py); stores without one are piano = program 0. Drum notes are never
                      transposed and their duration is set to 0 in x and masked (-1) in y. False = piano-only: stores
@@ -124,6 +130,8 @@ class MaestroDataset(Dataset):
 
         self.pad = 1 if special_tokens else 0
         self.pad_short = pad_short
+        self.pack_short = pack_short and not eval_stride
+        assert not self.pack_short or special_tokens, "pack_short needs special_tokens (BOS/EOS separate the pieces)"
         self.min_notes = min_notes
         self.style_dropout = style_dropout
         self.boundary_frac = boundary_frac if special_tokens else 0.0
@@ -148,7 +156,7 @@ class MaestroDataset(Dataset):
             offsets = np.load(store / "offsets.npy")
             n = np.diff(offsets) + 2 * self.pad  # virtual length incl. BOS/EOS
             keep = n > self.block_size  # need block_size + 1 notes because targets are shifted by one
-            if self.pad_short:
+            if self.pad_short or self.pack_short:
                 keep = n >= self.min_notes + 2 * self.pad
             store_ids.append(np.full(int(keep.sum()), i, dtype=np.int32))
             starts.append(offsets[:-1][keep])
@@ -174,9 +182,17 @@ class MaestroDataset(Dataset):
         if aug_stores is not None:
             assert len(aug_stores) == len(self.store_dirs), f"{len(aug_stores)} aug_stores for {len(self.store_dirs)} stores"
         # number of valid window starts per file, cumulative (for uniform sampling over all positions)
-        # a short (padded) file counts as block_size starts: the per-note rate a long file approaches
+        # a short (padded) file counts as block_size starts: the per-note rate a long file approaches.
+        # Packed, it counts as its length: its notes fill only part of a window, the rest are other short files
         self.short = self.lengths <= self.block_size
-        self.cum_valid = np.cumsum(np.where(self.short, self.block_size, self.lengths - self.block_size))
+        self.cum_valid = np.cumsum(np.where(self.short, self.lengths if self.pack_short else self.block_size,
+                                            self.lengths - self.block_size))
+        if self.pack_short:
+            # per store: the short files and their cumulative lengths, to draw fillers per note
+            self.short_files = []
+            for i in range(len(self.store_dirs)):
+                idx = np.flatnonzero((self.store_ids == i) & self.short)
+                self.short_files.append((idx, np.cumsum(self.lengths[idx])))
 
         if eval_stride:
             # (file index, offset in the file's virtual sequence); order = sources in order, files in store order
@@ -335,7 +351,10 @@ class MaestroDataset(Dataset):
                 elif r < self.boundary_frac:
                     v = int(self.lengths[file_idx]) - self.block_size - 1  # ends with EOS
 
-        rows, program = self._read(file_idx, v)
+        if self.pack_short and self.short[file_idx]:
+            rows, program = self._read_packed(file_idx)
+        else:
+            rows, program = self._read(file_idx, v)
         pitch, velocity, duration, delta_time = rows.unbind(1)
         drums = program == DRUM_PROGRAM if program is not None else None
         if drums is not None:
@@ -378,6 +397,20 @@ class MaestroDataset(Dataset):
                 style = 0
             x = x + (torch.tensor(style),)
         return x, y
+
+    def _read_packed(self, file_idx):
+        """A short file followed by random short files of the same store (drawn per note), whole, cut at
+        block_size + 1 rows."""
+        idx, cum = self.short_files[int(self.store_ids[file_idx])]
+        parts = [self._read(file_idx, 0)]
+        n_rows = len(parts[0][0])
+        while n_rows < self.block_size + 1:
+            j = int(idx[np.searchsorted(cum, random.randrange(int(cum[-1])), side="right")])
+            parts.append(self._read(j, 0))
+            n_rows += len(parts[-1][0])
+        rows = torch.cat([r for r, _ in parts])[:self.block_size + 1]
+        program = torch.cat([p for _, p in parts])[:self.block_size + 1] if self.programs else None
+        return rows, program
 
     @staticmethod
     def _stretch(bins, s, max_bin):
