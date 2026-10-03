@@ -31,7 +31,8 @@ echo $! > "$PID_FILE"
 sleep 2
 STOP_FLAG=()
 [ "${AUTO_STOP:-1}" = 1 ] && STOP_FLAG=(--auto-stop)
-setsid nohup .venv/bin/python cloud/ckpt.py loop --run "$RUN" "${STOP_FLAG[@]}" > "logs/$RUN.sync.log" 2>&1 < /dev/null &
+setsid nohup .venv/bin/python cloud/ckpt.py loop --run "$RUN" --every-min "${SYNC_EVERY_MIN:-60}" "${STOP_FLAG[@]}" \
+    > "logs/$RUN.sync.log" 2>&1 < /dev/null &
 echo $! > "logs/$RUN.sync.pid"
 echo "started: wrapper pid $(cat "$PID_FILE"), sync pid $(cat "logs/$RUN.sync.pid")"
 echo "watch:   cloud/status.sh $RUN      (or tail -f logs/$RUN.log)"
