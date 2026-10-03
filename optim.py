@@ -31,14 +31,16 @@ def zeropower_via_newtonschulz5(G, steps=5):
 
 class Muon(torch.optim.Optimizer):
     def __init__(self, params, lr=6e-4, momentum=0.95, nesterov=True, weight_decay=0.1, ns_steps=5,
-                 momentum_dtype=None, compile_ns=False):
+                 momentum_dtype=None, compile_ns=False, ns_chunk=8):
         # momentum_dtype: torch.bfloat16 halves the optimizer state (2 instead of 4 bytes per param). The buffer is a
         # smoothed direction that Newton-Schulz orthogonalizes in bf16 anyway; the fp32 weights still take the update.
         # Same-shaped matrices (qkv, attn proj, fc, mlp proj of every layer) run Newton-Schulz together as one batched
-        # matmul; compile_ns=True also compiles it (one graph per shape).
+        # matmul, ns_chunk matrices at a time (caps the temporary memory: all 56 MLP matrices of a 450M model at once
+        # ran out of memory on 8 GB); compile_ns=True also compiles it (one graph per shape).
         defaults = dict(lr=lr, momentum=momentum, nesterov=nesterov, weight_decay=weight_decay, ns_steps=ns_steps)
         super().__init__(params, defaults)
         self.momentum_dtype = momentum_dtype
+        self.ns_chunk = ns_chunk
         self.ns = torch.compile(zeropower_via_newtonschulz5) if compile_ns else zeropower_via_newtonschulz5
 
     @torch.no_grad()
@@ -48,7 +50,9 @@ class Muon(torch.optim.Optimizer):
             for p in group['params']:
                 if p.grad is not None:
                     by_shape.setdefault(p.shape, []).append(p)
-            for shape, params in by_shape.items():
+            chunks = [(shape, ps[c:c + self.ns_chunk]) for shape, ps in by_shape.items()
+                      for c in range(0, len(ps), self.ns_chunk)]
+            for shape, params in chunks:
                 bufs = []
                 for p in params:
                     state = self.state[p]
@@ -61,7 +65,7 @@ class Muon(torch.optim.Optimizer):
                 grads = [p.grad for p in params]
                 torch._foreach_mul_(bufs, group['momentum'])
                 torch._foreach_add_(bufs, grads)
-                # stacked straight into bf16 (what Newton-Schulz runs in), one shape group at a time
+                # stacked straight into bf16 (what Newton-Schulz runs in), one chunk of a shape group at a time
                 g = torch.stack([(gr.add(buf, alpha=group['momentum']) if group['nesterov'] else buf).bfloat16()
                                  for gr, buf in zip(grads, bufs)])
                 update = self.ns(g, steps=group['ns_steps'])

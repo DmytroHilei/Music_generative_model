@@ -21,3 +21,7 @@ Skryabin/midi/
 logs/
 README_TODO.md
 samples/
+
+# cloud run: credentials and local hash cache
+cloud/secrets.env
+cloud/.hash_cache.json

@@ -18,6 +18,7 @@ os.environ.setdefault('PYTORCH_CUDA_ALLOC_CONF', 'expandable_segments:True')
 import time
 import math
 import random
+import signal
 import sys
 from contextlib import nullcontext
 
@@ -405,6 +406,18 @@ batches = infinite_batches(train_loader)
 X, Y = next(batches)
 train_sums, train_n = {}, 0  # running train metrics since the last eval (with dropout + augmentation)
 oom_events = 0  # CUDA OOMs survived by retrying the step
+stop_signal = []  # SIGTERM / SIGINT: finish the current step, save a resumable checkpoint, exit 143
+
+
+def request_stop(signum, frame):
+    if not stop_signal:
+        tqdm.write(f"got signal {signum}: saving a resumable checkpoint after this step, then exiting")
+    stop_signal.append(signum)
+
+
+if ckpt_interval_min > 0:
+    signal.signal(signal.SIGTERM, request_stop)
+    signal.signal(signal.SIGINT, request_stop)
 t0 = time.time()
 last_resumable = time.time()
 
@@ -504,9 +517,14 @@ for iter_num in pbar:
     if fp8 and fp8_cache_weights:
         refresh_fp8_weights(raw_model)  # the cached fp8 weights must follow every update
 
-    if ckpt_interval_min > 0 and (time.time() - last_resumable > 60 * ckpt_interval_min or iter_num == max_iters - 1):
+    if ckpt_interval_min > 0 and (time.time() - last_resumable > 60 * ckpt_interval_min or iter_num == max_iters - 1
+                                  or stop_signal):
         save_resumable(iter_num + 1)
         last_resumable = time.time()
+        if stop_signal:
+            if wandb_log:
+                wandb.finish(exit_code=143)
+            sys.exit(143)
 
     t1 = time.time()
     pbar.set_postfix(loss=f"{train_sums['loss'] / train_n:.3f}", lr=f"{lr:.1e}", ms=f"{(t1 - t0) * 1000:.0f}")
