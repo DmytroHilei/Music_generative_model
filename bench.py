@@ -47,6 +47,9 @@ def parse_args():
     p.add_argument('--optim', default='adamw', choices=['adamw', 'muon', 'muon_bf16'])
     p.add_argument('--act_ckpt', type=int, nargs='+', default=[0], help='checkpointed blocks (-1 = all)')
     p.add_argument('--n_programs', type=int, default=0, help='129 = the multi-instrument model')
+    p.add_argument('--norm', default='layernorm', choices=['layernorm', 'rmsnorm'])
+    p.add_argument('--mlp', default='gelu', choices=['gelu', 'swiglu'])
+    p.add_argument('--qk_norm', type=int, default=0)
     p.add_argument('--ckpt_save', default='', help="selective checkpointing: 'attn' | 'attn,mm' (model.act_ckpt_save)")
     p.add_argument('--fp8_recipe', default='tensorwise', choices=['tensorwise', 'rowwise', 'rowwise_with_gw_hp'])
     p.add_argument('--fp8_skip', default='', help="Linear name suffixes kept in bf16, e.g. 'attn.c_proj'")
@@ -60,7 +63,8 @@ def parse_args():
 def bench(args, micro, compiled, attn, fp8, profile=False, act_ckpt=0):
     torch.manual_seed(0)
     cfg = MusicConfig(n_layer=args.n_layer, n_embd=args.n_embd, n_head=args.n_head, block_size=args.block,
-                      pos_emb=args.pos_emb, dropout=0.0, label_smoothing=0.0, n_programs=args.n_programs)
+                      pos_emb=args.pos_emb, dropout=0.0, label_smoothing=0.0, n_programs=args.n_programs,
+                      norm=args.norm, mlp=args.mlp, qk_norm=bool(args.qk_norm))
     model = GPT(cfg).cuda()
     model.act_ckpt = act_ckpt
     model.act_ckpt_save = args.ckpt_save
@@ -163,8 +167,8 @@ def bench(args, micro, compiled, attn, fp8, profile=False, act_ckpt=0):
 
 def main():
     args = parse_args()
-    n = sum(p.numel() for p in GPT(MusicConfig(n_layer=args.n_layer, n_embd=args.n_embd,
-                                               n_head=args.n_head)).parameters())
+    n = sum(p.numel() for p in GPT(MusicConfig(n_layer=args.n_layer, n_embd=args.n_embd, n_head=args.n_head,
+                                               mlp=args.mlp, qk_norm=bool(args.qk_norm))).parameters())
     print(f"model {args.n_layer}L x {args.n_embd} ({n / 1e6:.1f}M), block {args.block} {args.pos_emb}, "
           f"{args.tokens_per_step:,} tokens/step, {torch.cuda.get_device_name()}")
     print(f"optimizer {args.optim}, n_programs {args.n_programs}")
