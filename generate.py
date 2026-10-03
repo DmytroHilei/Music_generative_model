@@ -60,6 +60,12 @@ def parse_args():
     parser.add_argument("--instrument-temperature", type=float, default=None,
                         help="with --sample-instruments: temperature of the instrument choice only (default: "
                              "--temperature); lower = fewer jumps to new instruments")
+    parser.add_argument("--cond-instruments", type=str, default=None,
+                        help="models trained with cond_inst: the band to condition on: 'prompt' (default when the "
+                             "prompt has instruments), a GM program list like '0,33,48,128', or 'none'")
+    parser.add_argument("--cond-density", type=str, default=None,
+                        help="models trained with n_density: notes per second to condition on (e.g. 8), 'prompt', "
+                             "or 'none' (default)")
     parser.add_argument("--min-instruments", type=int, default=1,
                         help="--val-prompt gigamidi: only prompts with at least this many instruments")
     parser.add_argument("--val-index", type=int, default=None, help="which validation piece (see --list-val)")
@@ -326,6 +332,26 @@ def generate_batch(model, config, args, pieces, seed, outs, device, progress=Non
         target_nps = float(args.density)
     n_prompt = 0 if args.keep_prompt and has_prompt else pitch.size(1)
 
+    cond = None
+    if config.cond_inst or config.n_density:
+        from model import window_conditions, density_level
+        from_prompt = window_conditions(pitch, delta_time, prompt_programs if config.n_programs else None,
+                                        config.n_programs or 1, config.n_density or 16)
+        inst = torch.zeros(len(outs), config.n_programs or 1, device=device)
+        how = args.cond_instruments or ('prompt' if prompt_programs is not None and has_prompt else 'none')
+        if how == 'prompt':
+            inst = from_prompt[0]
+        elif how != 'none':
+            inst[:, [int(x) for x in how.split(',')]] = 1.0
+        density = torch.zeros(len(outs), dtype=torch.long, device=device)
+        dens = args.cond_density or 'none'
+        if dens == 'prompt':
+            density = from_prompt[1]
+        elif dens != 'none':
+            density = density_level(float(dens), config.n_density).expand(len(outs)).to(device)
+        cond = (inst, density)
+        print(f"Conditioning: instruments {how} ({instrument_names(inst[0].nonzero().flatten().tolist()) or 'none'}), "
+              f"density {dens} (levels {density.tolist()})")
     print(f"Generating {args.max_new_tokens} notes x {len(outs)} rows on {device} (seed {seed})...")
     t0 = time.time()
     with torch.no_grad():
@@ -347,6 +373,7 @@ def generate_batch(model, config, args, pieces, seed, outs, device, progress=Non
             allowed_programs=allowed,
             return_programs=True,
             program_temperature=args.instrument_temperature,
+            cond=cond,
         )
     streams = [t.cpu() for t in (pitch, velocity, duration, delta_time, programs)]
     print(f"  {len(outs) * args.max_new_tokens / (time.time() - t0):.0f} notes/s")

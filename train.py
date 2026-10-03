@@ -26,7 +26,7 @@ import torch
 from torch.utils.data import DataLoader, Subset
 from tqdm import tqdm
 
-from model import MusicConfig, GPT, STREAM_ORDER, convert_fp8, refresh_fp8_weights, spill_to_cpu
+from model import MusicConfig, GPT, STREAM_ORDER, convert_fp8, refresh_fp8_weights, spill_to_cpu, window_conditions
 from data_loader import MaestroDataset
 
 # -----------------------------------------------------------------------------
@@ -92,6 +92,9 @@ rope_base = 10000.0
 norm = 'layernorm'        # trunk norm: 'layernorm' | 'rmsnorm'
 mlp = 'gelu'              # trunk MLP: 'gelu' (4x) | 'swiglu' (8/3x, same params)
 qk_norm = False           # RMSNorm on each head's q and k
+cond_inst = False         # condition on the set of instruments in the window (multi-hot, zero-init, needs n_programs)
+n_density = 0             # condition on the window's notes/s level (16 = 15 levels + none; 0 = off)
+cond_dropout = 0.15       # training: share of windows whose conditions are replaced by 'none'
 pad_short = False         # keep files shorter than block_size as one padded whole-file window (masked targets)
 act_ckpt = 0              # activation checkpointing: first N transformer blocks recompute in backward (-1 = all)
 act_ckpt_save = ''        # selective checkpointing: op outputs the checkpointed blocks keep ('attn' | 'attn,mm')
@@ -220,11 +223,11 @@ arch_keys = ['n_layer', 'n_head', 'n_embd', 'block_size', 'bias', 'pitch_size', 
              'duration_size', 'delta_time_size', 'cascade_heads', 'cascade_residual',
              'pitch_head_blocks', 'pitch_head_mult', 'moe_experts', 'moe_top_k', 'moe_hidden_frac', 'moe_aux_weight',
              'n_styles', 'n_programs', 'pos_emb', 'rope_base', 'future_weight', 'future_horizons',
-             'norm', 'mlp', 'qk_norm']
+             'norm', 'mlp', 'qk_norm', 'cond_inst', 'n_density']
 # what checkpoints that predate a key actually used
 legacy_defaults = {'cascade_heads': False, 'cascade_residual': False, 'n_styles': 0, 'n_programs': 0,
                    'pos_emb': 'learned', 'rope_base': 10000.0, 'future_weight': 0.0, 'future_horizons': '0-2,2-4,4-8',
-                   'norm': 'layernorm', 'mlp': 'gelu', 'qk_norm': False}
+                   'norm': 'layernorm', 'mlp': 'gelu', 'qk_norm': False, 'cond_inst': False, 'n_density': 0}
 model_args = {k: globals()[k] for k in arch_keys}
 checkpoint = None
 
@@ -319,10 +322,19 @@ def to_device_x(X):
     return to_device(streams), {k: v.to(device, non_blocking=True) for k, v in extra.items()}
 
 
+def add_conditions(X, drop_p):
+    """Window conditioning (cond_inst / n_density models), computed from the window's own notes."""
+    if not (cond_inst or n_density):
+        return X
+    streams, extra = X
+    cond = window_conditions(streams[0], streams[3], extra.get('program'), n_programs, n_density, drop_p=drop_p)
+    return streams, {**extra, 'cond': cond}
+
+
 def infinite_batches(loader):
     while True:
         for X, Y in loader:
-            yield to_device_x(X), to_device(Y)
+            yield add_conditions(to_device_x(X), cond_dropout), to_device(Y)
 
 
 def summed_ce(metrics):
@@ -333,12 +345,13 @@ def summed_ce(metrics):
 
 
 @torch.no_grad()
-def estimate_val_loss(loader):
-    """Returns dict: 'loss' (optimized loss, with label smoothing) and 'ce/<head>' (true CE, nats)."""
+def estimate_val_loss(loader, conditioned=True):
+    """Returns dict: 'loss' (optimized loss, with label smoothing) and 'ce/<head>' (true CE, nats).
+    conditioned=False (conditioning models): every window gets 'none', i.e. the unconditional model."""
     model.eval()
     sums, n = {}, 0
     for X, Y in loader:
-        (streams, extra), Y = to_device_x(X), to_device(Y)
+        (streams, extra), Y = add_conditions(to_device_x(X), 0.0 if conditioned else 1.0), to_device(Y)
         with ctx:
             parts, loss = model(*streams, **extra, targets=Y)
         sums['loss'] = sums.get('loss', 0.0) + loss.item()
@@ -431,6 +444,8 @@ for iter_num in pbar:
         val = estimate_val_loss(val_loader)
         val2 = estimate_val_loss(val2_loader) if val2_loader else {}
         extra = {name: estimate_val_loss(loader) for name, loader in extra_loaders.items()}
+        if cond_inst or n_density:  # the main val set again with no conditions: the model's unconditional quality
+            extra['nocond'] = estimate_val_loss(val_loader, conditioned=False)
         train = {k: (v / train_n).item() for k, v in train_sums.items()} if train_n else {}
         if train:
             summed_ce(train)

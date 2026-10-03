@@ -274,6 +274,13 @@ Ukrainian multi-track songs. Generation gets `--instrument` (mask the instrument
    defects: one instrument takes over a row, density runaway (1,500 notes in 26 s) in ~1/3 of rows.) Old text:
    `generate.py`: sample the instrument head, `--instrument` allowed set (mask logits), write one MIDI track per program
    (drums on channel 10), per-instrument polyphony limits.
+15b. ☐ **After the long pretraining run (user, 2026-10-03): inference-time controls for multi-instrument sampling**
+   (plan "A"; the training-side fix "B" = instrument/density conditioning went into the long run instead):
+   (a) instrument-balance penalty: lower the instrument logit of any instrument above its share in the prompt (or in
+   the requested band), like a frequency penalty, against one instrument taking over a row;
+   (b) per-instrument notes-per-onset caps (bass 1–2, drums 3–4, ...) through the instrument mask when dt = 0,
+   against pile-ups; (c) a density controller for multi-instrument output that counts onsets, not notes (the piano
+   `--density prompt` controller overshot to 1.6–5 notes/s against targets of 4–17, 2026-10-03).
 16. ☐ Ukrainian multi-track fine-tune (data from 5), same recipe as ua-D (replay, tempo aug, steps ∝ songs).
 
 ## Diffusion idea (discussed 2026-09-28, not started)
