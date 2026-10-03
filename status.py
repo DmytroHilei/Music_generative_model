@@ -80,6 +80,7 @@ RUNS = [
     ('mix grid c5r4a1 (0.5/0.4/0.1)', 'mix_c5r4a1.log', 'FT from pilot grown'),
     ('mix grid c6r3a1 (0.6/0.3/0.1)', 'mix_c6r3a1.log', 'FT from pilot grown'),
     ('mix grid p12 (0.5/0.3/0.2, 12 passes)', 'mix_p12.log', 'FT from pilot grown'),
+    ('ua-2048 v2 (bigger cover set)', 'ua_2048_v2.log', 'FT from pilot grown'),
     ('future heads 0.0 seed 1337 (ua-D recipe, 400 it)', 'fut_w0.0_s1337.log', 'FT from B1'),
     ('future heads 0.2 seed 1337 (ua-D recipe, 400 it)', 'fut_w0.2_s1337.log', 'FT from B1'),
     ('future heads 0.0 seed 2 (ua-D recipe, 400 it)', 'fut_w0.0_s2.log', 'FT from B1'),
