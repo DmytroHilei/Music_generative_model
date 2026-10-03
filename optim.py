@@ -30,9 +30,13 @@ def zeropower_via_newtonschulz5(G, steps=5):
 
 
 class Muon(torch.optim.Optimizer):
-    def __init__(self, params, lr=6e-4, momentum=0.95, nesterov=True, weight_decay=0.1, ns_steps=5):
+    def __init__(self, params, lr=6e-4, momentum=0.95, nesterov=True, weight_decay=0.1, ns_steps=5,
+                 momentum_dtype=None):
+        # momentum_dtype: torch.bfloat16 halves the optimizer state (2 instead of 4 bytes per param). The buffer is a
+        # smoothed direction that Newton-Schulz orthogonalizes in bf16 anyway; the fp32 weights still take the update
         defaults = dict(lr=lr, momentum=momentum, nesterov=nesterov, weight_decay=weight_decay, ns_steps=ns_steps)
         super().__init__(params, defaults)
+        self.momentum_dtype = momentum_dtype
 
     @torch.no_grad()
     def step(self):
@@ -42,8 +46,11 @@ class Muon(torch.optim.Optimizer):
                     continue
                 g = p.grad
                 state = self.state[p]
+                dtype = self.momentum_dtype or g.dtype
                 if 'momentum_buffer' not in state:
-                    state['momentum_buffer'] = torch.zeros_like(g)
+                    state['momentum_buffer'] = torch.zeros_like(g, dtype=dtype)
+                elif state['momentum_buffer'].dtype != dtype:  # load_state_dict casts state to the param dtype
+                    state['momentum_buffer'] = state['momentum_buffer'].to(dtype)
                 buf = state['momentum_buffer']
                 buf.mul_(group['momentum']).add_(g)
                 g = g.add(buf, alpha=group['momentum']) if group['nesterov'] else buf
@@ -79,7 +86,8 @@ class CombinedOptimizer:
             opt.load_state_dict(s)
 
 
-def build_muon_optimizer(model, weight_decay, learning_rate, betas, device_type, momentum=0.95, style_lr_mult=1.0):
+def build_muon_optimizer(model, weight_decay, learning_rate, betas, device_type, momentum=0.95, style_lr_mult=1.0,
+                         momentum_dtype=None):
     """Muon for the 2D matrices inside the transformer blocks, AdamW for embeddings, heads, norms.
     The style table (if any) gets its own AdamW group: lr x style_lr_mult (the train loop applies each group's
     'lr_mult'), no weight decay, so a zero-initialized conditioning vector can move far in a short fine-tune."""
@@ -104,7 +112,7 @@ def build_muon_optimizer(model, weight_decay, learning_rate, betas, device_type,
         groups.append({'params': style_params, 'weight_decay': 0.0, 'lr_mult': style_lr_mult})
     adamw = torch.optim.AdamW(groups,
                               lr=learning_rate, betas=betas, **(dict(fused=True) if fused else {}))
-    muon = Muon(muon_params, lr=learning_rate, momentum=momentum, weight_decay=weight_decay)
+    muon = Muon(muon_params, lr=learning_rate, momentum=momentum, weight_decay=weight_decay, momentum_dtype=momentum_dtype)
     print(f"Muon: {len(muon_params)} matrices, {sum(p.numel() for p in muon_params):,} params | "
           f"AdamW: {sum(p.numel() for p in adam_decay + adam_nodecay):,} params"
           + (f" | style table: {sum(p.numel() for p in style_params):,} params, lr x{style_lr_mult:g}" if style_params else ""))

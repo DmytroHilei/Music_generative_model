@@ -84,7 +84,10 @@ pos_emb = 'learned'       # 'learned' (absolute table, old checkpoints) | 'rope'
                           # block_size too: the table is stretched by linear interpolation
 rope_base = 10000.0
 pad_short = False         # keep files shorter than block_size as one padded whole-file window (masked targets)
-min_notes = 64            # with pad_short: shorter files are still dropped
+act_ckpt = 0              # activation checkpointing: first N transformer blocks recompute in backward (-1 = all)
+muon_bf16 = False         # Muon momentum buffer in bf16 (half the Muon optimizer state)
+pack_short = False        # train only: short files fill their window with more short files (BOS..EOS each), no padding
+min_notes = 64            # with pad_short / pack_short: shorter files are still dropped
 future_weight = 0.0       # > 0: auxiliary future-prediction heads (pitch classes / density / register 0-2-4-8 s ahead)
 future_horizons = '0-2,2-4,4-8'
 n_programs = 0            # multi-instrument: 129 = GM programs + drums (needs a programs.u8 store or reads piano as 0)
@@ -158,7 +161,7 @@ train_dataset = MaestroDataset(csv_path, root_dir=root_dir, split='train', block
                                augment=True, cache_dir=cache_dir, special_tokens=special_tokens,
                                styles=styles, style_dropout=style_dropout, boundary_frac=boundary_frac,
                                aug_tempo=aug_tempo, aug_velocity=aug_velocity, programs=n_programs > 0,
-                               pad_short=pad_short, min_notes=min_notes,
+                               pad_short=pad_short, pack_short=pack_short, min_notes=min_notes,
                                aug_stores=[int(a) for a in str(aug_stores).strip('()[] ').split(',') if a.strip()] if aug_stores else None,
                                source_weights=[float(w) for w in str(source_weights).strip('()[] ').split(',') if w.strip()] if source_weights else None)
 
@@ -243,6 +246,7 @@ if block_size < model.config.block_size:
     model.crop_block_size(block_size)
     model_args['block_size'] = block_size
 model.to(device)
+model.act_ckpt = act_ckpt
 
 # before the optimizer is built: fp8 conversion swaps the Linear modules
 if fp8 and not (device_type == 'cuda' and torch.cuda.get_device_capability() >= (8, 9)):
@@ -263,7 +267,8 @@ scaler = torch.amp.GradScaler(device_type, enabled=(dtype == 'float16'))
 if optimizer_name == 'muon':
     from optim import build_muon_optimizer
     optimizer = build_muon_optimizer(model, weight_decay, learning_rate, (beta1, beta2), device_type,
-                                     momentum=muon_momentum, style_lr_mult=style_lr_mult)
+                                     momentum=muon_momentum, style_lr_mult=style_lr_mult,
+                                     momentum_dtype=torch.bfloat16 if muon_bf16 else None)
 else:
     optimizer = model.configure_optimizers(weight_decay, learning_rate, (beta1, beta2), device_type)
 if init_from == 'resume':

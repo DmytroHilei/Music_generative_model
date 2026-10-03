@@ -38,31 +38,44 @@ def parse_args():
     p.add_argument('--attn', nargs='+', default=['default'], choices=list(BACKENDS))
     p.add_argument('--fp8', type=int, nargs='+', default=[0])
     p.add_argument('--steps', type=int, default=8)
+    p.add_argument('--optim', default='adamw', choices=['adamw', 'muon', 'muon_bf16'])
+    p.add_argument('--act_ckpt', type=int, nargs='+', default=[0], help='checkpointed blocks (-1 = all)')
+    p.add_argument('--n_programs', type=int, default=0, help='129 = the multi-instrument model')
     p.add_argument('--profile', action='store_true', help='profile one config (first of each list): top CUDA kernels')
     return p.parse_args()
 
 
-def bench(args, micro, compiled, attn, fp8, profile=False):
+def bench(args, micro, compiled, attn, fp8, profile=False, act_ckpt=0):
     torch.manual_seed(0)
     cfg = MusicConfig(n_layer=args.n_layer, n_embd=args.n_embd, n_head=args.n_head, block_size=args.block,
-                      pos_emb=args.pos_emb, dropout=0.0, label_smoothing=0.0)
+                      pos_emb=args.pos_emb, dropout=0.0, label_smoothing=0.0, n_programs=args.n_programs)
     model = GPT(cfg).cuda()
+    model.act_ckpt = act_ckpt
     if fp8:
         from torchao.float8 import convert_to_float8_training
         # only transformer matmuls; heads/embeddings stay bf16
         convert_to_float8_training(model.transformer.h)
-    opt = model.configure_optimizers(0.1, 6e-4, (0.9, 0.95), 'cuda')
+    if args.optim == 'adamw':
+        opt = model.configure_optimizers(0.1, 6e-4, (0.9, 0.95), 'cuda')
+    else:
+        from optim import build_muon_optimizer
+        opt = build_muon_optimizer(model, 0.1, 1e-3, (0.9, 0.95), 'cuda',
+                                   momentum_dtype=torch.bfloat16 if args.optim == 'muon_bf16' else None)
     fwd = torch.compile(model) if compiled else model
     accum = max(1, args.tokens_per_step // (micro * args.block))
     sizes = (cfg.pitch_size, cfg.velocity_size, cfg.duration_size, cfg.delta_time_size)
     X = tuple(torch.randint(0, s, (micro, args.block), device='cuda') for s in sizes)
     Y = tuple(torch.randint(0, s, (micro, args.block), device='cuda') for s in sizes)
+    kw = {}
+    if args.n_programs:
+        kw['program'] = torch.randint(0, args.n_programs, (micro, args.block), device='cuda')
+        Y = Y + (torch.randint(0, args.n_programs, (micro, args.block), device='cuda'),)
     backend = sdpa_kernel(BACKENDS[attn]) if BACKENDS[attn] is not None else nullcontext()
 
     def step():
         for _ in range(accum):
             with torch.autocast('cuda', dtype=torch.bfloat16):
-                _, loss = fwd(*X, targets=Y)
+                _, loss = fwd(*X, targets=Y, **kw)
             (loss / accum).backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         opt.step()
@@ -110,7 +123,8 @@ def main():
                                                n_head=args.n_head)).parameters())
     print(f"model {args.n_layer}L x {args.n_embd} ({n / 1e6:.1f}M), block {args.block} {args.pos_emb}, "
           f"{args.tokens_per_step:,} tokens/step, {torch.cuda.get_device_name()}")
-    print(f"{'micro':>6}{'compile':>8}{'attn':>10}{'fp8':>5}{'tok/s':>11}{'ms/step':>9}{'peak GB':>9}")
+    print(f"optimizer {args.optim}, n_programs {args.n_programs}")
+    print(f"{'micro':>6}{'compile':>8}{'attn':>10}{'fp8':>5}{'ckpt':>5}{'tok/s':>11}{'ms/step':>9}{'peak GB':>9}")
     if args.profile:
         print(bench(args, args.micro[0], args.compile[0], args.attn[0], args.fp8[0], profile=True))
         return
@@ -118,13 +132,15 @@ def main():
         for attn in args.attn:
             for compiled in args.compile:
                 for micro in args.micro:
-                    try:
-                        tps, ms, mem = bench(args, micro, compiled, attn, fp8)
-                        print(f"{micro:>6}{compiled:>8}{attn:>10}{fp8:>5}{tps:>11,.0f}{ms:>9.0f}{mem:>9.2f}")
-                    except Exception as e:  # OOM, unsupported backend, ...
-                        print(f"{micro:>6}{compiled:>8}{attn:>10}{fp8:>5}   failed: {type(e).__name__}: "
-                              f"{str(e).splitlines()[0][:70]}")
-                    torch.cuda.empty_cache()
+                    for ck in args.act_ckpt:
+                        try:
+                            tps, ms, mem = bench(args, micro, compiled, attn, fp8, act_ckpt=ck)
+                            print(f"{micro:>6}{compiled:>8}{attn:>10}{fp8:>5}{ck:>5}{tps:>11,.0f}{ms:>9.0f}{mem:>9.2f}",
+                                  flush=True)
+                        except Exception as e:  # OOM, unsupported backend, ...
+                            print(f"{micro:>6}{compiled:>8}{attn:>10}{fp8:>5}{ck:>5}   failed: {type(e).__name__}: "
+                                  f"{str(e).splitlines()[0][:70]}", flush=True)
+                        torch.cuda.empty_cache()
 
 
 if __name__ == '__main__':

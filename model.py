@@ -9,6 +9,7 @@ from dataclasses import dataclass
 
 import torch.nn as nn
 import torch
+import torch.utils.checkpoint
 from torch.nn import functional as F
 
 class LayerNorm(nn.Module):
@@ -433,6 +434,9 @@ class GPT(nn.Module):
         assert config.block_size is not None
 
         self.config = config
+        # activation checkpointing (training only, not saved): the first act_ckpt blocks (-1 = all) keep only their
+        # input and recompute their forward during backward (~1.33x compute, activations of those blocks ~gone)
+        self.act_ckpt = 0
 
         assert config.pos_emb in ('learned', 'rope'), config.pos_emb
         self.transformer = nn.ModuleDict(dict(
@@ -552,8 +556,12 @@ class GPT(nn.Module):
         if style is not None and self.config.n_styles:
             x = x + self.transformer['style'](style).unsqueeze(1)  # style: (B,) -> added at every position
         x = self.transformer.drop(x)
+        n_ckpt = len(self.transformer.h) if self.act_ckpt < 0 else self.act_ckpt
         for i, block in enumerate(self.transformer.h):
-            x = block(x, cache, i, rope)
+            if i < n_ckpt and self.training and cache is None and torch.is_grad_enabled():
+                x = torch.utils.checkpoint.checkpoint(block, x, None, i, rope, use_reentrant=False)
+            else:
+                x = block(x, cache, i, rope)
         return self.transformer.ln_f(x)
 
     def _head_logits(self, x, targets=None):
