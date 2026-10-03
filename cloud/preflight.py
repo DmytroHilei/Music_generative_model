@@ -53,6 +53,10 @@ def read_config(path):
     """Top-level assignments of a config file (literals only), like train.py's configurator sees them."""
     cfg = {}
     for node in ast.parse(Path(path).read_text()).body:
+        # exec(open('config/x.py').read()) = include another config first (config/rehearsal.py does this)
+        include = re.fullmatch(r"exec\(open\(['\"](.+?)['\"]\)\.read\(\)\)", ast.unparse(node))
+        if include:
+            cfg.update(read_config(ROOT / include.group(1)))
         if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
             try:
                 cfg[node.targets[0].id] = ast.literal_eval(node.value)
