@@ -239,6 +239,40 @@ def discover_row(t):
                   ProgressBar(total=1, completed=0), '', 'starting')
 
 
+def hf_upload_row(t):
+    """cloud/data.py upload (logs/hf_upload.log): stores done of the manifest, GB, current store, final verification."""
+    text = tail_text(LOGS / 'hf_upload.log', 1_000_000)
+    manifest_path = ROOT / 'data/hf_upload/manifest.json'
+    if text is None or not manifest_path.exists():
+        return
+    text = text.replace('\r', '\n')
+    sizes = {}
+    for rel, e in json.loads(manifest_path.read_text()).items():
+        sizes[rel.split('/')[0]] = sizes.get(rel.split('/')[0], 0) + e['size']
+    started = re.findall(r'^(\w+): uploading [\d.]+ GB \(attempt (\d+)\)', text, re.M)
+    skipped = re.findall(r'^(\w+): already on the Hub', text, re.M)
+    order = [s for s, _ in started]
+    is_running = running('cloud/data.py upload')
+    verified = 'upload verified' in text
+    # a started store is finished once a later store has started (or the whole upload verified)
+    done = set(skipped) | set(order[:-1]) | (set(order) if verified else set())
+    gb_done = sum(sizes.get(s, 0) for s in done) / 1e9
+    gb_total = sum(sizes.values()) / 1e9
+    failed = re.findall(r'failed: (\w+)', text)
+    if verified:
+        state, detail = Text('done', style='green'), re.search(r'upload verified.*', text).group(0)
+    elif is_running:
+        cur, attempt = started[-1] if started else ('hashing', '1')
+        state = Text('running', style='bold yellow')
+        detail = f'now: {cur} ({sizes.get(cur, 0) / 1e9:.1f} GB, attempt {attempt})' + \
+                 (f'; {len(failed)} failed attempts so far' if failed else '')
+    else:
+        state = Text('stopped', style='red')
+        detail = (text.strip().splitlines() or [''])[-1][:120] + ' (re-run: python cloud/data.py upload)'
+    t.add_row('HF data upload', state, ProgressBar(total=round(gb_total * 10), completed=round(gb_done * 10)),
+              f'{len(done)}/{len(sizes)} stores, {gb_done:.1f}/{gb_total:.1f} GB', detail)
+
+
 def pipeline_table():
     t = Table(title='Data pipeline', expand=True, title_justify='left')
     for col in ('stage', 'state', 'progress', 'count', 'detail'):
@@ -297,6 +331,7 @@ def pipeline_table():
               f'{len(reduced)}/{len(reduced) + pending}', rate + (f'; {failed} failed' if failed else ''))
     gigamidi_row(t)
     discover_row(t)
+    hf_upload_row(t)
     return t
 
 
