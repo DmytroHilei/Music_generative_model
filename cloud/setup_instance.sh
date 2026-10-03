@@ -32,7 +32,7 @@ step "3/6 Python 3.12 venv with the pinned packages (uv)"
 export PATH="$HOME/.local/bin:$PATH"
 command -v uv >/dev/null || curl -LsSf https://astral.sh/uv/install.sh | sh
 if [ ! -f .venv/.installed ] || [ cloud/requirements-lock.txt -nt .venv/.installed ]; then
-    [ -d .venv ] || uv venv --python 3.12 .venv
+    [ -d .venv ] || uv venv --python 3.12 --python-preference only-managed .venv
     uv pip install --python .venv/bin/python -r cloud/requirements-lock.txt vastai \
         --extra-index-url https://download.pytorch.org/whl/cu130 --index-strategy unsafe-best-match
     uv cache clean >/dev/null 2>&1 || true

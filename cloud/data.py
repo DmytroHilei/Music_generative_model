@@ -6,8 +6,9 @@ Move the token stores between the laptop and the rented GPU through a private Hu
             python cloud/data.py verify       # every file present, right size, right sha256
 
 The repo holds data/cache/<store>/... for the stores in cloud/hub.py plus manifest.json (size + sha256 per file).
-The upload goes through a staging folder of symlinks (data/hf_upload), so nothing is copied; upload_large_folder
-keeps its own progress there and can be re-run after an interruption.
+The upload goes through a staging folder of symlinks (data/hf_upload), so nothing is copied. One commit per store;
+a re-run skips stores already on the Hub with the right file sizes, and the Xet backend deduplicates chunks it
+already has, so an interrupted 17 GB file doesn't start from zero. manifest.json goes last.
 """
 
 import argparse
@@ -42,10 +43,31 @@ def upload(args):
     (staging / hub.MANIFEST).write_text(json.dumps(manifest, indent=1))
 
     hf.create_repo(repo, repo_type='dataset', private=True, exist_ok=True)
-    hf.upload_large_folder(repo_id=repo, folder_path=str(staging), repo_type='dataset',
-                           num_workers=args.workers, allow_patterns=[hub.MANIFEST] + list(manifest))
-    remote = {f.path: f.size for f in hf.list_repo_tree(repo, repo_type='dataset', recursive=True)
-              if hasattr(f, 'size')}
+
+    def remote_sizes():
+        return {f.path: f.size for f in hf.list_repo_tree(repo, repo_type='dataset', recursive=True)
+                if getattr(f, 'size', None) is not None}
+
+    for store in stores:
+        files = {rel: e for rel, e in manifest.items() if rel.split('/')[0] == store}
+        remote = remote_sizes()
+        if all(remote.get(rel) == e['size'] for rel, e in files.items()):
+            print(f'{store}: already on the Hub', flush=True)
+            continue
+        size = sum(e['size'] for e in files.values()) / 1e9
+        for attempt in range(1, 4):
+            print(f'{store}: uploading {size:.1f} GB (attempt {attempt})', flush=True)
+            try:
+                hf.upload_folder(repo_id=repo, repo_type='dataset', folder_path=str(staging / store),
+                                 path_in_repo=store, commit_message=f'{store}')
+                break
+            except Exception as e:  # network hiccup: retry (Xet resends only missing chunks)
+                print(f'  failed: {type(e).__name__}: {str(e)[:200]}', flush=True)
+                if attempt == 3:
+                    raise SystemExit(f'{store}: upload failed 3 times; re-run the same command to continue')
+    hf.upload_file(path_or_fileobj=str(staging / hub.MANIFEST), path_in_repo=hub.MANIFEST, repo_id=repo,
+                   repo_type='dataset', commit_message='manifest')
+    remote = remote_sizes()
     bad = [rel for rel, e in manifest.items() if remote.get(rel) != e['size']]
     if bad or hub.MANIFEST not in remote:
         raise SystemExit(f'upload incomplete: {len(bad)} files missing or wrong size, e.g. {bad[:3]}; re-run')
