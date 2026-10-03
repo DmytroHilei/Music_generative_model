@@ -7,7 +7,7 @@
 # Same recipe for both arms (big_107M's Muon lr 1e-3 WSD), so the only difference is the initial weights.
 csv_path = 'store:data/cache/gigamidi,store:data/cache/aria'
 source_weights = '0.7,0.3'
-val_csv_path = 'store:data/cache/gigamidi'
+val_csv_path = 'store:data/cache/gigamidi_clean'   # leak-free (data/dedupe_val.py)
 val2_csv_path = 'store:data/cache/aria'    # piano forgetting (big_107M: 5.71)
 
 n_layer = 14

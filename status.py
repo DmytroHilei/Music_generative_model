@@ -94,11 +94,24 @@ RUNS = [
     ('abl iso-XL, old block (C=3.2e16)', 'abl_iso_XL.log', '16Lx640 54Mt'),
     ('abl iso-M, new block (C=3.2e16)', 'abl_iso_M_nb.log', '19M 209Mt'),
     ('abl iso-XL, new block (C=3.2e16)', 'abl_iso_XL_nb.log', '16Lx640 54Mt'),
+    ('mix G .7 / A .3 (new block, lr 2e-3, 500 it)', 'abl_mix_g7a3.log', '42M 33Mt'),
+    ('mix G .4 / A .3 / D .3', 'abl_mix_g4a3d3.log', '42M 33Mt'),
+    ('mix G .25 / A .25 / D .5', 'abl_mix_g25a25d5.log', '42M 33Mt'),
+    ('mix G .45 / A .1 / D .45', 'abl_mix_g45a1d45.log', '42M 33Mt'),
+    ('crash-resume test (SIGKILL at ~4 min)', 'abl_resume_test.log', '42M 26Mt'),
+    ('seed 2: base (old block)', 'abl_base_s2.log', '42M 98Mt'),
+    ('seed 2: newblock', 'abl_newblock_s2.log', '42M 98Mt'),
+    ('seed 3: base (old block)', 'abl_base_s3.log', '42M 98Mt'),
+    ('seed 3: newblock', 'abl_newblock_s3.log', '42M 98Mt'),
+    ('AdamW newblock seed 1337', 'abl_adamw_nb_s1337.log', '42M 98Mt'),
+    ('AdamW newblock seed 2', 'abl_adamw_nb_s2.log', '42M 98Mt'),
+    ('AdamW newblock seed 3', 'abl_adamw_nb_s3.log', '42M 98Mt'),
+    ('abl iso-S, new block (C=3.2e16)', 'abl_iso_S_nb.log', '6Lx256 681Mt'),
 ]
 
 TQDM = re.compile(r'Training:\s+(\d+)%\|[^|]*\|\s*(\d+)/(\d+) \[([\d:]+)<([\d:?]+),\s*([\d.?]+)(it/s|s/it)')
-STEP = re.compile(r'step (\d+): train loss ([\d.na]+), val loss [\d.]+ \| val CE ([\d.]+) '
-                  r'\(pit ([\d.]+) vel ([\d.]+) dur ([\d.]+) del ([\d.]+)\)(?: \| val2 CE ([\d.]+))?')
+STEP = re.compile(r'step (\d+): train loss ([\d.na]+), val loss [\d.]+ \| (\S+) CE ([\d.]+) '
+                  r'\(pit ([\d.]+) vel ([\d.]+) dur ([\d.]+) del ([\d.]+)\)(?: \| (?!prog |future )(\S+) CE ([\d.]+))?')
 
 
 def tail_text(path, n_bytes=200_000):
@@ -120,7 +133,7 @@ def training_table(done_keep=None):
     t = Table(title='Training runs', expand=True, title_justify='left')
     for col, kw in [('run', {}), ('params', {'justify': 'right'}), ('state', {}), ('progress', {'ratio': 2}),
                     ('step', {'justify': 'right'}), ('speed', {'justify': 'right'}), ('ETA', {'justify': 'right'}),
-                    ('val CE', {'justify': 'right'}), ('val2 CE', {'justify': 'right'}),
+                    ('main val CE', {'justify': 'right'}), ('2nd val CE', {'justify': 'right'}),
                     ('pit/vel/dur/dt', {'justify': 'right'})]:
         t.add_column(col, **kw)
     # a run is live if some train.py process has its stdout on that log (works for --out_dir and config-file runs)
@@ -148,9 +161,11 @@ def training_table(done_keep=None):
             state = Text('CRASHED', style='bold red')
         speed = f'{rate} {unit}' if bars else ''
         s = steps[-1] if steps else None
-        val = s[2] if s else ''
-        aria = s[7] if s and s[7] else ''
-        heads = f'{s[3]}/{s[4]}/{s[5]}/{s[6]}' if s else ''
+        # older logs print 'val CE' / 'val2 CE', newer ones the set's name (e.g. 'gigamidi_clean CE')
+        named = lambda name, v: v if name in ('val', 'val2') else f'{v} {name}'
+        val = named(s[2], s[3]) if s else ''
+        aria = named(s[8], s[9]) if s and s[9] else ''
+        heads = f'{s[4]}/{s[5]}/{s[6]}/{s[7]}' if s else ''
         prog = ProgressBar(total=tot, completed=tot if done else cur, width=None)
         rows.append((state.plain == 'done', (label, params, state, prog, f'{tot if done else cur}/{tot}',
                                              '' if done else speed, '' if done else eta, val, aria, heads)))
