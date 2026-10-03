@@ -87,6 +87,13 @@ RUNS = [
     ('future heads 0.2 seed 2 (ua-D recipe, 400 it)', 'fut_w0.2_s2.log', 'FT from B1'),
     ('future heads 1.0 seed 1337 (ua-D recipe, 400 it)', 'fut_w1.0_s1337.log', 'FT from B1'),
     ('future heads 1.0 seed 2 (ua-D recipe, 400 it)', 'fut_w1.0_s2.log', 'FT from B1'),
+    ('abl base (L, LayerNorm+GELU, lr 1e-3)', 'abl_base.log', '42M 98Mt'),
+    ('abl newblock (RMSNorm+SwiGLU+QK-norm)', 'abl_newblock.log', '42M 98Mt'),
+    ('abl newblock lr 2e-3', 'abl_newblock_lr2e-3.log', '42M 98Mt'),
+    ('abl iso-M, old block (C=3.2e16)', 'abl_iso_M.log', '19M 209Mt'),
+    ('abl iso-XL, old block (C=3.2e16)', 'abl_iso_XL.log', '16Lx640 54Mt'),
+    ('abl iso-M, new block (C=3.2e16)', 'abl_iso_M_nb.log', '19M 209Mt'),
+    ('abl iso-XL, new block (C=3.2e16)', 'abl_iso_XL_nb.log', '16Lx640 54Mt'),
 ]
 
 TQDM = re.compile(r'Training:\s+(\d+)%\|[^|]*\|\s*(\d+)/(\d+) \[([\d:]+)<([\d:?]+),\s*([\d.?]+)(it/s|s/it)')
@@ -160,6 +167,8 @@ def training_table(done_keep=None):
 GIGA_BAR = re.compile(r'^(\w+):\s+(\d+)%\|[^|]*\|\s*(\d+)/(\d+) \[([\d:]+)<([\d:?]+),\s*([\d.?]+)file/s'
                       r'(?:, notes=(\w+), per_file=\d+, proj_gb=([\d.]+))?', re.M)
 GIGA_DONE = re.compile(r'^(\w+): ([\d,]+) files, ([\d,]+) notes, (\d+) failed', re.M)
+DISC_BAR = re.compile(r'discover:\s+(\d+)%\|[^|]*\|\s*(\d+)/(\d+) \[([\d:]+)<([\d:?]+),\s*([\d.?]+)file/s'
+                      r'(?:, kept=(\d+)%, notes=(\w+), proj_gb=([\d.]+))?')
 
 
 def gigamidi_row(t):
@@ -186,6 +195,33 @@ def gigamidi_row(t):
         detail += '; ' + ', '.join(f'{sp} {nf} files / {int(nn.replace(",", "")) / 1e6:.0f}M notes'
                                    for sp, nf, nn, _ in finished)
     t.add_row('GigaMIDI tokenize', state, ProgressBar(total=3, completed=len(done)), f'{len(done)}/3 splits', detail)
+
+
+def discover_row(t):
+    """Discover MIDI: download (logs/download_discover.log) then data/prepare_discover.py (logs/prepare_discover.log)."""
+    text = tail_text(LOGS / 'prepare_discover.log')
+    if text is None:
+        return
+    tar = Path('/data/discover/Discover-MIDI-Dataset-CC-BY-NC-SA.tar.gz')
+    is_running = running('data/prepare_discover.py')
+    bars = DISC_BAR.findall(text)
+    if 'prepare done' in text:
+        done = re.findall(r'^(train|validation): ([\d,]+) files, ([\d,]+) notes', text, re.M)
+        t.add_row('Discover tokenize+dedupe', Text('done', style='green'), ProgressBar(total=1, completed=1), '',
+                  ', '.join(f'{sp} {nf} files / {int(nn.replace(",", "")) / 1e6:.0f}M notes' for sp, nf, nn in done))
+    elif is_running and bars:
+        pct, cur, tot, _, eta, rate, kept, notes, proj = bars[-1]
+        t.add_row('Discover tokenize+dedupe', Text('running', style='bold yellow'),
+                  ProgressBar(total=int(tot), completed=int(cur)), f'{int(cur):,}/{int(tot):,}',
+                  f'{rate} files/s, ETA {eta}' + (f', kept {kept}%, {notes} notes, ~{proj} GB projected' if kept else ''))
+    elif not tar.exists():
+        partial = list(Path('/data/discover/.cache/huggingface/download').glob('*.incomplete'))
+        size = max((p.stat().st_size for p in partial), default=0)
+        t.add_row('Discover download', Text('running' if running('hf download') else 'idle', style='bold yellow'),
+                  ProgressBar(total=29_378, completed=size // 1_000_000), f'{size / 1e9:.1f}/29.4 GB', '')
+    else:
+        t.add_row('Discover tokenize+dedupe', Text('waiting' if is_running else 'idle', style='dim'),
+                  ProgressBar(total=1, completed=0), '', 'starting')
 
 
 def pipeline_table():
@@ -245,6 +281,7 @@ def pipeline_table():
     t.add_row('piano reduction', red_state, ProgressBar(total=max(1, len(reduced) + pending), completed=len(reduced)),
               f'{len(reduced)}/{len(reduced) + pending}', rate + (f'; {failed} failed' if failed else ''))
     gigamidi_row(t)
+    discover_row(t)
     return t
 
 

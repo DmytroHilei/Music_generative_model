@@ -6,11 +6,122 @@
 import math
 import inspect
 from dataclasses import dataclass
+from functools import partial
 
 import torch.nn as nn
 import torch
 import torch.utils.checkpoint
 from torch.nn import functional as F
+
+# selective activation checkpointing: ops whose outputs a checkpointed block keeps instead of recomputing
+SAC_OPS = {
+    'attn': ('_scaled_dot_product_flash_attention', '_scaled_dot_product_cudnn_attention',
+             '_scaled_dot_product_efficient_attention'),
+    'mm': ('_scaled_mm', 'mm', 'addmm'),
+}
+
+
+def _sac_context(save):
+    """context_fn for torch.utils.checkpoint: keep the outputs of the SAC_OPS groups in `save` ('attn', 'attn,mm')."""
+    from torch.utils.checkpoint import CheckpointPolicy, create_selective_checkpoint_contexts
+    ops = {getattr(torch.ops.aten, name).default for group in save.split(',') for name in SAC_OPS[group]
+           if hasattr(torch.ops.aten, name)}
+
+    def policy(ctx, op, *args, **kwargs):
+        return CheckpointPolicy.MUST_SAVE if op in ops else CheckpointPolicy.PREFER_RECOMPUTE
+    return create_selective_checkpoint_contexts(policy)
+
+
+def spill_to_cpu(limit_bytes):
+    """Context (eager only): tensors saved for backward move to pinned RAM while the CUDA allocator holds more than
+    limit_bytes, and come back when backward needs them. The check reads the allocator's counter (no sync), so it
+    costs nothing below the limit. Only plain, dense tensors >= 1 MB (bf16) move; their strides are kept. Under
+    torch.compile it saves nothing: the hooks run after the whole compiled forward, i.e. after its memory peak."""
+    def pack(t):
+        if (type(t) is torch.Tensor and t.is_cuda and t.numel() >= 1 << 19 and t.storage_offset() == 0
+                and t.untyped_storage().nbytes() == t.numel() * t.element_size()
+                and torch.cuda.memory_allocated(t.device) > limit_bytes):
+            c = torch.empty_strided(t.size(), t.stride(), dtype=t.dtype, pin_memory=True)
+            c.copy_(t, non_blocking=True)
+            return t.device, c
+        return t
+
+    def unpack(packed):
+        return packed[1].to(packed[0], non_blocking=True) if isinstance(packed, tuple) else packed
+    return torch.autograd.graph.saved_tensors_hooks(pack, unpack)
+
+
+def convert_fp8(blocks, recipe='tensorwise', skip='', cache_weights=False):
+    """torchao float8 training for the Linears in `blocks` (the transformer blocks). recipe: torchao recipe name
+    ('tensorwise' | 'rowwise' | 'rowwise_with_gw_hp'); skip: comma-separated module-name suffixes that stay bf16
+    (e.g. 'attn.c_proj'). cache_weights (tensorwise only): each weight is cast to fp8 once per optimizer step by
+    refresh_fp8_weights() instead of in every forward, recompute and backward of every micro-batch; the caller must
+    call refresh_fp8_weights(model) after building the model and after every optimizer step."""
+    from torchao.float8 import Float8LinearConfig, convert_to_float8_training
+    from torchao.float8.float8_linear import Float8Linear
+    suffixes = tuple(s for s in skip.split(',') if s)
+    convert_to_float8_training(blocks, config=Float8LinearConfig.from_recipe_name(recipe),
+                               module_filter_fn=lambda m, name: not (suffixes and name.endswith(suffixes)))
+    if cache_weights:
+        assert recipe == 'tensorwise', 'fp8 weight caching needs one scale per weight (tensorwise)'
+        for m in blocks.modules():
+            if isinstance(m, Float8Linear):
+                m.__class__ = _cached_float8_linear_class()
+                dtype = m.config.cast_config_weight.target_dtype or torch.float8_e4m3fn
+                m.register_buffer('w8_data', torch.zeros(m.weight.shape, dtype=dtype, device=m.weight.device),
+                                  persistent=False)
+                m.register_buffer('w8_scale', torch.ones((), device=m.weight.device), persistent=False)
+
+
+@torch.no_grad()
+def refresh_fp8_weights(model):
+    """Cast every cached-fp8 Linear's weight to fp8 (in place, so compiled graphs keep their inputs)."""
+    from torchao.float8.float8_scaling_utils import hp_tensor_to_float8_dynamic
+    from torchao.float8.float8_training_tensor import GemmInputRole
+    for m in model.modules():
+        if hasattr(m, 'w8_data'):
+            w8 = hp_tensor_to_float8_dynamic(m.weight, m.w8_data.dtype, m.linear_mm_config,
+                                             gemm_input_role=GemmInputRole.WEIGHT,
+                                             round_scales_to_power_of_2=m.config.round_scales_to_power_of_2)
+            m.w8_data.copy_(w8._data)
+            m.w8_scale.copy_(w8._scale)
+
+
+class _CachedFp8Weight(torch.autograd.Function):
+    """The cached fp8 copy of a weight as the matmul operand; the gradient goes straight to the fp32 weight
+    (torchao's own weight cast has an identity backward too)."""
+
+    @staticmethod
+    def forward(ctx, weight, data, scale, linear_mm_config):
+        from torchao.float8.float8_training_tensor import Float8TrainingTensor, GemmInputRole
+        return Float8TrainingTensor(data, scale, weight.dtype, linear_mm_config, GemmInputRole.WEIGHT)
+
+    @staticmethod
+    def backward(ctx, grad):
+        return grad, None, None, None
+
+
+_CACHED_FP8_LINEAR = None
+
+
+def _cached_float8_linear_class():
+    """Float8Linear whose forward uses the cached fp8 weight (built on first use: model.py imports without torchao)."""
+    global _CACHED_FP8_LINEAR
+    if _CACHED_FP8_LINEAR is None:
+        from torchao.float8.float8_linear import Float8Linear, matmul_with_hp_or_float8_args
+
+        class CachedFloat8Linear(Float8Linear):
+            def forward(self, input):
+                if torch.is_autocast_enabled():  # same autocast handling as Float8Linear.forward
+                    input = input.to(torch.get_autocast_gpu_dtype())
+                w8 = _CachedFp8Weight.apply(self.weight, self.w8_data, self.w8_scale, self.linear_mm_config)
+                output = matmul_with_hp_or_float8_args.apply(input, w8.t(), self.linear_mm_config, self.config)
+                if self.bias is not None:
+                    output = output + self.bias.to(output.dtype)
+                return output
+        _CACHED_FP8_LINEAR = CachedFloat8Linear
+    return _CACHED_FP8_LINEAR
+
 
 class LayerNorm(nn.Module):
     def __init__(self, features, bias, eps=1e-6):
@@ -21,6 +132,22 @@ class LayerNorm(nn.Module):
 
     def forward(self, x):
         return F.layer_norm(x, self.weight.shape, self.weight, self.bias, self.eps)
+
+
+class RMSNorm(nn.Module):
+    def __init__(self, features, eps=1e-6):
+        super().__init__()
+        self.weight = nn.Parameter(torch.ones(features))
+        self.eps = eps
+
+    def forward(self, x):
+        return F.rms_norm(x, self.weight.shape, self.weight, self.eps)
+
+
+def block_norm(config, features=None):
+    """The norm used inside the transformer trunk (blocks, ln_f); the output heads keep LayerNorm."""
+    features = features or config.n_embd
+    return RMSNorm(features) if config.norm == 'rmsnorm' else LayerNorm(features, bias=config.bias)
 
 
 def rope_tables(positions, head_size, base):
@@ -55,6 +182,9 @@ class CausalSelfAttention(nn.Module):
         self.n_head = config.n_head
         self.n_embd = config.n_embd
         self.dropout = config.dropout
+        # QK-norm: RMSNorm over each head's q and k (before RoPE), keeps attention logits bounded at high LR
+        self.q_norm = RMSNorm(config.n_embd // config.n_head) if config.qk_norm else None
+        self.k_norm = RMSNorm(config.n_embd // config.n_head) if config.qk_norm else None
         self.flash = hasattr(torch.nn.functional, 'scaled_dot_product_attention')
         if not self.flash:
             print("WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0")
@@ -73,6 +203,8 @@ class CausalSelfAttention(nn.Module):
         k = k.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
         q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
         v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
+        if self.q_norm is not None:
+            q, k = self.q_norm(q), self.k_norm(k)
         if rope is not None:
             q, k = apply_rope(q, *rope), apply_rope(k, *rope)
         causal, mask = True, None
@@ -121,6 +253,22 @@ class MLP(nn.Module):
         x = self.dropout(x)
         return x
 
+class SwiGLU(nn.Module):
+    """Gated MLP (Shazeer 2020): c_proj(silu(c_gate x) * c_fc x). Hidden 8/3 * n_embd (rounded up to 64) keeps the
+    parameter count of the 4x GELU MLP."""
+
+    def __init__(self, config):
+        super().__init__()
+        H = (8 * config.n_embd // 3 + 63) // 64 * 64
+        self.c_fc = nn.Linear(config.n_embd, H, bias=config.bias)
+        self.c_gate = nn.Linear(config.n_embd, H, bias=config.bias)
+        self.c_proj = nn.Linear(H, config.n_embd, bias=config.bias)
+        self.dropout = nn.Dropout(config.dropout)
+
+    def forward(self, x):
+        return self.dropout(self.c_proj(F.silu(self.c_gate(x)) * self.c_fc(x)))
+
+
 class MoEMLP(nn.Module):
     """
     Top-k routed mixture of expert FFNs (dropless: every token goes to its k experts, no capacity limit).
@@ -164,10 +312,11 @@ class Block(nn.Module):
 
     def __init__(self, config):
         super().__init__()
-        self.ln_1 = LayerNorm(config.n_embd, bias=config.bias)
+        self.ln_1 = block_norm(config)
         self.attn = CausalSelfAttention(config)
-        self.ln_2 = LayerNorm(config.n_embd, bias=config.bias)
-        self.mlp = MoEMLP(config) if config.moe_experts else MLP(config)
+        self.ln_2 = block_norm(config)
+        self.mlp = (MoEMLP(config) if config.moe_experts else SwiGLU(config) if config.mlp == 'swiglu'
+                    else MLP(config))
 
     def forward(self, x, cache=None, layer=0, rope=None):
         x = x + self.attn(self.ln_1(x), cache, layer, rope)
@@ -216,6 +365,10 @@ class MusicConfig:
     # embedding of q/k in every attention layer (relative, no parameters, so block_size can change after training)
     pos_emb: str = 'learned'
     rope_base: float = 10000.0
+    # trunk block variants (architecture.md A2-A4); the defaults are the original nanoGPT block
+    norm: str = 'layernorm'     # 'layernorm' | 'rmsnorm' (blocks and ln_f)
+    mlp: str = 'gelu'           # 'gelu' (4x) | 'swiglu' (8/3x, same params)
+    qk_norm: bool = False
     # future prediction (training only, dropped at inference): small heads on h_t predict, for each time horizon after
     # note t's onset ('a-b' seconds), the pitch-class histogram, log note count and mean pitch of the notes sounding
     # there; loss += future_weight * mean over horizons. 0 = off (no parameters)
@@ -435,15 +588,18 @@ class GPT(nn.Module):
 
         self.config = config
         # activation checkpointing (training only, not saved): the first act_ckpt blocks (-1 = all) keep only their
-        # input and recompute their forward during backward (~1.33x compute, activations of those blocks ~gone)
+        # input and recompute their forward during backward (~1.33x compute, activations of those blocks ~gone).
+        # act_ckpt_save: selective checkpointing, the checkpointed blocks keep the outputs of these op groups
+        # (SAC_OPS: 'attn' = attention output, ~16 MB per block at 4 x 2048 x 1024; 'attn,mm' = also the matmuls)
         self.act_ckpt = 0
+        self.act_ckpt_save = ''
 
         assert config.pos_emb in ('learned', 'rope'), config.pos_emb
         self.transformer = nn.ModuleDict(dict(
             music_embeddings = MusicEmbeddings(config),
             drop = nn.Dropout(config.dropout),
             h = nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
-            ln_f = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f = block_norm(config),
         ))
         if config.pos_emb == 'learned':
             self.transformer['wpe'] = nn.Embedding(config.block_size, config.n_embd)
@@ -557,9 +713,11 @@ class GPT(nn.Module):
             x = x + self.transformer['style'](style).unsqueeze(1)  # style: (B,) -> added at every position
         x = self.transformer.drop(x)
         n_ckpt = len(self.transformer.h) if self.act_ckpt < 0 else self.act_ckpt
+        ckpt_kw = dict(context_fn=partial(_sac_context, self.act_ckpt_save)) if self.act_ckpt_save else {}
         for i, block in enumerate(self.transformer.h):
             if i < n_ckpt and self.training and cache is None and torch.is_grad_enabled():
-                x = torch.utils.checkpoint.checkpoint(block, x, None, i, rope, use_reentrant=False)
+                x = torch.utils.checkpoint.checkpoint(block, x, None, i, rope, use_reentrant=False,
+                                                      respect_saved_tensors_hooks=True, **ckpt_kw)
             else:
                 x = block(x, cache, i, rope)
         return self.transformer.ln_f(x)

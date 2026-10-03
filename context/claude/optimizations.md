@@ -34,6 +34,55 @@ already; cooling can only hold clocks. **T11 drop** (~2 GB save every 30 min ≈
 attention outputs, ~0.5 GB, to skip the flash forward in the recompute ≈ 6%; leave a few blocks un-checkpointed with the
 remaining 2.5 GB). New H2 low (offloading Muon momentum frees only 0.7 GB).
 
+## T2 / H1 / T5 results (2026-10-03, `logs/hpc_t5h1t2.log`, 350M config of T1, 8 steps each)
+
+| config | notes/s | peak GB | vs batched-Muon base |
+|---|---|---|---|
+| base: batched Muon (eager NS), ckpt all | 13,042 | 5.54 | — |
+| T2: + compiled NS (`compile_ns`) | 13,116 | 5.54 | +0.6% |
+| **H1: + keep attention outputs (`act_ckpt_save='attn'`)** | **13,834** | **5.77** | **+6.1%** |
+| H1: + keep attention and matmul outputs (`'attn,mm'`) | OOM | | |
+| H1 'attn', 24 of 28 blocks checkpointed | 13,904 | 6.34 | +6.6% |
+| H1 'attn', 22 of 28 | 14,157 | 6.68 | +8.5% |
+| H1 'attn', 20 of 28 | 14,218 | 7.03 | +9.0% |
+| T5: fp8 rowwise | 9,445 | 5.56 | −28% |
+| T5: attention c_proj in bf16 (`fp8_skip`) | 12,522 | 5.55 | −4.0% |
+
+- **H1 kept.** For the long run: `act_ckpt=-1, act_ckpt_save='attn'` (+6%, 2.2 GB headroom, no allocator retries).
+  22–24 checkpointed blocks give +1–2% more but the allocator already hit OOM-and-retry warnings: too tight for days.
+- **T2 kept** (batched Newton-Schulz, numerically equal to per-matrix, slightly closer to fp32): the gain is inside the
+  ±3% bench noise (T1's old-Muon runs gave 12.7k and 13.2k), and the optimizer is only 7% of the step.
+- **T5: tensorwise stays.** Rowwise is much slower on sm_120, and taking a Linear out of fp8 costs more than its
+  casts.
+- **fp8 weight cache** (`fp8_cache_weights` / `bench.py --fp8_cache`, `model.refresh_fp8_weights` after every
+  optimizer step): one cast per weight per step instead of 3 per micro-batch. Eager: bit-identical losses; compiled:
+  differences at the run-to-run noise level. 350M (ckpt all + 'attn' + compiled NS), interleaved off/on/off/on:
+  13,221 / **13,498** / 13,243 / **13,503** notes/s = **+2.0%**, peak 5.77 → **6.10 GB** (fp8 weight buffers), and the
+  allocator logged an OOM-and-retry each time. Optional: worth it only where the extra 0.33 GB is free.
+
+## Memory safety + final long-run setting (2026-10-03, `logs/expandable.log`)
+
+- `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` is now the default in `train.py` and `bench.py` (setdefault, so an
+  explicit value wins). It removed every allocator "OOM, retrying" warning at 350M, and speed is unchanged or up:
+  ckpt all + 'attn' 13,640 → 13,850; + fp8 cache 14,150 → 14,110 (noise).
+- OOM guard in `train.py` (`oom_retries=2`, `oom_spill_frac=0.6`): an OOM inside a step frees the cache and redoes
+  the step compiled; a second OOM redoes it **eager with the saved activations spilled to pinned RAM** above 60% of the
+  GPU (`model.spill_to_cpu`, a saved-tensors hook that reads the allocator counter, so it's free below the limit).
+  Under torch.compile the spill saves nothing (hooks run after the compiled forward's peak), hence the eager retry.
+  Tested with a real OOM (42M, micro 24 x 2048): both retries fire, the step completes eagerly (~11–15 s), loss falls.
+  Checkpointed blocks now pass `respect_saved_tensors_hooks=True` so SAC-saved tensors spill too.
+- With expandable segments the tighter settings run clean (350M, Muon bf16, compiled NS, 'attn'):
+
+| checkpointed blocks | fp8 cache | notes/s | peak GB |
+|---|---|---|---|
+| all 28 | off | 13,850 | 5.77 |
+| all 28 | on | 14,110 | 6.09 |
+| 24 | off / on | 14,061 / **14,332** | 6.34 / **6.66** |
+| 22 | off / on | 14,157 / 14,423 | 6.68 / 7.01 |
+
+  **Long-run setting: `act_ckpt=24 act_ckpt_save='attn' fp8_cache_weights=True`** (14.3k notes/s, +8% vs the T1
+  13.2k, ~1.4 GB headroom; a rare spike is caught by the OOM guard). At 14.3k notes/s: 7.7B notes ≈ 6.2 days.
+
 ## Done
 
 | item | result |
