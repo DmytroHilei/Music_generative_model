@@ -47,6 +47,9 @@ root_dir = '.'
 cache_dir = 'data/cache'
 val_csv_path = ''         # main val set (checkpoint selection); '' = same sources as csv_path
 val2_csv_path = ''        # optional second val set, only logged as val2/* (e.g. keep the old set comparable)
+val_name = ''             # names printed for the val sets ('' = from the source, e.g. 'gigamidi_clean'); wandb keeps val/, val2/
+val2_name = ''
+val_extra = ''            # more logged-only val sets: 'name=sources;name=sources' -> <name>/* (e.g. 'discover=store:data/cache/discover')
 special_tokens = False    # BOS/EOS around every piece (pitch vocab 128 -> 130; a finetune grows a 128 checkpoint)
 style_map = ''            # e.g. 'data/styles.json': conditioning on genre/artist (n_styles from the file, 0 = none)
 style_lr_mult = 1.0       # Muon runs: LR multiplier for the style table (own AdamW group, no weight decay)
@@ -190,8 +193,18 @@ def make_val_loader(sources):
     return DataLoader(ds, batch_size=batch_size, shuffle=False, collate_fn=collate_fn, num_workers=num_workers)
 
 
+def source_name(sources):
+    """'store:data/cache/gigamidi_clean,data/finetune/x.csv' -> 'gigamidi_clean+x'"""
+    return '+'.join(os.path.splitext(os.path.basename(s.removeprefix('store:')))[0] for s in sources.split(',') if s)
+
+
+val_name = val_name or source_name(val_csv_path or csv_path)
+val2_name = val2_name or (source_name(val2_csv_path) if val2_csv_path else '')
 val_loader = make_val_loader(val_csv_path or csv_path)
 val2_loader = make_val_loader(val2_csv_path) if val2_csv_path else None
+extra_loaders = {name: make_val_loader(src) for name, src in (e.split('=', 1) for e in val_extra.split(';') if e)}
+print(f"Validation: {val_name} (main, picks the best checkpoint)" + (f", {val2_name}" if val2_name else "")
+      + "".join(f", {name}" for name in extra_loaders))
 val_dataset = val_loader.dataset
 
 train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, collate_fn=collate_fn,
@@ -404,20 +417,23 @@ for iter_num in pbar:
     if iter_num % eval_interval == 0 or iter_num == max_iters - 1:
         val = estimate_val_loss(val_loader)
         val2 = estimate_val_loss(val2_loader) if val2_loader else {}
+        extra = {name: estimate_val_loss(loader) for name, loader in extra_loaders.items()}
         train = {k: (v / train_n).item() for k, v in train_sums.items()} if train_n else {}
         if train:
             summed_ce(train)
         heads = " ".join(f"{name[:3]} {val[f'ce/{name}']:.3f}" for name in STREAM_ORDER)
         tqdm.write(f"step {iter_num}: train loss {train.get('loss', float('nan')):.4f}, "
-                   f"val loss {val['loss']:.4f} | val CE {val['ce/total']:.3f} ({heads})"
-                   + (f" | val2 CE {val2['ce/total']:.3f}" if val2 else "")
+                   f"val loss {val['loss']:.4f} | {val_name} CE {val['ce/total']:.3f} ({heads})"
+                   + (f" | {val2_name} CE {val2['ce/total']:.3f}" if val2 else "")
                    + (f" | future pc CE {val['ce/future_pc']:.3f}" if 'ce/future_pc' in val else "")
                    # instrument head last, so status.py's STEP pattern still matches the line
-                   + (f" | prog CE {val['ce/program']:.3f}" if 'ce/program' in val else ""))
+                   + (f" | prog CE {val['ce/program']:.3f}" if 'ce/program' in val else "")
+                   + "".join(f" | {name} CE {e['ce/total']:.3f}" for name, e in extra.items()))
         if wandb_log:
             wandb.log({"iter": iter_num, "lr": lr,
                        **{f"val/{k}": v for k, v in val.items()},
                        **{f"val2/{k}": v for k, v in val2.items()},
+                       **{f"{name}/{k}": v for name, e in extra.items() for k, v in e.items()},
                        **{f"train/{k}": v for k, v in train.items()}})
         train_sums, train_n = {}, 0
 
