@@ -819,7 +819,7 @@ class GPT(nn.Module):
     def generate(self, pitch, velocity, duration, delta_time, max_new_tokens, temperature=0.85, top_k=None,
                  anchor=0, slide=None, progress=None, dt_bias=0.0, target_nps=None, dt_seconds=0.02,
                  cuda_graph=True, style=None, min_new=0, program=0, top_p=None, cfg_scale=1.0,
-                 eos_t1=False):
+                 eos_t1=False, programs=None, allowed_programs=None, return_programs=False, program_temperature=None):
         """
         Batched sampling (B rows, same prompt length) with a preallocated KV cache: each new note costs one position
         through the model, not a full re-run. On CUDA the one-note transformer step is captured once as a CUDA graph
@@ -835,8 +835,13 @@ class GPT(nn.Module):
           target_nps: notes per second to track (a float, or one per row). A controller nudges each row's bias after
             every note from the density of its last 64 notes, starting at dt_bias. dt_seconds = seconds per bin.
         style: (B,) style ids (models with n_styles; 0 = none/unconditional).
-        program: models with n_programs: every note is played by this one instrument (0 = piano); its head isn't
-          sampled. Sampling the instrument per note is to-do 15.
+        program: models with n_programs: an int = every new note is played by this instrument (0 = piano) and its
+          head isn't sampled; None = the instrument head is sampled per note (dt -> instrument -> pitch -> ...).
+        programs: (B, T) instruments of the prompt notes (default: all `program`, or 0 when sampling).
+        allowed_programs: with program=None, only these instruments can be sampled (e.g. [0, 33, 128]).
+        return_programs: also return the (B, T) instrument of every note as a fifth tensor.
+        program_temperature: temperature of the instrument head only (default: temperature). Lower = fewer switches to
+          new instruments; at 0.9 the instrument choice drifted to dozens of rare instruments.
         top_p: nucleus sampling, keep the smallest set of values whose probability reaches top_p (after top_k).
         cfg_scale != 1 (needs a style): classifier-free guidance. The batch runs twice, with the style and with
           style 0 (none, which style dropout trained), and every head samples from uncond + s * (cond - uncond); both
@@ -878,19 +883,34 @@ class GPT(nn.Module):
             style = torch.as_tensor(style, dtype=torch.long, device=device).reshape(-1).expand(Bo).contiguous()
             if guided:
                 style = torch.cat([style, torch.zeros_like(style)])
+        n_prog = self.config.n_programs
+        sample_programs = bool(n_prog) and program is None
         fixed_program = torch.full((B, 1), int(program), dtype=torch.long, device=device) \
-            if self.config.n_programs else None
+            if n_prog and not sample_programs else None
+        prog_out = None
+        if n_prog:  # the instrument of every note, like the 4 note streams
+            prog_out = torch.zeros(B, total, dtype=torch.long, device=device)
+            if programs is not None:
+                prog_out[:, :n0] = torch.cat([programs, programs]) if guided else programs
+            elif fixed_program is not None:
+                prog_out[:, :n0] = fixed_program
+        prog_mask = None
+        if sample_programs and allowed_programs is not None:
+            prog_mask = torch.full((n_prog,), -float('Inf'), device=device)
+            prog_mask[torch.as_tensor(list(allowed_programs), device=device)] = 0.0
 
         def sample(logits, name=None):  # (B, 1, vocab) → (B, 1)
-            if name == 'program':
+            if name == 'program' and not sample_programs:
                 return fixed_program
             logits = logits[:, -1, :].float()
+            if name == 'program' and prog_mask is not None:
+                logits = logits + prog_mask
             if guided:
                 logits = logits[Bo:] + cfg_scale * (logits[:Bo] - logits[Bo:])
             p_eos = None
             if name == 'pitch' and specials and eos_t1 and step_i[0] >= min_new:
                 p_eos = F.softmax(logits, dim=-1)[:, [EOS_PITCH]]  # the model's own chance of ending here
-            logits = logits / temperature
+            logits = logits / (program_temperature if name == 'program' and program_temperature else temperature)
             if name == 'pitch' and specials:
                 logits[:, BOS_PITCH] = -float('Inf')
                 if step_i[0] < min_new:
@@ -926,11 +946,15 @@ class GPT(nn.Module):
             w = window[0].size(1)
             if w == 1:
                 cache.pos.fill_(0)  # a 1-note window goes through the single-step path at slot 0
-            prog = None if fixed_program is None else fixed_program.expand(B, w)
+            prog = None
+            if prog_out is not None:
+                prog = prog_out[:, :n] if n <= L else torch.cat([prog_out[:, :anchor],
+                                                                 prog_out[:, n - (L - slide - anchor):n]], dim=1)
             return self._encode(*window, style=style, program=prog, cache=cache)[:, [-1], :], w
 
         # the one-note step: static inputs -> static output, optionally captured as a CUDA graph
         step_in = [torch.zeros(B, 1, dtype=torch.long, device=device) for _ in range(4)]
+        step_prog = torch.zeros(B, 1, dtype=torch.long, device=device) if n_prog else None  # the new note's instrument
         step_style = style  # constant during generation, so the graph can read it directly
         graph = None
         if cuda_graph and device.type == 'cuda':
@@ -938,21 +962,23 @@ class GPT(nn.Module):
             stream.wait_stream(torch.cuda.current_stream())
             with torch.cuda.stream(stream):  # warm-up outside the graph (allocator, kernel selection)
                 for _ in range(2):
-                    self._encode(*step_in, style=step_style, program=fixed_program, cache=cache)
+                    self._encode(*step_in, style=step_style, program=step_prog, cache=cache)
             torch.cuda.current_stream().wait_stream(stream)
             graph = torch.cuda.CUDAGraph()
             with torch.cuda.graph(graph):
-                step_out = self._encode(*step_in, style=step_style, program=fixed_program, cache=cache)
+                step_out = self._encode(*step_in, style=step_style, program=step_prog, cache=cache)
             # the warm-up and capture wrote junk into slot 0; prefill below overwrites every slot it uses
 
-        def step(new, pos):
+        def step(new, pos, prog=None):
             for buf, t in zip(step_in, new):
                 buf.copy_(t)
+            if step_prog is not None:
+                step_prog.copy_(prog)
             cache.pos.fill_(pos)
             if graph is not None:
                 graph.replay()
                 return step_out
-            return self._encode(*step_in, style=step_style, program=fixed_program, cache=cache)
+            return self._encode(*step_in, style=step_style, program=step_prog, cache=cache)
 
         h, filled = prefill(n0)
         for i in range(max_new_tokens):
@@ -964,6 +990,8 @@ class GPT(nn.Module):
             n = n0 + i
             for o, t in zip(out, new):
                 o[:, n:n + 1] = t
+            if prog_out is not None:
+                prog_out[:, n:n + 1] = nxt['program'] if 'program' in nxt else fixed_program
             n += 1
             if target is not None:
                 # per-row integral controller on log density, bias kept in [-2, 6]; stays on the GPU
@@ -977,9 +1005,12 @@ class GPT(nn.Module):
             if i == max_new_tokens - 1:
                 break
             if filled < L:
-                h = step(new, filled)
+                h = step(new, filled, None if prog_out is None else prog_out[:, n - 1:n])
                 filled += 1
             else:
                 h, filled = prefill(n)
 
-        return tuple(o[:Bo] for o in out)
+        result = tuple(o[:Bo] for o in out)
+        if return_programs:
+            result += (prog_out[:Bo] if prog_out is not None else torch.zeros_like(result[0]),)
+        return result
