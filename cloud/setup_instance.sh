@@ -18,7 +18,7 @@ echo "ok"
 
 step "2/6 system packages"
 need=()
-for cmd in git curl gcc tmux; do command -v $cmd >/dev/null || need+=($cmd); done
+for cmd in git curl gcc; do command -v $cmd >/dev/null || need+=($cmd); done   # tmux is optional (handy for ssh)
 if [ ${#need[@]} -gt 0 ]; then
     if [ "$(id -u)" = 0 ]; then
         apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq git curl build-essential tmux
