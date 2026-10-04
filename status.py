@@ -339,7 +339,11 @@ def pipeline_table():
             per_artist = Counter(row['artist'] for row in csv.DictReader(f))
     artists = [line.split('|')[0].strip() for line in open(ROOT / 'data/artists.txt', encoding='utf-8')
                if line.strip() and not line.startswith('#')]
-    fetch_running = running('data/fetch_songs.py')
+    # round 1 only: the round-2 downloads (data/artists_covers_next.txt) have their own rows
+    round1 = [l.split(None, 1) for l in subprocess.run(['pgrep', '-af', 'data/fetch_songs.py'], capture_output=True,
+                                                         text=True).stdout.splitlines()
+              if 'artists_covers_next' not in l and 'pgrep' not in l]
+    fetch_running = bool(round1)
     # the fetch log prints "<artist>: N songs" when it starts an artist, so the artists before the last one are done
     fetch_log = next((LOGS / n for n in ('fetch2.log', 'fetch.log') if (LOGS / n).exists()), None)
     log_text = (tail_text(fetch_log, 10_000_000) or '') if fetch_log else ''
@@ -349,7 +353,7 @@ def pipeline_table():
         done_artists = max(0, len(started) - 1)
         current = started[-1] if started else 'searching'
         detail = f"{done_artists}/{len(artists)} artists; now: {current}"
-        pid = subprocess.run(['pgrep', '-of', 'data/fetch_songs.py'], capture_output=True, text=True).stdout.split()
+        pid = [round1[0][0]] if round1 else []
         etime = subprocess.run(['ps', '-o', 'etimes=', '-p', pid[0]], capture_output=True, text=True).stdout if pid else ''
         if etime.strip() and done_artists:
             per_artist_s = int(etime) / done_artists
@@ -379,7 +383,8 @@ def pipeline_table():
         rate = f'{per_song:.0f} s/song, ~{pending * per_song / 60:.0f} min left for {pending} downloaded songs'
     elif pending:
         rate = f'{pending} downloaded songs waiting'
-    failed = sum((tail_text(LOGS / n) or '').count('FAILED') for n in ('reduce.log', 'reduce2.log'))
+    # reduce2.log also receives the round-2 reductions (appended): count round 1 only, up to its DONE line
+    failed = sum((tail_text(LOGS / n) or '').split('REDUCTION DONE')[0].count('FAILED') for n in ('reduce.log', 'reduce2.log'))
     t.add_row('piano reduction', red_state, ProgressBar(total=max(1, len(reduced) + pending), completed=len(reduced)),
               f'{len(reduced)}/{len(reduced) + pending}', rate + (f'; {failed} failed' if failed else ''))
     gigamidi_row(t)
