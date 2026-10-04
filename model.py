@@ -240,8 +240,8 @@ class CausalSelfAttention(nn.Module):
                 ck[:, :, :T] = k
                 cv[:, :, :T] = v
             else:
-                ck.index_copy_(2, cache.pos, k)
-                cv.index_copy_(2, cache.pos, v)
+                ck.index_copy_(2, cache.pos, k.to(ck.dtype))  # under autocast QK-norm returns fp32
+                cv.index_copy_(2, cache.pos, v.to(cv.dtype))
                 k, v, causal, mask = ck, cv, False, cache.mask  # attend to every filled position
 
         # causal self-attention; Self-attend: (B, nh, T, hs) x (B, nh, hs, T) -> (B, nh, T, T)
@@ -983,6 +983,8 @@ class GPT(nn.Module):
             return torch.cat([nxt, nxt]) if guided else nxt
 
         dtype = next(self.parameters()).dtype
+        if device.type == 'cuda' and torch.is_autocast_enabled():
+            dtype = torch.get_autocast_gpu_dtype()  # fp32 master weights under autocast: a bf16 cache is enough
         C = self.config.n_embd
         cache = KVCache(self.config.n_layer, B, self.config.n_head, L, C // self.config.n_head, device, dtype)
 

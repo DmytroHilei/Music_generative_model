@@ -34,6 +34,8 @@ from data_loader import MaestroDataset
 out_dir = 'checkpoints'
 eval_interval = 20
 eval_iters = 200          # max number of val batches per evaluation (fixed windows, same every time)
+sample_eval_rows = 0      # > 0: at every evaluation also generate from this many fixed multi-instrument prompts and
+sample_eval_notes = 1000  # log sample metrics (sample_eval.py: instruments, out-of-band, density, takeover, ...)
 eval_only = False
 always_save_checkpoint = False
 checkpoint_format = 'full'  # 'full' = fp32 weights + optimizer (resumable), 'bf16' = bf16 weights only (~6x smaller,
@@ -418,6 +420,9 @@ print(f"Planned epochs   : {tokens_per_iter * (max_iters - iter_num) / n_train_n
 
 # -----------------------------------------------------------------------------
 # training loop
+if sample_eval_rows and n_programs:
+    import sample_eval
+    sample_prompts = sample_eval.fixed_prompts(sample_eval_rows)
 batches = infinite_batches(train_loader)
 X, Y = next(batches)
 train_sums, train_n = {}, 0  # running train metrics since the last eval (with dropout + augmentation)
@@ -449,6 +454,14 @@ for iter_num in pbar:
         extra = {name: estimate_val_loss(loader) for name, loader in extra_loaders.items()}
         if cond_inst or n_density:  # the main val set again with no conditions: the model's unconditional quality
             extra['nocond'] = estimate_val_loss(val_loader, conditioned=False)
+        samples = {}
+        if sample_eval_rows and n_programs and device_type == 'cuda':
+            t_s = time.time()
+            samples = sample_eval.evaluate(raw_model, sample_prompts, sample_eval_notes)
+            tqdm.write(f"samples @{iter_num} ({time.time() - t_s:.0f} s): " + " | ".join(
+                f"{mode}: instr {m['instruments']:.1f} oob {m['out_of_band']:.0%} nps {m['notes_per_s']:.0f} "
+                f"top {m['top_share']:.0%} runaway {m['runaway']:.0%} takeover {m['takeover']:.0%}"
+                for mode, m in samples.items() if m))
         train = {k: (v / train_n).item() for k, v in train_sums.items()} if train_n else {}
         if train:
             summed_ce(train)
@@ -465,6 +478,7 @@ for iter_num in pbar:
                        **{f"val/{k}": v for k, v in val.items()},
                        **{f"val2/{k}": v for k, v in val2.items()},
                        **{f"{name}/{k}": v for name, e in extra.items() for k, v in e.items()},
+                       **{f"samples/{mode}/{k}": v for mode, m in samples.items() for k, v in m.items()},
                        **{f"train/{k}": v for k, v in train.items()}})
         train_sums, train_n = {}, 0
 

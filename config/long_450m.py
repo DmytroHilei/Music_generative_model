@@ -48,6 +48,8 @@ num_workers = 8
 
 eval_interval = 2000
 eval_iters = 50
+sample_eval_rows = 8            # at every eval also sample 8 fixed multi-instrument prompts x 1,000 notes (~1 min on
+sample_eval_notes = 1000        # the 5090) and log samples/<none|band>/<metric> (sample_eval.py)
 checkpoint_format = 'bf16'      # best-val weights for sampling; the resumable state is out_dir/ckpt.pt
 ckpt_interval_min = 30.0
 seed = 1337
