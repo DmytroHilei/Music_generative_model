@@ -67,6 +67,7 @@ def main():
                 print(f'{m.group(1):>7} {f[1]:>5} {f[2]:>6} {f[3]:>4}% {f[4]:>5} {f[5]:>4}% {f[6]:>7}% {f[7]:>8}% '
                       f'{d:>6}  {m.group(3)} s')
     trend(all_samples, ref)
+    style_table(lines)
 
 
 
@@ -124,6 +125,52 @@ def trend(all_samples, ref, k=8, se_point=0.07):
         se = max(resid, se_point ** 2) ** 0.5 / sxx ** 0.5
         verdict = ('RISING' if slope > 2 * se else 'falling' if slope < -2 * se else 'flat (not significant)')
         print(f'  {mode:5s} D {ys[0]:.2f} -> {ys[-1]:.2f}, slope {slope:+.3f} +- {se:.3f} per 10k steps: {verdict}')
+
+
+
+STYLE_LINE = re.compile(r'styles @(\d+) \((\d+) rows, (\d+) s\): (.*)')
+STYLE_PART = re.compile(r'(\w+): P ([\d.]+) \[(.*?)\] nps (\d+) top (\d+)% takeover (\d+)%')
+
+
+def style_table(lines, n=4, k=8):
+    """Per-style evaluation (style_eval.py): last n evals as a table, slope of P over the last k."""
+    evals = []
+    for line in lines:
+        m = STYLE_LINE.match(line)
+        if m:
+            parts = {p[1]: (float(p[2]), dict((a, float(b)) for a, b in re.findall(r'(\w+) ([\d.]+)', p[3])),
+                            int(p[4]), int(p[5]), int(p[6])) for p in STYLE_PART.finditer(m.group(4))}
+            evals.append((int(m.group(1)), int(m.group(3)), parts))
+        elif line.startswith('styles @'):
+            evals.append((None, line, None))
+    if not evals:
+        return
+    styles = ['rock_pop', 'orchestral', 'piano_keys', 'electronic', 'acoustic']
+    print('--- per-style distance to real songs (styles/* on wandb; 0 = like the real continuations)')
+    print(f'{"step":>7} {"mode":>5} {"all":>6} ' + ' '.join(f'{s[:9]:>9}' for s in styles) +
+          f' {"nps":>5} {"top":>5} {"takeovr":>7}  time')
+    for step, secs, parts in evals[-n:]:
+        if parts is None:
+            print('  ' + secs[:110])
+            continue
+        for mode, (p_all, per, nps, top, tk) in parts.items():
+            print(f'{step:>7} {mode:>5} {p_all:>6.2f} ' + ' '.join(f'{per.get(s, float("nan")):>9.2f}' for s in styles)
+                  + f' {nps:>5} {top:>4}% {tk:>6}%  {secs} s')
+    pts = [(step, parts) for step, _, parts in evals if parts][-k:]
+    if len(pts) < 3:
+        print(f'  P trend: need >= 3 evals (have {len(pts)})')
+        return
+    for mode in pts[-1][1]:
+        xs = [s / 1e4 for s, p in pts if mode in p]
+        ys = [p[mode][0] for s, p in pts if mode in p]
+        n_ = len(xs)
+        mx, my = sum(xs) / n_, sum(ys) / n_
+        sxx = sum((x - mx) ** 2 for x in xs)
+        slope = sum((x - mx) * (y - my) for x, y in zip(xs, ys)) / sxx
+        resid = sum((y - my - slope * (x - mx)) ** 2 for x, y in zip(xs, ys)) / max(n_ - 2, 1)
+        se = max(resid, 0.03 ** 2) ** 0.5 / sxx ** 0.5
+        verdict = 'RISING (worse)' if slope > 2 * se else 'falling (better)' if slope < -2 * se else 'flat (n.s.)'
+        print(f'  P trend {mode:5s} {ys[0]:.2f} -> {ys[-1]:.2f}, slope {slope:+.3f} +- {se:.3f} per 10k steps: {verdict}')
 
 
 if __name__ == '__main__':

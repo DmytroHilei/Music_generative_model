@@ -34,6 +34,9 @@ from data_loader import MaestroDataset
 out_dir = 'checkpoints'
 eval_interval = 20
 eval_iters = 200          # max number of val batches per evaluation (fixed windows, same every time)
+style_eval_songs = 0      # > 0: at every evaluation generate from this many fixed songs per style (5 styles) and log
+                          # per-style distances to the real continuations (style_eval.py: styles/<mode>/<style>)
+style_eval_graph = True   # CUDA-graph the one-note step of that sampling (much faster; False = eager)
 sample_eval_rows = 0      # > 0: at every evaluation also generate from this many fixed multi-instrument prompts and
 sample_eval_notes = 1000  # log sample metrics (sample_eval.py: instruments, out-of-band, density, takeover, ...)
 eval_only = False
@@ -423,6 +426,10 @@ print(f"Planned epochs   : {tokens_per_iter * (max_iters - iter_num) / n_train_n
 if sample_eval_rows and n_programs:
     import sample_eval
     sample_prompts = sample_eval.fixed_prompts(sample_eval_rows)
+if style_eval_songs and n_programs:
+    import style_eval
+    style_songs = style_eval.style_set(style_eval_songs)
+    print('Style eval: ' + ', '.join(f'{s} {len(v)}' for s, v in style_songs.items()) + ' songs')
 batches = infinite_batches(train_loader)
 X, Y = next(batches)
 train_sums, train_n = {}, 0  # running train metrics since the last eval (with dropout + augmentation)
@@ -454,6 +461,17 @@ for iter_num in pbar:
         extra = {name: estimate_val_loss(loader) for name, loader in extra_loaders.items()}
         if cond_inst or n_density:  # the main val set again with no conditions: the model's unconditional quality
             extra['nocond'] = estimate_val_loss(val_loader, conditioned=False)
+        style_res = {}  # (not 'styles': that global is the style-conditioning list the data loader reads)
+        if style_eval_songs and n_programs and device_type == 'cuda':
+            t_s = time.time()
+            try:  # never stops the run (like the sample eval below)
+                style_res = style_eval.evaluate(raw_model, style_songs, cuda_graph=style_eval_graph)
+                tqdm.write(style_eval.format_line(iter_num, sum(len(v) for v in style_songs.values()),
+                                                  time.time() - t_s, style_res))
+            except Exception as e:
+                style_res = {}
+                torch.cuda.empty_cache()
+                tqdm.write(f"styles @{iter_num}: FAILED ({type(e).__name__}: {str(e)[:200]}), training continues")
         samples = {}
         if sample_eval_rows and n_programs and device_type == 'cuda':
             t_s = time.time()
@@ -485,6 +503,7 @@ for iter_num in pbar:
                        **{f"val2/{k}": v for k, v in val2.items()},
                        **{f"{name}/{k}": v for name, e in extra.items() for k, v in e.items()},
                        **{f"samples/{mode}/{k}": v for mode, m in samples.items() for k, v in m.items()},
+                       **{f"styles/{mode}/{k}": v for mode, m in style_res.items() for k, v in m.items()},
                        **{f"train/{k}": v for k, v in train.items()}})
         train_sums, train_n = {}, 0
 

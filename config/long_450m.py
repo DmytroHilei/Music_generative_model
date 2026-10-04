@@ -48,8 +48,9 @@ num_workers = 8
 
 eval_interval = 2000
 eval_iters = 50
-sample_eval_rows = 32           # at every eval also sample 32 fixed multi-instrument prompts x 1,000 notes (~2 min on
-sample_eval_notes = 1000        # the 5090) and log samples/<none|band>/<metric> (sample_eval.py)
+sample_eval_rows = 0            # replaced by the per-style eval (2026-10-04)
+style_eval_songs = 16           # at every eval: 16 fixed songs x 5 styles x 1,000 notes, modes none/band, robust
+                                # per-style distance to the real continuations (style_eval.py), CUDA-graphed
 checkpoint_format = 'bf16'      # best-val weights for sampling; the resumable state is out_dir/ckpt.pt
 ckpt_interval_min = 30.0
 seed = 1337

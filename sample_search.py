@@ -23,6 +23,8 @@ Writes <out>/results.csv (every config x stage) and <out>/summary.md.
 
 import argparse
 import csv
+import os
+os.environ.setdefault('PYTORCH_CUDA_ALLOC_CONF', 'expandable_segments:True')
 import itertools
 import json
 import random
@@ -102,7 +104,7 @@ def name(c):
 
 
 @torch.no_grad()
-def run_config(model, c, rows, new_notes, seed, batch=32):
+def run_config(model, c, rows, new_notes, seed, batch=16):
     """Per-row metrics of one configuration on the given prompt rows (list of (kind, prompt, ...))."""
     cfg = model.config
     out = []
@@ -149,6 +151,14 @@ def summarize(per_row, real_rows, scale):
                 **{f'mean_{k}': v for k, v in avg.items()})
 
 
+def write_csv(path, results):
+    fields = list(dict.fromkeys(k for r in results for k in r))  # union: per-kind columns can differ by stage
+    with open(path, 'w', newline='') as f:
+        w = csv.DictWriter(f, fieldnames=fields)
+        w.writeheader()
+        w.writerows(results)
+
+
 def main():
     p = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     p.add_argument('--checkpoint', required=True)
@@ -182,6 +192,7 @@ def main():
     scale = {k: max(float(np.std([m[k] for m in flat], ddof=1)), SD_FLOOR[k]) for k in METRICS}
 
     configs = config_space(mcfg, args.configs)
+    default_cfg = configs[0]
     results = []
     for si, per_kind in enumerate(stages):
         rows, real_rows = [], []
@@ -196,21 +207,18 @@ def main():
             s = summarize(per_row, real_rows, scale)
             stage.append((s['paired'], c, s))
             results.append(dict(stage=si + 1, rows=len(rows), config=name(c), **c, **s))
+            write_csv(out / 'results.csv', results)  # after every evaluation: a crash loses nothing
             print(f'  stage {si + 1} ({len(rows)} songs) {ci + 1}/{len(configs)} {name(c):42s} paired {s["paired"]:.3f} '
                   f'D {s["D"]:.3f}  [{time.time() - t0:.0f} s]', flush=True)
         stage.sort(key=lambda x: x[0])
         if si < len(keep):
             kept = [c for _, c, _ in stage[:keep[si]]]
-            if configs[0] not in kept:
-                kept.append(configs[0])  # the current default stays in for comparison
+            if default_cfg not in kept:
+                kept.append(default_cfg)  # the current default stays in for comparison
             configs = kept
-    with open(out / 'results.csv', 'w', newline='') as f:
-        w = csv.DictWriter(f, fieldnames=list(results[0]))
-        w.writeheader()
-        w.writerows(results)
     final = [r for r in results if r['stage'] == len(stages)]
     final.sort(key=lambda r: r['paired'])
-    default = next(r for r in final if r['config'] == name(config_space(mcfg, 1)[0]))
+    default = next(r for r in final if r['config'] == name(default_cfg))
     lines = [f'# Generation settings search: {args.checkpoint} (iter {ck.get("iter_num")})', '',
              f'{len(results)} evaluations; final stage {final[0]["rows"]} songs ({stages[-1]} per kind: '
              f'{", ".join(KINDS)}), {args.new_notes:,} new notes each. Lower = closer to the real continuations.', '',
