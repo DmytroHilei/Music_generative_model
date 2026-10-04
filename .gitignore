@@ -29,3 +29,4 @@ cloud/.hash_cache.json
 
 # private project notes (agents.md, architecture.md, optimizations.md): local only
 context/
+results/

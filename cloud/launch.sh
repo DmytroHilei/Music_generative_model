@@ -31,8 +31,14 @@ echo $! > "$PID_FILE"
 sleep 2
 STOP_FLAG=()
 [ "${AUTO_STOP:-1}" = 1 ] && STOP_FLAG=(--auto-stop)
+POST=()
+# after a finished run: the per-style settings sweep (style_search.py), its results to <user>/<run>-results
+if [ "${POST_SWEEP:-1}" = 1 ]; then
+    POST=(--post-run ".venv/bin/python style_search.py --checkpoint $OUT/model_bf16.pt --out results/${RUN}_sweep"
+          --post-run-dir "results/${RUN}_sweep")
+fi
 setsid nohup .venv/bin/python cloud/ckpt.py loop --run "$RUN" --every-min "${SYNC_EVERY_MIN:-60}" "${STOP_FLAG[@]}" \
-    > "logs/$RUN.sync.log" 2>&1 < /dev/null &
+    "${POST[@]}" >> "logs/$RUN.sync.log" 2>&1 < /dev/null &
 echo $! > "logs/$RUN.sync.pid"
 echo "started: wrapper pid $(cat "$PID_FILE"), sync pid $(cat "logs/$RUN.sync.pid")"
 echo "watch:   cloud/status.sh $RUN      (or tail -f logs/$RUN.log)"

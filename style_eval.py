@@ -79,8 +79,9 @@ def style_of(programs):
     return None
 
 
-def style_set(per_style=16, prompt_notes=128, new_notes=1000, store=STORE, candidates=40000):
-    """{style: [dict(prompt (T,4), prompt_prog (T,), real metrics, file index)]}, deterministic."""
+def style_set(per_style=16, prompt_notes=128, new_notes=1000, store=STORE, candidates=40000, skip=0):
+    """{style: [dict(prompt (T,4), prompt_prog (T,), real metrics, file index)]}, deterministic. skip: leave out the
+    first `skip` songs of each style (skip=16 gives a held-out set next to the in-training one)."""
     offsets = np.load(f'{store}/offsets.npy')
     n = int(offsets[-1])
     tokens = np.memmap(f'{store}/tokens.u16', dtype=np.uint16, mode='r', shape=(n, 4))
@@ -92,16 +93,16 @@ def style_set(per_style=16, prompt_notes=128, new_notes=1000, store=STORE, candi
             continue
         p = np.asarray(programs[a:a + prompt_notes + new_notes], dtype=np.int64)
         s = style_of(p)
-        if s is None or len(out[s]) >= per_style:
+        if s is None or len(out[s]) >= per_style + skip:
             continue
         t = np.asarray(tokens[a:a + prompt_notes + new_notes], dtype=np.int64)
         real = row_metrics(torch.from_numpy(t[prompt_notes:, 0]), torch.from_numpy(t[prompt_notes:, 3]),
                            torch.from_numpy(p[prompt_notes:]), set(p[:prompt_notes].tolist()))
         out[s].append(dict(prompt=t[:prompt_notes], prompt_prog=p[:prompt_notes], real=real, file=int(i),
                            instruments=sorted(set(p.tolist()))))
-        if all(len(v) >= per_style for v in out.values()):
+        if all(len(v) >= per_style + skip for v in out.values()):
             break
-    return out
+    return {s: v[skip:] for s, v in out.items()}
 
 
 def tf(k, v):
@@ -119,22 +120,23 @@ def row_distance(m, real, scale):
 
 
 @torch.no_grad()
-def evaluate(model, sset, new_notes=1000, seed=1234, chunk=20, cuda_graph=True, device='cuda', settings=TRACK):
+def evaluate(model, sset, new_notes=1000, seed=1234, chunk=20, cuda_graph=True, device='cuda', settings=TRACK,
+             modes=None):
     """{mode: {'all': mean over styles, <style>: mean row distance, 'nps': .., 'top': .., ...}} for modes 'none' and
     (cond_inst models) 'band'. The model is put back into its previous train/eval mode even after an error."""
     was_training = model.training
     model.eval()
     try:
-        return _evaluate(model, sset, new_notes, seed, chunk, cuda_graph, device, settings)
+        return _evaluate(model, sset, new_notes, seed, chunk, cuda_graph, device, settings, modes)
     finally:
         model.train(was_training)
 
 
-def _evaluate(model, sset, new_notes, seed, chunk, cuda_graph, device, settings):
+def _evaluate(model, sset, new_notes, seed, chunk, cuda_graph, device, settings, modes=None):
     cfg = model.config
     rows = [(s, song) for s in STYLES for song in sset[s]]
     scales = {s: style_scales(sset[s]) for s in STYLES if sset[s]}
-    modes = ['none'] + (['band'] if cfg.cond_inst else [])
+    modes = modes or (['none'] + (['band'] if cfg.cond_inst else []))
     out = {}
     for mode in modes:
         per_style, metrics = {s: [] for s in STYLES}, []
@@ -157,7 +159,8 @@ def _evaluate(model, sset, new_notes, seed, chunk, cuda_graph, device, settings)
                                 enabled=device == 'cuda' and next(model.parameters()).dtype == torch.float32):
                 res = model.generate(*streams, max_new_tokens=new_notes, temperature=settings['temperature'],
                                      top_p=settings['top_p'], dt_bias=settings['dt_bias'], program=None,
-                                     programs=prog, return_programs=True, cond=cond, cuda_graph=cuda_graph)
+                                     programs=prog, return_programs=True, cond=cond, cuda_graph=cuda_graph,
+                                     program_temperature=settings.get('instrument_temperature'))
             n0 = streams[0].size(1)
             for r, (style, song) in enumerate(part):
                 m = row_metrics(res[0][r, n0:].cpu(), res[3][r, n0:].cpu(), res[4][r, n0:].cpu(),

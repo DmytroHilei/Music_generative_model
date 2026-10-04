@@ -155,6 +155,8 @@ def loop(args):
             pending = ckpt.exists() and ckpt.stat().st_mtime > last_pushed_mtime
             log('training wrapper has exited' + (' (DONE)' if (out / 'DONE').exists() else ' (not DONE)')
                 + (', LAST CHECKPOINT NOT ON THE HUB: run `python cloud/ckpt.py push`' if pending else ''))
+            if (out / 'DONE').exists() and not pending and args.post_run:
+                post_run(args)
             if args.auto_stop and (out / 'DONE').exists() and not pending:
                 stop_instance()
             return
@@ -162,6 +164,34 @@ def loop(args):
             if not training_alive(args.pid_file):
                 break
             time.sleep(10)
+
+
+def post_run(args):
+    """After the final push of a finished run: run --post-run (e.g. the settings sweep) with a time limit, then upload
+    its --post-run-dir to the private repo <user>/<run>-results. Failures are logged; the instance still stops after."""
+    log(f'post-run: {args.post_run} (limit {args.post_run_limit_min} min)')
+    try:
+        r = subprocess.run(args.post_run, shell=True, cwd=hub.ROOT, timeout=60 * args.post_run_limit_min)
+        log(f'post-run exited with {r.returncode}')
+    except subprocess.TimeoutExpired:
+        log('post-run hit its time limit (its results so far are still uploaded)')
+    except Exception as e:
+        log(f'post-run failed: {type(e).__name__}: {e}')
+    results = Path(args.post_run_dir)
+    if not results.exists():
+        log(f'post-run: no {results} to upload')
+        return
+    for attempt in range(3):
+        try:
+            hf = hub.api()
+            repo = f'{hub.hf_user(hf)}/{args.run}-results'
+            hf.create_repo(repo, private=True, exist_ok=True)
+            hf.upload_folder(repo_id=repo, folder_path=str(results), commit_message='post-run results')
+            log(f'post-run results uploaded to {repo}')
+            return
+        except Exception as e:
+            log(f'results upload failed ({type(e).__name__}: {e}); retry {attempt + 1}/3 in 60 s')
+            time.sleep(60)
 
 
 def stop_instance():
@@ -186,6 +216,10 @@ def main():
     p.add_argument('--every-min', type=int, default=60)
     p.add_argument('--auto-stop', action='store_true', help='loop: stop the vast.ai instance after the final push')
     p.add_argument('--force', action='store_true')
+    p.add_argument('--post-run', default=None, help='loop: shell command run after the final push of a finished run '
+                   '(before the auto-stop), e.g. the settings sweep')
+    p.add_argument('--post-run-dir', default=None, help='loop: folder uploaded to <user>/<run>-results afterwards')
+    p.add_argument('--post-run-limit-min', type=float, default=75)
     args = p.parse_args()
     args.out_dir = args.out_dir or str(hub.ROOT / 'checkpoints' / args.run)
     args.log = args.log or str(hub.ROOT / 'logs' / f'{args.run}.log')
