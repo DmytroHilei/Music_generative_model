@@ -986,7 +986,10 @@ class GPT(nn.Module):
         if device.type == 'cuda' and torch.is_autocast_enabled():
             dtype = torch.get_autocast_gpu_dtype()  # fp32 master weights under autocast: a bf16 cache is enough
         C = self.config.n_embd
-        cache = KVCache(self.config.n_layer, B, self.config.n_head, L, C // self.config.n_head, device, dtype)
+        # a sequence that fits the context never refills the cache, so it only needs prompt + new slots (less memory,
+        # and the one-note step attends over fewer slots)
+        cache = KVCache(self.config.n_layer, B, self.config.n_head, min(L, total), C // self.config.n_head, device,
+                        dtype)
 
         def prefill(n):
             """Refill the cache from the window ending at note n; returns (last hidden state, cache fill)."""
