@@ -21,6 +21,7 @@ import csv
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import numpy as np
@@ -41,6 +42,8 @@ def parse_args():
     parser.add_argument('--input', required=True, help='folder with mp3/wav files')
     parser.add_argument('--output', required=True, help='output folder (midi/, debug/, stems/, songs.csv)')
     parser.add_argument('--limit', type=int, default=None, help='only process the first N files')
+    parser.add_argument('--min-age', type=float, default=0, help='skip files modified in the last N seconds (still '
+                        'being written by a running download)')
     parser.add_argument('--device', default='cuda')
     parser.add_argument('--delete-audio', action='store_true',
                         help='delete the source audio after its MIDI is written (re-downloadable via songs.csv; saves disk)')
@@ -241,7 +244,8 @@ def main():
     args = parse_args()
     in_dir, out_root = Path(args.input), Path(args.output)
     out_root.mkdir(parents=True, exist_ok=True)
-    files = sorted(p for p in in_dir.iterdir() if p.suffix.lower() in ('.mp3', '.wav', '.flac', '.m4a'))
+    files = sorted(p for p in in_dir.iterdir() if p.suffix.lower() in ('.mp3', '.wav', '.flac', '.m4a')
+                   and time.time() - p.stat().st_mtime >= args.min_age)
     if args.limit:
         files = files[:args.limit]
 

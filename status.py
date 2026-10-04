@@ -294,6 +294,33 @@ def covers_round2_row(t):
               f'{found} covers found, {midis} transcribed, {pending} mp3 waiting')
 
 
+def reductions_round2_row(t):
+    """logs/run_gpu_worker_round2.sh: original songs of data/artists_covers_next.txt, downloaded, piano-reduced."""
+    log = tail_text(LOGS / 'fetch_songs2.log', 20_000_000)
+    if log is None:
+        return
+    songs, red = Path('/data/songs_round2'), Path('/data/finetune_round2')
+    artists = [l for l in (ROOT / 'data/artists_covers_next.txt').read_text(encoding='utf-8').splitlines()
+               if l.strip() and not l.startswith('#')]
+    started = re.findall(r'^(.+): (\d+) songs$', log, re.M)
+    found = sum(int(n) for _, n in started)
+    reduced = len(list(red.glob('*/midi/*.mid')))
+    waiting = len(list(songs.glob('*/*.mp3')))
+    fetch = subprocess.run(['pgrep', '-f', 'fetch_songs.py --mode songs --artists data/artists_covers_next.txt'],
+                           capture_output=True, text=True).stdout.split()
+    paused = bool(fetch) and subprocess.run(['ps', '-o', 'stat=', '-p', fetch[0]], capture_output=True,
+                                            text=True).stdout.strip().startswith('T')
+    worker = running('run_gpu_worker_round2.sh')
+    done = 'GPU WORKER ROUND 2 DONE' in (tail_text(LOGS / 'gpu_worker_round2.log') or '')
+    state = Text('done', style='green') if done else Text('running', style='bold yellow') if worker \
+        else Text('stopped', style='red')
+    detail = f'{found} songs found, {reduced} reduced, {waiting} mp3 waiting'
+    if paused:
+        detail += ' (download paused: reduction is catching up)'
+    t.add_row('piano reductions round 2', state, ProgressBar(total=len(artists), completed=max(0, len(started) - 1)),
+              f'{len(started)}/{len(artists)} artists', detail)
+
+
 def pipeline_table():
     t = Table(title='Data pipeline', expand=True, title_justify='left')
     for col in ('stage', 'state', 'progress', 'count', 'detail'):
@@ -354,6 +381,7 @@ def pipeline_table():
     discover_row(t)
     hf_upload_row(t)
     covers_round2_row(t)
+    reductions_round2_row(t)
     return t
 
 
