@@ -286,9 +286,14 @@ def covers_round2_row(t):
     found = sum(int(n) for _, n in started)
     midis = len(list(out.glob('*/midi/*.mid')))
     pending = len(list(out.glob('*/*.mp3')))
-    is_running = running('run_covers_round2.sh')
-    state = Text('running', style='bold yellow') if is_running else Text('done', style='green') \
-        if 'COVERS ROUND 2 DONE' in (tail_text(LOGS / 'covers_round2.log') or '') else Text('stopped', style='red')
+    # the download runs on its own; transcription moved into logs/run_gpu_worker_round2.sh
+    fetching = bool(subprocess.run(['pgrep', '-f', 'fetch_songs.py --mode covers --artists data/artists_covers_next.txt'],
+                                   capture_output=True, text=True).stdout.split())
+    is_running = fetching or running('run_gpu_worker_round2.sh')
+    done = not fetching and not pending and 'COVERS' not in log[-0:] and started and \
+        'GPU WORKER ROUND 2 DONE' in (tail_text(LOGS / 'gpu_worker_round2.log') or '')
+    state = Text('done', style='green') if done else Text('running', style='bold yellow') if is_running \
+        else Text('stopped', style='red')
     t.add_row('piano covers round 2', state, ProgressBar(total=len(artists), completed=max(0, len(started) - 1)),
               f'{len(started)}/{len(artists)} artists',
               f'{found} covers found, {midis} transcribed, {pending} mp3 waiting')
