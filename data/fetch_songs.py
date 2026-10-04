@@ -25,6 +25,7 @@ artist up with songs it doesn't have yet.
 import argparse
 import csv
 import re
+import sys
 import time
 from collections import Counter
 from pathlib import Path
@@ -61,6 +62,15 @@ COVER_WORDS = r'piano|піаніно|фортепіано|фортепиано|�
 
 
 RUSSIAN_ONLY = re.compile('[ыэъёЫЭЪЁ]')
+
+# search queries per artist name / alias, by (source, mode); status.py shows them (read with ast, no import)
+QUERY_TEMPLATES = {
+    ('youtube', 'songs'): ('{} official audio', '{} офіційне відео', '{} пісня'),
+    ('youtube', 'covers'): ('{} piano cover', '{} на піаніно', '{} piano tutorial', '{} фортепіано'),
+    # SoundCloud: artists upload their own tracks, so the bare name finds most of them
+    ('soundcloud', 'songs'): ('{}', '{} пісня'),
+    ('soundcloud', 'covers'): ('{} piano cover', '{} піаніно', '{} фортепіано'),
+}
 
 
 def parse_args():
@@ -145,11 +155,7 @@ def search(names, n, mode='songs', song_queries=(), song_n=8, source='youtube', 
     """extra: more yt-dlp options (cookies); pause: seconds between queries."""
     opts = {'quiet': True, 'extract_flat': True, 'skip_download': True, **(extra or {})}
     found = {}
-    if source == 'youtube':
-        templates = ('{} official audio', '{} офіційне відео', '{} пісня') if mode == 'songs' else \
-            ('{} piano cover', '{} на піаніно', '{} piano tutorial', '{} фортепіано')
-    else:  # SoundCloud: artists upload their own tracks, so the bare name finds most of them
-        templates = ('{}', '{} пісня') if mode == 'songs' else ('{} piano cover', '{} піаніно', '{} фортепіано')
+    templates = QUERY_TEMPLATES[source, mode]
     prefix = 'ytsearch' if source == 'youtube' else 'scsearch'
     queries = [(t.format(name), n) for name in names for t in templates] + [(q, song_n) for q in song_queries]
     with yt_dlp.YoutubeDL(opts) as ydl:
@@ -218,6 +224,7 @@ def download(item, out_dir, quality, extra=None):
 
 
 def main():
+    sys.stdout.reconfigure(line_buffering=True)  # the log is a file: status.py reads progress from it live
     args = parse_args()
     # one artist per line, aliases separated by '|': the first name is the folder / CSV name
     artists = [[n.strip() for n in line.split('|')] for line in open(args.artists, encoding='utf-8')

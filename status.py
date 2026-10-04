@@ -9,6 +9,7 @@ the running jobs.
 """
 
 import argparse
+import ast
 import csv
 import json
 import os
@@ -274,64 +275,171 @@ def hf_upload_row(t):
               f'{len(done)}/{len(sizes)} stores, {gb_done:.1f}/{gb_total:.1f} GB', detail)
 
 
+def query_templates():
+    """fetch_songs.QUERY_TEMPLATES, read from the source (status.py's venv has no yt_dlp to import it with)."""
+    tree = ast.parse((ROOT / 'data/fetch_songs.py').read_text(encoding='utf-8'))
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and getattr(node.targets[0], 'id', '') == 'QUERY_TEMPLATES':
+            return ast.literal_eval(node.value)
+    return {}
+
+
+def artist_states(log):
+    """Latest state per artist over all runs in a fetch log: 'done' or 'skipped' (search kept failing)."""
+    states, last_skipped = {}, None
+    for line in log.splitlines():
+        m = re.match(r'\s+SKIPPED (.+): search kept failing$', line)
+        if m:
+            last_skipped = m.group(1)
+            continue
+        m = re.match(r'^(.+): \d+ songs$', line)
+        if m:
+            states[m.group(1)] = 'skipped' if m.group(1) == last_skipped else 'done'
+            last_skipped = None
+    return states
+
+
+def fetch_info(output_dir, log_path):
+    """A round-2 fetch_songs.py run writing to output_dir: its settings (from the command line), the current run's
+    progress (the log part after the last '=====' line), the songs downloaded so far (songs.csv) and an ETA."""
+    log = (tail_text(log_path, 30_000_000) or '')
+    procs = [l.split(None, 1) for l in subprocess.run(['pgrep', '-af', 'data/fetch_songs.py'], capture_output=True,
+                                                      text=True).stdout.splitlines()
+             if f'--output {output_dir}' in l and 'pgrep' not in l]
+    info = {'running': bool(procs), 'paused': False, 'log': log}
+    sep = list(re.finditer(r'^===== (\d{4}-\d\d-\d\d \d\d:\d\d:\d\d)[^\n]*$', log, re.M))
+    run = log[sep[-1].end():] if sep else log
+    run_start = time.mktime(time.strptime(sep[-1].group(1), '%Y-%m-%d %H:%M:%S')) if sep else None
+    args = {}
+    if procs:
+        pid, cmd = procs[0]
+        args = dict(re.findall(r'--([\w-]+)(?:\s+(?!--)(\S+))?', cmd))
+        info['paused'] = subprocess.run(['ps', '-o', 'stat=', '-p', pid], capture_output=True,
+                                        text=True).stdout.strip().startswith('T')
+        if run_start is None:
+            run_start = time.time() - int(subprocess.run(['ps', '-o', 'etimes=', '-p', pid], capture_output=True,
+                                                         text=True).stdout or 0)
+    source, mode = args.get('source') or 'youtube', args.get('mode') or 'songs'
+    info.update(source=source, mode=mode, cookies='cookies-from-browser' in args,
+                search_size=args.get('search-size') or '80', sleep=float(args.get('sleep') or 3),
+                search_sleep=float(args.get('search-sleep') or 0), templates=query_templates().get((source, mode), ()))
+    names = []
+    if args.get('artists') and (ROOT / args['artists']).exists():
+        names = [l for l in (ROOT / args['artists']).read_text(encoding='utf-8').splitlines()
+                 if l.strip() and not l.startswith('#')]
+    info['aliases'] = sum(len(l.split('|')) for l in names) / len(names) if names else 0
+    started = re.findall(r'^(.+): \d+ songs$', run, re.M)
+    info['current'] = started[-1] if procs and started else None
+    done = max(0, len(started) - (1 if procs else 0))
+    info.update(run_total=len(names), run_done=done, run_left=max(0, len(names) - done),
+                n403=run.count('HTTP Error 403'), skipped=run.count('SKIPPED'), aborted='ABORTED' in run)
+    info['eta'] = None
+    if procs and run_start and done:
+        per_artist = (time.time() - run_start) / done
+        info.update(per_artist=per_artist, eta=info['run_left'] * per_artist)
+    csv_path = Path(output_dir) / 'songs.csv'
+    info['downloaded'] = max(0, sum(1 for _ in open(csv_path, encoding='utf-8')) - 1) if csv_path.exists() else 0
+    run_rows = run.count('[get ]') - run.count('FAILED')  # '[get ]' can follow yt-dlp's progress on a line
+    info['per_artist_songs'] = run_rows / done if done else None
+    return info
+
+
+def eta_text(secs):
+    return f'~{secs / 3600:.1f} h left (≈ {time.strftime("%a %H:%M", time.localtime(time.time() + secs))})'
+
+
+def fetch_lines(info):
+    """Two detail lines for a round-2 download: where it is and what it searches."""
+    src = info['source'] + (' + browser cookies' if info['cookies'] else '')
+    if info['running']:
+        now = 'PAUSED (reduction catching up)' if info['paused'] else f"now: {info['current'] or 'searching'}"
+        line1 = f"{src} · {now} · this run {info['run_done']}/{info['run_total']} artists, {info['run_left']} left"
+        if info['eta'] is not None:
+            line1 += f" · {info['per_artist'] / 60:.1f} min/artist, {eta_text(info['eta'])}"
+    else:
+        line1 = f'{src} · not running' + (' · last run ABORTED (search blocked)' if info['aborted'] else '')
+    queries = ', '.join(f'"{t.format("<artist>")}"' for t in info['templates'])
+    line2 = (f"queries ×{info['aliases']:.1f} names/artist: {queries} · {info['search_size']} results each, "
+             f"{info['search_sleep']:g} s between searches, {info['sleep']:g} s between downloads") \
+        if info['running'] else ''
+    return line1, line2
+
+
+def round2_artists():
+    return [l for l in (ROOT / 'data/artists_covers_next.txt').read_text(encoding='utf-8').splitlines()
+            if l.strip() and not l.startswith('#')]
+
+
+def run_state(info, busy, pending):
+    if info['running'] or busy:
+        return Text('running', style='bold yellow')
+    if pending or info['run_left'] or info['aborted']:
+        return Text('stopped', style='red')
+    return Text('done', style='green')
+
+
 def covers_round2_row(t):
-    """logs/run_covers_round2.sh: piano covers of data/artists_covers_next.txt, searched, downloaded, transcribed."""
-    log = tail_text(LOGS / 'fetch_covers2.log', 20_000_000)
-    if log is None:
+    """Piano covers of data/artists_covers_next.txt: download (fetch_covers2.log, appended re-runs), transcribed by
+    logs/run_gpu_worker_round2.sh."""
+    if not (LOGS / 'fetch_covers2.log').exists():
         return
     out = Path('/data/covers_round2')
-    artists = [l for l in (ROOT / 'data/artists_covers_next.txt').read_text(encoding='utf-8').splitlines()
-               if l.strip() and not l.startswith('#')]
-    # appended re-runs (skipped artists, another source) list an artist again: count it once
-    started = list(dict.fromkeys(a for a, _ in re.findall(r'^(.+): (\d+) songs$', log, re.M)))
-    found = sum(int(n) for _, n in re.findall(r'^(.+): (\d+) songs$', log, re.M))
+    info = fetch_info(str(out), LOGS / 'fetch_covers2.log')
+    states = artist_states(info['log'])
+    total = len(round2_artists())
+    handled = sum(1 for v in states.values() if v == 'done') - (1 if info['running'] else 0)
+    redo = sum(1 for v in states.values() if v == 'skipped')
     midis = len(list(out.glob('*/midi/*.mid')))
     pending = len(list(out.glob('*/*.mp3')))
-    # the download runs on its own; transcription moved into logs/run_gpu_worker_round2.sh
-    fetching = bool(subprocess.run(['pgrep', '-f', 'fetch_songs.py.*--mode covers.*--output /data/covers_round2'],
-                                   capture_output=True, text=True).stdout.split())
-    is_running = fetching or running('run_gpu_worker_round2.sh')
-    done = not fetching and not pending and 'COVERS' not in log[-0:] and started and \
-        'GPU WORKER ROUND 2 DONE' in (tail_text(LOGS / 'gpu_worker_round2.log') or '')
-    state = Text('done', style='green') if done else Text('running', style='bold yellow') if is_running \
-        else Text('stopped', style='red')
-    t.add_row('piano covers round 2', state, ProgressBar(total=len(artists), completed=max(0, len(started) - 1)),
-              f'{len(started)}/{len(artists)} artists',
-              f'{found} covers found, {midis} transcribed, {pending} mp3 waiting')
+    line1, line2 = fetch_lines(info)
+    line3 = (f"{info['downloaded']} covers downloaded, {midis} transcribed, {pending} mp3 waiting · this run: "
+             f"{info['n403']} × 403, {info['skipped']} artists skipped" + (f' · {redo} skipped to redo' if redo else ''))
+    t.add_row('piano covers round 2', run_state(info, False, pending), ProgressBar(total=total, completed=handled),
+              f'{handled}/{total} artists', '\n'.join(l for l in (line1, line2, line3) if l))
 
 
-def reductions_round2_row(t):
-    """logs/run_gpu_worker_round2.sh: original songs of data/artists_covers_next.txt, downloaded, piano-reduced."""
-    log = tail_text(LOGS / 'fetch_songs2.log', 20_000_000)
-    if log is None:
+def songs_round2_rows(t):
+    """Original songs of data/artists_covers_next.txt: download (fetch_songs2.log, appended re-runs) and piano
+    reduction by logs/run_gpu_worker_round2.sh."""
+    if not (LOGS / 'fetch_songs2.log').exists():
         return
     songs, red = Path('/data/songs_round2'), Path('/data/finetune_round2')
-    artists = [l for l in (ROOT / 'data/artists_covers_next.txt').read_text(encoding='utf-8').splitlines()
-               if l.strip() and not l.startswith('#')]
-    # appended re-runs (skipped artists, another source) list an artist again: count it once
-    started = list(dict.fromkeys(a for a, _ in re.findall(r'^(.+): (\d+) songs$', log, re.M)))
-    found = sum(int(n) for _, n in re.findall(r'^(.+): (\d+) songs$', log, re.M))
-    reduced = len(list(red.glob('*/midi/*.mid')))
+    info = fetch_info(str(songs), LOGS / 'fetch_songs2.log')
+    states = artist_states(info['log'])
+    total = len(round2_artists())
+    handled = sum(1 for v in states.values() if v == 'done') - (1 if info['running'] else 0)
+    redo = sum(1 for v in states.values() if v == 'skipped')
     waiting = len(list(songs.glob('*/*.mp3')))
-    fetch = subprocess.run(['pgrep', '-f', 'fetch_songs.py.*--mode songs.*--output /data/songs_round2'],
-                           capture_output=True, text=True).stdout.split()
-    paused = bool(fetch) and subprocess.run(['ps', '-o', 'stat=', '-p', fetch[0]], capture_output=True,
-                                            text=True).stdout.strip().startswith('T')
+    line1, line2 = fetch_lines(info)
+    line3 = (f"{info['downloaded']} songs downloaded" +
+             (f", {info['per_artist_songs']:.0f}/artist this run" if info['per_artist_songs'] else '') +
+             f" · this run: {info['n403']} × 403, {info['skipped']} artists skipped" +
+             (f' · {redo} skipped to redo' if redo else ''))
+    t.add_row('songs round 2: download', run_state(info, False, 0), ProgressBar(total=total, completed=handled),
+              f'{handled}/{total} artists', '\n'.join(l for l in (line1, line2, line3) if l))
+
+    reduced = [p.stat().st_mtime for p in red.glob('*/midi/*.mid')]
     worker = running('run_gpu_worker_round2.sh')
-    done = 'GPU WORKER ROUND 2 DONE' in (tail_text(LOGS / 'gpu_worker_round2.log') or '')
-    state = Text('done', style='green') if done else Text('running', style='bold yellow') if worker \
-        else Text('stopped', style='red')
-    detail = f'{found} songs found, {reduced} reduced, {waiting} mp3 waiting'
-    if paused:
-        detail += ' (download paused: reduction is catching up)'
-    t.add_row('piano reductions round 2', state, ProgressBar(total=len(artists), completed=max(0, len(started) - 1)),
-              f'{len(started)}/{len(artists)} artists', detail)
+    recent = [m for m in reduced if time.time() - m < 3600]
+    detail = f'{waiting} mp3 waiting'
+    if worker and len(recent) >= 2:
+        per_song = (max(recent) - min(recent)) / (len(recent) - 1)
+        detail = f'{3600 / per_song:.0f} songs/h over the last hour · ' + detail
+        # still to come: the songs waiting + the remaining artists at this run's songs per artist
+        to_come = waiting + (info['run_left'] * info['per_artist_songs'] if info['per_artist_songs'] else 0)
+        eta = max(info['eta'] or 0, to_come * per_song)
+        detail += f' · ~{to_come:.0f} songs still to reduce, {eta_text(eta)}'
+    state = Text('running', style='bold yellow') if worker else \
+        Text('done', style='green') if not waiting and not info['running'] else Text('stopped', style='red')
+    t.add_row('songs round 2: piano reduction', state,
+              ProgressBar(total=max(1, info['downloaded']), completed=len(reduced)),
+              f'{len(reduced)}/{info["downloaded"]} songs', detail)
 
 
 def pipeline_table():
     t = Table(title='Data pipeline', expand=True, title_justify='left')
     for col in ('stage', 'state', 'progress', 'count', 'detail'):
-        t.add_column(col, ratio=2 if col == 'progress' else None)
+        t.add_column(col, width=24 if col == 'progress' else None, ratio=1 if col == 'detail' else None)
 
     # download
     songs_csv = ROOT / 'data/audio/songs.csv'
@@ -341,10 +449,10 @@ def pipeline_table():
             per_artist = Counter(row['artist'] for row in csv.DictReader(f))
     artists = [line.split('|')[0].strip() for line in open(ROOT / 'data/artists.txt', encoding='utf-8')
                if line.strip() and not line.startswith('#')]
-    # round 1 only: the round-2 downloads (data/artists_covers_next.txt) have their own rows
+    # round 1 only (data/audio): the round-2 downloads write to /data/... and have their own rows
     round1 = [l.split(None, 1) for l in subprocess.run(['pgrep', '-af', 'data/fetch_songs.py'], capture_output=True,
                                                          text=True).stdout.splitlines()
-              if 'artists_covers_next' not in l and 'pgrep' not in l]
+              if '--output /data/' not in l and 'pgrep' not in l]
     fetch_running = bool(round1)
     # the fetch log prints "<artist>: N songs" when it starts an artist, so the artists before the last one are done
     fetch_log = next((LOGS / n for n in ('fetch2.log', 'fetch.log') if (LOGS / n).exists()), None)
@@ -363,12 +471,13 @@ def pipeline_table():
     else:
         done_artists = sum(1 for a in artists if per_artist.get(a, 0) > 0)
         missing = [a for a in artists if not per_artist.get(a, 0)]
-        detail = f"{done_artists}/{len(artists)} artists" + (f"; none for: {', '.join(missing[:4])}" if missing else '')
-    dl_state = Text('running', style='bold yellow') if fetch_running else Text('idle', style='dim')
+        detail = f"{done_artists}/{len(artists)} artists of data/artists.txt (YouTube)" + \
+            (f"; none for: {', '.join(missing[:4])}" if missing else '')
+    dl_state = Text('running', style='bold yellow') if fetch_running else Text('done', style='green')
     # this run's new downloads: "[get ]" lines in its log minus the failed ones
     new = log_text.count('[get ]') - log_text.count('FAILED')
-    t.add_row('download', dl_state, ProgressBar(total=len(artists), completed=done_artists),
-              f'{sum(per_artist.values())} songs (+{new} new)', detail)
+    t.add_row('songs round 1: download', dl_state, ProgressBar(total=len(artists), completed=done_artists),
+              f'{sum(per_artist.values())} songs ({new} in the last run)', detail)
 
     # reduction: pending = audio without its MIDI yet (with --delete-audio, reduced songs' mp3s are gone)
     audio = [(p, ROOT / 'data/finetune' / p.parent.name / 'midi' / f'{p.stem}.mid')
@@ -377,7 +486,7 @@ def pipeline_table():
     pending = sum(1 for _, midi in audio if not midi.exists())
     reduced = [p for p in (ROOT / 'data/finetune').glob('*/midi/*.mid') if p.parts[-3] != 'skryabin_test']
     red_running = running('run_reduce.sh') or running('run_fetch_reduce2.sh')
-    red_state = Text('running', style='bold yellow') if red_running else Text('idle', style='dim')
+    red_state = Text('running', style='bold yellow') if red_running else Text('done', style='green')
     rate = ''
     recent = [p.stat().st_mtime for p in reduced if time.time() - p.stat().st_mtime < 900]
     if len(recent) >= 2:
@@ -387,13 +496,13 @@ def pipeline_table():
         rate = f'{pending} downloaded songs waiting'
     # reduce2.log also receives the round-2 reductions (appended): count round 1 only, up to its DONE line
     failed = sum((tail_text(LOGS / n) or '').split('REDUCTION DONE')[0].count('FAILED') for n in ('reduce.log', 'reduce2.log'))
-    t.add_row('piano reduction', red_state, ProgressBar(total=max(1, len(reduced) + pending), completed=len(reduced)),
+    t.add_row('songs round 1: piano reduction', red_state, ProgressBar(total=max(1, len(reduced) + pending), completed=len(reduced)),
               f'{len(reduced)}/{len(reduced) + pending}', rate + (f'; {failed} failed' if failed else ''))
     gigamidi_row(t)
     discover_row(t)
     hf_upload_row(t)
     covers_round2_row(t)
-    reductions_round2_row(t)
+    songs_round2_rows(t)
     return t
 
 
