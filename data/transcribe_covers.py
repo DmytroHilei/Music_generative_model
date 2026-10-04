@@ -27,12 +27,14 @@ def parse_args():
     ap.add_argument('--output', default='data/covers', help='-> <output>/<artist>/midi/*.mid')
     ap.add_argument('--device', default='cuda' if torch.cuda.is_available() else 'cpu')
     ap.add_argument('--delete-audio', action='store_true', help='delete each mp3 once its MIDI is written')
+    ap.add_argument('--min-age', type=float, default=0, help='skip mp3s modified in the last N seconds (still being '
+                    'written by a running download)')
     return ap.parse_args()
 
 
 def main():
     args = parse_args()
-    files = sorted(p for p in Path(args.input).glob('*/*.mp3'))
+    files = sorted(p for p in Path(args.input).glob('*/*.mp3') if time.time() - p.stat().st_mtime >= args.min_age)
     print(f'{len(files)} mp3 files')
     model = PianoTranscription(device=torch.device(args.device), checkpoint_path=None)
     stats_path = Path(args.output) / 'transcribed.csv'
