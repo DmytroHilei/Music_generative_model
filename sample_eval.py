@@ -91,6 +91,13 @@ def evaluate(model, prompts, new_notes=1000, temperature=0.9, seed=1234, device=
             modes['band'] = (inst, none[1])
     was_training = model.training
     model.eval()
+    try:
+        return _sample_modes(model, cfg, streams, programs, tokens, modes, new_notes, temperature, seed, device)
+    finally:
+        model.train(was_training)  # also after a failure: training must continue in train mode
+
+
+def _sample_modes(model, cfg, streams, programs, tokens, modes, new_notes, temperature, seed, device):
     out = {}
     for mode, cond in modes.items():
         torch.manual_seed(seed)
@@ -103,7 +110,6 @@ def evaluate(model, prompts, new_notes=1000, temperature=0.9, seed=1234, device=
                             set(programs[r].tolist())) for r in range(len(tokens))]
         rows = [r for r in rows if r]
         out[mode] = {k: float(np.mean([r[k] for r in rows])) for k in rows[0]} if rows else {}
-    model.train(was_training)
     return out
 
 
