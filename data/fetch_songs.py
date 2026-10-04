@@ -73,6 +73,10 @@ def parse_args():
     parser.add_argument('--max-sec', type=int, default=480)
     parser.add_argument('--quality', default='192', help='mp3 kbps (128 is enough for Demucs + basic-pitch)')
     parser.add_argument('--sleep', type=float, default=3.0, help='seconds between downloads (be polite)')
+    parser.add_argument('--search-sleep', type=float, default=0.0, help='seconds between search queries')
+    parser.add_argument('--cookies-from-browser', default=None, metavar='BROWSER[:PROFILE]',
+                        help="send a logged-in browser's cookies (gets past YouTube's bot block on searches), e.g. "
+                             "firefox:~/snap/firefox/common/.mozilla/firefox/<id>.default for snap Firefox")
     parser.add_argument('--dry-run', action='store_true')
     parser.add_argument('--mode', choices=['songs', 'covers'], default='songs')
     parser.add_argument('--source', choices=['youtube', 'soundcloud'], default='youtube')
@@ -122,12 +126,13 @@ def song_title(video_title, names, covers=False, known=()):
     return rest or None
 
 
-def search_with_retry(names, n, mode='songs', song_queries=(), song_n=8, source='youtube', attempts=4):
+def search_with_retry(names, n, mode='songs', song_queries=(), song_n=8, source='youtube', extra=None, pause=0.0,
+                      attempts=4):
     """Network hiccups (DNS, timeouts) shouldn't kill a multi-hour run: retry with backoff, then skip the artist
     (returns None)."""
     for attempt in range(attempts):
         try:
-            return search(names, n, mode, song_queries, song_n, source)
+            return search(names, n, mode, song_queries, song_n, source, extra, pause)
         except Exception as e:
             wait = 30 * 2 ** attempt
             print(f'  search failed ({type(e).__name__}), retry {attempt + 1}/{attempts} in {wait}s')
@@ -136,8 +141,9 @@ def search_with_retry(names, n, mode='songs', song_queries=(), song_n=8, source=
     return None
 
 
-def search(names, n, mode='songs', song_queries=(), song_n=8, source='youtube'):
-    opts = {'quiet': True, 'extract_flat': True, 'skip_download': True}
+def search(names, n, mode='songs', song_queries=(), song_n=8, source='youtube', extra=None, pause=0.0):
+    """extra: more yt-dlp options (cookies); pause: seconds between queries."""
+    opts = {'quiet': True, 'extract_flat': True, 'skip_download': True, **(extra or {})}
     found = {}
     if source == 'youtube':
         templates = ('{} official audio', '{} офіційне відео', '{} пісня') if mode == 'songs' else \
@@ -149,6 +155,7 @@ def search(names, n, mode='songs', song_queries=(), song_n=8, source='youtube'):
     with yt_dlp.YoutubeDL(opts) as ydl:
         for query, k in queries:
             info = ydl.extract_info(f'{prefix}{k}:{query}', download=False)
+            time.sleep(pause)
             for e in info.get('entries') or []:
                 if e and e.get('id'):
                     found.setdefault(e['id'], e)
@@ -197,8 +204,9 @@ def select(entries, names, args, known=(), have=None):
     return chosen
 
 
-def download(item, out_dir, quality):
+def download(item, out_dir, quality, extra=None):
     opts = {
+        **(extra or {}),
         'quiet': True,
         'format': 'bestaudio/best',
         'outtmpl': str(out_dir / '%(title)s [%(id)s].%(ext)s'),
@@ -214,6 +222,10 @@ def main():
     # one artist per line, aliases separated by '|': the first name is the folder / CSV name
     artists = [[n.strip() for n in line.split('|')] for line in open(args.artists, encoding='utf-8')
                if line.strip() and not line.startswith('#')]
+    extra = {}
+    if args.cookies_from_browser:
+        browser, _, profile = args.cookies_from_browser.partition(':')
+        extra['cookiesfrombrowser'] = (browser, str(Path(profile).expanduser()) if profile else None, None, None)
     out_root = Path(args.output)
     out_root.mkdir(parents=True, exist_ok=True)
     csv_path = out_root / 'songs.csv'
@@ -242,7 +254,7 @@ def main():
             song_queries = [f'{artist} {t} піаніно' for t in sorted(raw_titles.get(artist, ()))] \
                 if args.mode == 'covers' and args.per_song_queries else []
             entries = search_with_retry(names, args.search_size, args.mode, song_queries, args.song_search_size,
-                                        args.source)
+                                        args.source, extra, args.search_sleep)
             skips = skips + 1 if entries is None else 0
             if skips >= args.max_skips:
                 print(f'\nABORTED at {artist}: {skips} artists in a row failed to search (blocked?)')
@@ -255,7 +267,7 @@ def main():
                 if args.dry_run or item['id'] in done:
                     continue
                 try:
-                    download(item, out_root / artist, args.quality)
+                    download(item, out_root / artist, args.quality, extra)
                 except Exception as e:
                     print(f'    FAILED: {e!r}')
                     continue
