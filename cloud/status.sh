@@ -38,6 +38,8 @@ if m:
 EOF
     echo "--- last evals"
     tr '\r' '\n' < "logs/$RUN.log" 2>/dev/null | grep -E "^step [0-9]+:" | tail -4
+    echo "--- sample metrics (samples/* on wandb)"
+    tr '\r' '\n' < "logs/$RUN.log" 2>/dev/null | grep -E "^samples @" | tail -2
     echo "--- wrapper / errors"
     grep -E "^\[wrapper\]" "logs/$RUN.log" 2>/dev/null | tail -3
     tr '\r' '\n' < "logs/$RUN.log" 2>/dev/null | grep -E "Traceback|Error|CUDA OOM" | tail -3
