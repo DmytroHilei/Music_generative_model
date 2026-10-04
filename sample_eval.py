@@ -7,7 +7,8 @@ command for any checkpoint:
 
 Prompts: the same rows every time (the first files of the clean GigaMIDI val store with >= min_instruments
 instruments and >= prompt_notes notes, at evenly spaced indices), the same seed, so changes reflect the model.
-Modes: 'none' (no conditioning) and, for models trained with cond_inst, 'band' (instrument set of the prompt).
+Modes: 'none' (no conditioning), for models trained with cond_inst 'band' (instrument set of the prompt), and with
+n_density too 'band_dens' (band + the prompt's density level: the way the model would be used).
 
 Per row, then averaged: instruments (distinct programs in the new notes), out_of_band (share of new notes on
 instruments the prompt doesn't use), notes_per_s, top_share (share of the most used instrument), runaway (notes/s
@@ -129,9 +130,11 @@ def evaluate(model, prompts, new_notes=1000, temperature=0.9, seed=1234, device=
         none = (torch.zeros(len(tokens), cfg.n_programs, device=device),
                 torch.zeros(len(tokens), dtype=torch.long, device=device))
         modes = {'none': none}
+        inst, dens = window_conditions(streams[0], streams[3], programs, cfg.n_programs, cfg.n_density or 16)
         if cfg.cond_inst:
-            inst, _ = window_conditions(streams[0], streams[3], programs, cfg.n_programs, cfg.n_density or 16)
             modes['band'] = (inst, none[1])
+        if cfg.cond_inst and cfg.n_density:  # band + the prompt's own density level: how it would be used
+            modes['band_dens'] = (inst, dens)
     was_training = model.training
     model.eval()
     try:
