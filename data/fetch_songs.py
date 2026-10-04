@@ -54,6 +54,9 @@ COVER_WORDS = r'piano|піаніно|фортепіано|фортепиано|�
               r'arrangement|аранжування|solo|безкоштовні|free|and|the'
 
 
+RUSSIAN_ONLY = re.compile('[ыэъёЫЭЪЁ]')
+
+
 def parse_args():
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser.add_argument('--artists', default='data/artists.txt')
@@ -66,6 +69,9 @@ def parse_args():
     parser.add_argument('--sleep', type=float, default=3.0, help='seconds between downloads (be polite)')
     parser.add_argument('--dry-run', action='store_true')
     parser.add_argument('--mode', choices=['songs', 'covers'], default='songs')
+    parser.add_argument('--ukrainian-only', action='store_true',
+                        help="skip videos whose title has Russian-only letters (ы э ъ ё): keeps Ukrainian-language songs "
+                             "of artists who also sing in Russian; titles without telling letters pass")
     parser.add_argument('--songs-csv', default='data/audio/songs.csv', help='covers mode: known song titles')
     parser.add_argument('--per-song-queries', action='store_true',
                         help="covers mode: also one search per known song ('<artist> <song> піаніно', --song-search-size "
@@ -149,6 +155,8 @@ def select(entries, names, args, known=()):
                 bare = bare.replace(n.lower(), ' ')
             if not any(w in bare for w in PIANO_WORDS) or not COVER_CUES.search(bare):
                 continue
+        if args.ukrainian_only and RUSSIAN_ONLY.search(title):
+            continue
         if any(w in low for w in (COVER_BAD_WORDS if covers else BAD_WORDS)):
             continue
         song = song_title(title, names, covers, known)
