@@ -69,7 +69,24 @@ def reference(n_rows=8, prompt_notes=128, min_instruments=3, new_notes=1000, sto
             rows.append(r)
         if len(rows) == n_rows:
             break
-    return {k: float(np.mean([r[k] for r in rows])) for k in rows[0]}
+    out = {k: float(np.mean([r[k] for r in rows])) for k in rows[0]}
+    out['sd'] = {k: float(np.std([r[k] for r in rows], ddof=1)) for k in rows[0]}
+    return out
+
+
+# Distance to real music: D = sum_i w_i * |model_i - real_i| / s_i, s_i = the spread (sd) of metric i across the
+# real continuations, floored so a metric that real songs never show (takeover) can't divide by ~0. Units: "real
+# song-to-song spreads"; 0 = like real music, < ~0.3 close. Weights favour the audible failures seen so far.
+DIST_WEIGHTS = {'takeover': 0.20, 'top_share': 0.20, 'notes_per_s': 0.20, 'out_of_band': 0.15, 'instruments': 0.15,
+                'runaway': 0.10}
+SD_FLOOR = {'takeover': 0.22, 'runaway': 0.22, 'top_share': 0.05, 'out_of_band': 0.05, 'notes_per_s': 5.0,
+            'instruments': 1.0}  # binary rates: the per-row sd of a 5% rate
+
+
+def distance(metrics, ref):
+    """D for one mode's metrics against the reference dict (needs ref['sd'])."""
+    sd = ref.get('sd', {})
+    return float(sum(w * abs(metrics[k] - ref[k]) / max(sd.get(k, 0.0), SD_FLOOR[k]) for k, w in DIST_WEIGHTS.items()))
 
 
 def row_metrics(pitch, dt, prog, prompt_prog, dt_seconds=0.02):
@@ -136,7 +153,21 @@ def _sample_modes(model, cfg, streams, programs, tokens, modes, new_notes, tempe
                             set(programs[r].tolist())) for r in range(len(tokens))]
         rows = [r for r in rows if r]
         out[mode] = {k: float(np.mean([r[k] for r in rows])) for k in rows[0]} if rows else {}
+    ref = _load_reference()
+    for mode, m in out.items():
+        if m and ref and len(tokens) == ref.get('rows'):  # same prompt set as the reference
+            m['distance'] = distance(m, ref)
     return out
+
+
+def _load_reference():
+    import json
+    import os
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'cloud', 'sample_reference.json')
+    try:
+        return json.loads(open(path).read())
+    except (OSError, ValueError):
+        return None
 
 
 def main():
