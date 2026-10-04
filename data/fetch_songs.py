@@ -16,12 +16,17 @@ Then:
 data/transcribe_covers.py rather than reduced): the title must name the artist and a piano word, other instruments and
 vocal covers are skipped, and a song may come from up to --per-song different videos (different pianists).
     .venv-audio/bin/python data/fetch_songs.py --mode covers --per-artist 60 --dry-run
+
+--source soundcloud searches SoundCloud instead (same filters; a track whose title lacks the artist counts when the
+uploader is the artist). Songs already in songs.csv count towards --per-artist, so a second source only tops an
+artist up with songs it doesn't have yet.
 """
 
 import argparse
 import csv
 import re
 import time
+from collections import Counter
 from pathlib import Path
 
 import yt_dlp
@@ -31,7 +36,8 @@ BAD_WORDS = [
     'кавер', 'karaoke', 'караоке', 'мінус', 'минус', 'instrumental', 'reaction', 'реакція', 'tutorial', 'урок',
     'на гітарі', 'акорди', 'chords', 'remix', 'ремікс', 'teaser', 'тизер', 'backstage', 'making of', 'фестиваль',
     'fest', 'unplugged', 'акустика', 'acoustic', 'x factor', 'голос країни', 'shorts', 'trailer', 'трейлер',
-    'розбір', 'playlist', 'mix', 'mashup', 'хіти', 'hits', 'змінювались', 'lyrics video збірка', 'найкращі пісні', 'best songs', 'всі пісні',
+    'розбір', 'наживо', 'акапел', 'a cappella', 'acapella', 'a capella', 'type beat', 'slowed', 'reverb', 'sped up',
+    'nightcore', '8d audio', 'bass boosted', 'playlist', 'mix', 'mashup', 'хіти', 'hits', 'змінювались', 'lyrics video збірка', 'найкращі пісні', 'best songs', 'всі пісні',
 ]
 
 
@@ -69,6 +75,10 @@ def parse_args():
     parser.add_argument('--sleep', type=float, default=3.0, help='seconds between downloads (be polite)')
     parser.add_argument('--dry-run', action='store_true')
     parser.add_argument('--mode', choices=['songs', 'covers'], default='songs')
+    parser.add_argument('--source', choices=['youtube', 'soundcloud'], default='youtube')
+    parser.add_argument('--max-skips', type=int, default=3,
+                        help='stop the run after this many artists in a row whose search kept failing (a block, '
+                             'not a hiccup): the rest of the list stays untouched for a later re-run')
     parser.add_argument('--ukrainian-only', action='store_true',
                         help="skip videos whose title has Russian-only letters (ы э ъ ё): keeps Ukrainian-language songs "
                              "of artists who also sing in Russian; titles without telling letters pass")
@@ -84,9 +94,10 @@ def parse_args():
 def normalize(text):
     text = text.lower()
     text = re.sub(r'[\(\[].*?[\)\]]', ' ', text)  # (official video), [HD], ...
+    text = re.sub(r'\.(mp3|m4a|wav|flac|ogg)\b', ' ', text)  # SoundCloud uploads named after the file
     text = re.sub(r'official|офіційн\w*|video|відео|audio|аудіо|кліп|clip|lyric\w*|hd|4k|премʼєра|прем\'єра|премьера',
                   ' ', text)
-    text = re.sub(r'[^\w\s]', ' ', text)
+    text = re.sub(r'[^\w\s]|_', ' ', text)
     return re.sub(r'\s+', ' ', text).strip()
 
 
@@ -111,39 +122,51 @@ def song_title(video_title, names, covers=False, known=()):
     return rest or None
 
 
-def search_with_retry(names, n, mode='songs', song_queries=(), song_n=8, attempts=4):
-    """Network hiccups (DNS, timeouts) shouldn't kill a multi-hour run: retry with backoff, then skip the artist."""
+def search_with_retry(names, n, mode='songs', song_queries=(), song_n=8, source='youtube', attempts=4):
+    """Network hiccups (DNS, timeouts) shouldn't kill a multi-hour run: retry with backoff, then skip the artist
+    (returns None)."""
     for attempt in range(attempts):
         try:
-            return search(names, n, mode, song_queries, song_n)
+            return search(names, n, mode, song_queries, song_n, source)
         except Exception as e:
             wait = 30 * 2 ** attempt
             print(f'  search failed ({type(e).__name__}), retry {attempt + 1}/{attempts} in {wait}s')
             time.sleep(wait)
     print(f'  SKIPPED {names[0]}: search kept failing')
-    return []
+    return None
 
 
-def search(names, n, mode='songs', song_queries=(), song_n=8):
+def search(names, n, mode='songs', song_queries=(), song_n=8, source='youtube'):
     opts = {'quiet': True, 'extract_flat': True, 'skip_download': True}
     found = {}
-    templates = ('{} official audio', '{} офіційне відео', '{} пісня') if mode == 'songs' else \
-        ('{} piano cover', '{} на піаніно', '{} piano tutorial', '{} фортепіано')
+    if source == 'youtube':
+        templates = ('{} official audio', '{} офіційне відео', '{} пісня') if mode == 'songs' else \
+            ('{} piano cover', '{} на піаніно', '{} piano tutorial', '{} фортепіано')
+    else:  # SoundCloud: artists upload their own tracks, so the bare name finds most of them
+        templates = ('{}', '{} пісня') if mode == 'songs' else ('{} piano cover', '{} піаніно', '{} фортепіано')
+    prefix = 'ytsearch' if source == 'youtube' else 'scsearch'
     queries = [(t.format(name), n) for name in names for t in templates] + [(q, song_n) for q in song_queries]
     with yt_dlp.YoutubeDL(opts) as ydl:
         for query, k in queries:
-            info = ydl.extract_info(f'ytsearch{k}:{query}', download=False)
+            info = ydl.extract_info(f'{prefix}{k}:{query}', download=False)
             for e in info.get('entries') or []:
                 if e and e.get('id'):
                     found.setdefault(e['id'], e)
     return list(found.values())
 
 
-def select(entries, names, args, known=()):
+def select(entries, names, args, known=(), have=None):
+    """have: Counter of the artist's songs already downloaded (from any source), so they aren't fetched again."""
     covers = args.mode == 'covers'
-    chosen, seen_titles = [], {}
+    have = have or Counter()
+    chosen, seen_titles = [], dict(have)
+    budget = args.per_artist - sum(have.values())
     for e in entries:
+        if budget <= 0:
+            break
         title = e.get('title') or ''
+        if args.source == 'soundcloud':
+            title = re.sub(r'^\d{1,2}\s*[.)]\s*', '', title)  # '05. Піють півні' (album track number)
         duration = e.get('duration') or 0
         if not (args.min_sec <= duration <= args.max_sec):
             continue
@@ -159,14 +182,18 @@ def select(entries, names, args, known=()):
             continue
         if any(w in low for w in (COVER_BAD_WORDS if covers else BAD_WORDS)):
             continue
-        song = song_title(title, names, covers, known)
+        match_title = title
+        if args.source == 'soundcloud' and not song_title(title, names, covers, known) and \
+                normalize(e.get('uploader') or '') in {normalize(n) for n in names}:
+            match_title = f'{names[0]} - {title}'  # the artist's own upload: the title is just the song
+        song = song_title(match_title, names, covers, known)
         if not song or seen_titles.get(song, 0) >= (args.per_song if covers else 1):
             continue
         seen_titles[song] = seen_titles.get(song, 0) + 1
-        chosen.append({'artist': names[0], 'song': song, 'video_title': title, 'id': e['id'],
-                       'url': f"https://www.youtube.com/watch?v={e['id']}", 'duration': duration})
-        if len(chosen) >= args.per_artist:
-            break
+        url = f"https://www.youtube.com/watch?v={e['id']}" if args.source == 'youtube' else e['url']
+        chosen.append({'artist': names[0], 'song': song, 'video_title': title, 'id': e['id'], 'url': url,
+                       'duration': duration})
+        budget -= 1
     return chosen
 
 
@@ -197,22 +224,30 @@ def main():
             for row in csv.DictReader(f):
                 known.setdefault(row['artist'], set()).add(normalize(row['song']))
                 raw_titles.setdefault(row['artist'], set()).add(row['song'])
-    done = set()
+    done, have = set(), {}
     if csv_path.exists():
         with open(csv_path, newline='', encoding='utf-8') as f:
-            done = {row['id'] for row in csv.DictReader(f)}
+            for row in csv.DictReader(f):
+                done.add(row['id'])
+                have.setdefault(row['artist'], Counter())[row['song']] += 1
 
     fields = ['artist', 'song', 'video_title', 'id', 'url', 'duration']
     with open(csv_path, 'a', newline='', encoding='utf-8') as f:
         writer = csv.DictWriter(f, fieldnames=fields)
         if not done:
             writer.writeheader()
+        skips = 0
         for names in artists:
             artist = names[0]
             song_queries = [f'{artist} {t} піаніно' for t in sorted(raw_titles.get(artist, ()))] \
                 if args.mode == 'covers' and args.per_song_queries else []
-            chosen = select(search_with_retry(names, args.search_size, args.mode, song_queries, args.song_search_size),
-                            names, args, known.get(artist, ()))
+            entries = search_with_retry(names, args.search_size, args.mode, song_queries, args.song_search_size,
+                                        args.source)
+            skips = skips + 1 if entries is None else 0
+            if skips >= args.max_skips:
+                print(f'\nABORTED at {artist}: {skips} artists in a row failed to search (blocked?)')
+                break
+            chosen = select(entries or [], names, args, known.get(artist, ()), have.get(artist))
             print(f'\n{artist}: {len(chosen)} songs')
             for item in chosen:
                 status = 'have' if item['id'] in done else ('dry' if args.dry_run else 'get ')

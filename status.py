@@ -282,12 +282,13 @@ def covers_round2_row(t):
     out = Path('/data/covers_round2')
     artists = [l for l in (ROOT / 'data/artists_covers_next.txt').read_text(encoding='utf-8').splitlines()
                if l.strip() and not l.startswith('#')]
-    started = re.findall(r'^(.+): (\d+) songs$', log, re.M)
-    found = sum(int(n) for _, n in started)
+    # appended re-runs (skipped artists, another source) list an artist again: count it once
+    started = list(dict.fromkeys(a for a, _ in re.findall(r'^(.+): (\d+) songs$', log, re.M)))
+    found = sum(int(n) for _, n in re.findall(r'^(.+): (\d+) songs$', log, re.M))
     midis = len(list(out.glob('*/midi/*.mid')))
     pending = len(list(out.glob('*/*.mp3')))
     # the download runs on its own; transcription moved into logs/run_gpu_worker_round2.sh
-    fetching = bool(subprocess.run(['pgrep', '-f', 'fetch_songs.py --mode covers --artists data/artists_covers_next.txt'],
+    fetching = bool(subprocess.run(['pgrep', '-f', 'fetch_songs.py.*--mode covers.*--output /data/covers_round2'],
                                    capture_output=True, text=True).stdout.split())
     is_running = fetching or running('run_gpu_worker_round2.sh')
     done = not fetching and not pending and 'COVERS' not in log[-0:] and started and \
@@ -307,11 +308,12 @@ def reductions_round2_row(t):
     songs, red = Path('/data/songs_round2'), Path('/data/finetune_round2')
     artists = [l for l in (ROOT / 'data/artists_covers_next.txt').read_text(encoding='utf-8').splitlines()
                if l.strip() and not l.startswith('#')]
-    started = re.findall(r'^(.+): (\d+) songs$', log, re.M)
-    found = sum(int(n) for _, n in started)
+    # appended re-runs (skipped artists, another source) list an artist again: count it once
+    started = list(dict.fromkeys(a for a, _ in re.findall(r'^(.+): (\d+) songs$', log, re.M)))
+    found = sum(int(n) for _, n in re.findall(r'^(.+): (\d+) songs$', log, re.M))
     reduced = len(list(red.glob('*/midi/*.mid')))
     waiting = len(list(songs.glob('*/*.mp3')))
-    fetch = subprocess.run(['pgrep', '-f', 'fetch_songs.py --mode songs --artists data/artists_covers_next.txt'],
+    fetch = subprocess.run(['pgrep', '-f', 'fetch_songs.py.*--mode songs.*--output /data/songs_round2'],
                            capture_output=True, text=True).stdout.split()
     paused = bool(fetch) and subprocess.run(['ps', '-o', 'stat=', '-p', fetch[0]], capture_output=True,
                                             text=True).stdout.strip().startswith('T')
