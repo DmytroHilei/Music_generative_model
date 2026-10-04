@@ -391,6 +391,9 @@ if wandb_log:
     else:
         wandb.init(project=wandb_project, name=wandb_run_name, config=config)
     wandb_run_id = wandb.run.id
+    # x-axis = training iteration (wandb's own 'Step' only counts our log calls, i.e. evaluations)
+    wandb.define_metric('iter')
+    wandb.define_metric('*', step_metric='iter')
 else:
     wandb_run_id = None
 
