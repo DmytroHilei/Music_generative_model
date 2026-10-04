@@ -274,6 +274,26 @@ def hf_upload_row(t):
               f'{len(done)}/{len(sizes)} stores, {gb_done:.1f}/{gb_total:.1f} GB', detail)
 
 
+def covers_round2_row(t):
+    """logs/run_covers_round2.sh: piano covers of data/artists_covers_next.txt, searched, downloaded, transcribed."""
+    log = tail_text(LOGS / 'fetch_covers2.log', 20_000_000)
+    if log is None:
+        return
+    out = Path('/data/covers_round2')
+    artists = [l for l in (ROOT / 'data/artists_covers_next.txt').read_text(encoding='utf-8').splitlines()
+               if l.strip() and not l.startswith('#')]
+    started = re.findall(r'^(.+): (\d+) songs$', log, re.M)
+    found = sum(int(n) for _, n in started)
+    midis = len(list(out.glob('*/midi/*.mid')))
+    pending = len(list(out.glob('*/*.mp3')))
+    is_running = running('run_covers_round2.sh')
+    state = Text('running', style='bold yellow') if is_running else Text('done', style='green') \
+        if 'COVERS ROUND 2 DONE' in (tail_text(LOGS / 'covers_round2.log') or '') else Text('stopped', style='red')
+    t.add_row('piano covers round 2', state, ProgressBar(total=len(artists), completed=max(0, len(started) - 1)),
+              f'{len(started)}/{len(artists)} artists',
+              f'{found} covers found, {midis} transcribed, {pending} mp3 waiting')
+
+
 def pipeline_table():
     t = Table(title='Data pipeline', expand=True, title_justify='left')
     for col in ('stage', 'state', 'progress', 'count', 'detail'):
@@ -333,6 +353,7 @@ def pipeline_table():
     gigamidi_row(t)
     discover_row(t)
     hf_upload_row(t)
+    covers_round2_row(t)
     return t
 
 
