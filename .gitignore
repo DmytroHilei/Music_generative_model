@@ -26,3 +26,6 @@ samples/
 cloud/secrets.env
 cloud/.hash_cache.json
 .uv-cache/
+
+# private project notes (agents.md, architecture.md, optimizations.md): local only
+context/

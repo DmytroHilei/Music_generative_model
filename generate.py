@@ -38,6 +38,9 @@ def parse_args():
     parser.add_argument("--max-new-tokens", type=int, default=512)
     parser.add_argument("--temperature", type=float, default=0.85)
     parser.add_argument("--top-k", type=int, default=None)
+    parser.add_argument("--top-p", type=float, default=None,
+                        help="nucleus sampling: keep the smallest set of values reaching this probability (e.g. 0.9; "
+                             "the 2026-10-04 settings search found 0.9 helps in every style)")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--soundfont", type=str,
                         default="/usr/share/sounds/sf2/FluidR3_GM.sf2",
@@ -360,6 +363,7 @@ def generate_batch(model, config, args, pieces, seed, outs, device, progress=Non
             max_new_tokens=args.max_new_tokens,
             temperature=args.temperature,
             top_k=args.top_k,
+            top_p=args.top_p,
             anchor=args.anchor,
             slide=args.slide,
             progress=progress,
