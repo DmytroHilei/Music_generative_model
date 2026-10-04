@@ -1,0 +1,13 @@
+{
+ "rows": 32,
+ "new_notes": 1000,
+ "instruments": 7.6875,
+ "out_of_band": 0.15341667874221127,
+ "notes_per_s": 24.02608662298173,
+ "top_share": 0.3896381245984955,
+ "runaway": 0.15625,
+ "takeover": 0.0,
+ "pc_entropy": 2.7988594539911107,
+ "same_onset": 0.703159613766692,
+ "ended": 0.0
+}

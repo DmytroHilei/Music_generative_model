@@ -46,6 +46,32 @@ def fixed_prompts(n_rows=8, prompt_notes=128, min_instruments=3, store=STORE, ca
     return torch.from_numpy(np.stack(rows)), torch.from_numpy(np.stack(progs))
 
 
+def reference(n_rows=8, prompt_notes=128, min_instruments=3, new_notes=1000, store=STORE, candidates=4000):
+    """The same metrics on the REAL continuations of the fixed prompts (the next new_notes notes of each file): what
+    good looks like. Real songs bring in new instruments and can be dense, so out_of_band / runaway aren't 0."""
+    offsets = np.load(f'{store}/offsets.npy')
+    n = int(offsets[-1])
+    tokens = np.memmap(f'{store}/tokens.u16', dtype=np.uint16, mode='r', shape=(n, 4))
+    programs = np.memmap(f'{store}/programs.u8', dtype=np.uint8, mode='r', shape=(n,))
+    rows = []
+    for i in np.linspace(0, len(offsets) - 2, candidates).astype(int):  # same selection as fixed_prompts
+        a, b = offsets[i], offsets[i + 1]
+        if b - a < prompt_notes:
+            continue
+        p = np.asarray(programs[a:a + prompt_notes], dtype=np.int64)
+        if len(set(p.tolist())) < min_instruments:
+            continue
+        cont = slice(a + prompt_notes, min(b, a + prompt_notes + new_notes))
+        t = torch.from_numpy(np.asarray(tokens[cont], dtype=np.int64))
+        g = torch.from_numpy(np.asarray(programs[cont], dtype=np.int64))
+        r = row_metrics(t[:, 0], t[:, 3], g, set(p.tolist())) if len(t) else None
+        if r:
+            rows.append(r)
+        if len(rows) == n_rows:
+            break
+    return {k: float(np.mean([r[k] for r in rows])) for k in rows[0]}
+
+
 def row_metrics(pitch, dt, prog, prompt_prog, dt_seconds=0.02):
     """Metrics of one generated row (new notes only, cut at the first EOS)."""
     pitch, dt, prog = pitch.tolist(), dt.tolist(), prog.tolist()
@@ -116,11 +142,21 @@ def _sample_modes(model, cfg, streams, programs, tokens, modes, new_notes, tempe
 def main():
     import sys
     p = argparse.ArgumentParser()
-    p.add_argument('--checkpoint', required=True)
+    p.add_argument('--checkpoint', default=None)
     p.add_argument('--rows', type=int, default=8)
     p.add_argument('--new-notes', type=int, default=1000)
     p.add_argument('--temperature', type=float, default=0.9)
+    p.add_argument('--reference', default=None, help="write the real-continuation metrics to this JSON (no model) "
+                   "and exit; cloud/status_tables.py shows them as the 'real' row")
     args = p.parse_args()
+    if args.reference:
+        import json
+        ref = reference(args.rows, new_notes=args.new_notes)
+        open(args.reference, 'w').write(json.dumps({'rows': args.rows, 'new_notes': args.new_notes, **ref}, indent=1))
+        print(json.dumps(ref, indent=1))
+        return
+    if not args.checkpoint:
+        p.error('--checkpoint is required (or --reference to write the real-music reference)')
     from generate import resolve_checkpoint
     from model import GPT, MusicConfig
     ckpt = torch.load(resolve_checkpoint(args.checkpoint), map_location='cuda')

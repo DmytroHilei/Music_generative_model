@@ -2,8 +2,10 @@
     python3 cloud/status_tables.py logs/long_450m.log [N]
 Only the standard library: runs with the system python3."""
 
+import json
 import re
 import sys
+from pathlib import Path
 
 
 def main():
@@ -30,6 +32,11 @@ def main():
 
     print('--- last sample evals (samples/* on wandb)')
     print(f'{"step":>7} {"mode":>5} {"instr":>6} {"oob":>5} {"nps":>5} {"top":>5} {"runaway":>8} {"takeover":>9}  time')
+    ref_path = Path(__file__).with_name('sample_reference.json')  # real continuations of the same prompts
+    if ref_path.exists():
+        r = json.loads(ref_path.read_text())
+        print(f'{"real":>7} {"":>5} {r["instruments"]:>6.1f} {100 * r["out_of_band"]:>4.0f}% {r["notes_per_s"]:>5.0f} '
+              f'{100 * r["top_share"]:>4.0f}% {100 * r["runaway"]:>7.0f}% {100 * r["takeover"]:>8.0f}%  (target)')
     for line in samples:
         m = re.match(r'samples @(\d+) \((\d+) s\): (.*)', line)
         if not m:  # e.g. "samples @38000: FAILED (...), training continues"
