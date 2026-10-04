@@ -36,10 +36,7 @@ if m:
           f'{cur * 65536 / 1e9:.2f}B of {tot * 65536 / 1e9:.2f}B notes | training ends ~{finish:%a %H:%M} '
           f'(+evals/saves)')
 EOF
-    echo "--- last evals"
-    tr '\r' '\n' < "logs/$RUN.log" 2>/dev/null | grep -E "^step [0-9]+:" | tail -4
-    echo "--- sample metrics (samples/* on wandb)"
-    tr '\r' '\n' < "logs/$RUN.log" 2>/dev/null | grep -E "^samples @" | tail -2
+    python3 cloud/status_tables.py "logs/$RUN.log" 4
     echo "--- wrapper / errors"
     grep -E "^\[wrapper\]" "logs/$RUN.log" 2>/dev/null | tail -3
     tr '\r' '\n' < "logs/$RUN.log" 2>/dev/null | grep -E "Traceback|Error|CUDA OOM" | tail -3
