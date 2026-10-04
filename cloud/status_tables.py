@@ -28,7 +28,8 @@ def main():
         return
     lines = text.splitlines()
     evals = [l for l in lines if re.match(r'step \d+:', l)][-n:]
-    samples = [l for l in lines if l.startswith('samples @')][-n:]
+    all_samples = [l for l in lines if l.startswith('samples @')]
+    samples = all_samples[-n:]
 
     print('--- last evals (val CE)')
     cols = None
@@ -51,11 +52,11 @@ def main():
         print(f'{"real":>7} {"":>5} {r["instruments"]:>6.1f} {100 * r["out_of_band"]:>4.0f}% {r["notes_per_s"]:>5.0f} '
               f'{100 * r["top_share"]:>4.0f}% {100 * r["runaway"]:>7.0f}% {100 * r["takeover"]:>8.0f}% {0:>6.2f}  (target)')
     for line in samples:
-        m = re.match(r'samples @(\d+) \((\d+) s\): (.*)', line)
+        m = SAMPLE.match(line)
         if not m:  # e.g. "samples @38000: FAILED (...), training continues"
             print('  ' + line[:110])
             continue
-        for part in m.group(3).split(' | '):
+        for part in m.group(4).split(' | '):
             f = re.match(r'(\w+): instr ([\d.]+) oob (\d+)% nps (\d+) top (\d+)% runaway (\d+)% takeover (\d+)%', part)
             if f:
                 d = ''
@@ -64,7 +65,65 @@ def main():
                                 top_share=int(f[5]) / 100, runaway=int(f[6]) / 100, takeover=int(f[7]) / 100)
                     d = f'{distance(vals, ref):.2f}'
                 print(f'{m.group(1):>7} {f[1]:>5} {f[2]:>6} {f[3]:>4}% {f[4]:>5} {f[5]:>4}% {f[6]:>7}% {f[7]:>8}% '
-                      f'{d:>6}  {m.group(2)} s')
+                      f'{d:>6}  {m.group(3)} s')
+    trend(all_samples, ref)
+
+
+
+SAMPLE = re.compile(r'samples @(\d+) \((?:(\d+) rows, )?(\d+) s\): (.*)')
+PART = re.compile(r'(\w+): instr ([\d.]+) oob (\d+)% nps (\d+) top (\d+)% runaway (\d+)% takeover (\d+)%')
+EIGHT_ROW_RATES = {0, 12, 25, 38, 50, 62, 75, 88, 100}  # k/8 rounded: what 8-row evals can print
+
+
+def rows_of(match, parts):
+    """Rows of a sample eval: printed since the 2026-10-04 change, else inferred (8-row evals can only print k/8)."""
+    if match.group(2):
+        return int(match.group(2))
+    rates = {int(p[6]) for p in parts} | {int(p[7]) for p in parts}
+    return 8 if rates <= EIGHT_ROW_RATES else 32
+
+
+def trend(all_samples, ref, k=8, se_point=0.07):
+    """Slope of D over the last <= k evals with the current row count, per mode, per 10k steps."""
+    if not ref or 'sd' not in ref:
+        return
+    evals = []
+    for line in all_samples:
+        m = SAMPLE.match(line)
+        if not m:
+            continue
+        parts = [PART.match(p) for p in m.group(4).split(' | ')]
+        parts = [p for p in parts if p]
+        if parts:
+            evals.append((int(m.group(1)), rows_of(m, parts), parts))
+    if not evals:
+        return
+    rows = evals[-1][1]
+    same = [e for e in evals if e[1] == rows][-k:]
+    print(f'--- D trend over the last {len(same)} evals with {rows} rows (steps {same[0][0]}-{same[-1][0]})')
+    if len(same) < 3:
+        print('  need >= 3 evals for a slope')
+        return
+    for mode in [p[1] for p in same[-1][2]]:
+        pts = []
+        for step, _, parts in same:
+            for p in parts:
+                if p[1] == mode:
+                    vals = dict(instruments=float(p[2]), out_of_band=int(p[3]) / 100, notes_per_s=float(p[4]),
+                                top_share=int(p[5]) / 100, runaway=int(p[6]) / 100, takeover=int(p[7]) / 100)
+                    pts.append((step / 1e4, distance(vals, ref)))
+        if len(pts) < 3:
+            continue
+        xs, ys = [x for x, _ in pts], [y for _, y in pts]
+        n = len(xs)
+        mx, my = sum(xs) / n, sum(ys) / n
+        sxx = sum((x - mx) ** 2 for x in xs)
+        slope = sum((x - mx) * (y - my) for x, y in zip(xs, ys)) / sxx
+        resid = sum((y - my - slope * (x - mx)) ** 2 for x, y in zip(xs, ys)) / max(n - 2, 1)
+        # the residual estimate is shaky with few points: never below the known per-eval noise of D
+        se = max(resid, se_point ** 2) ** 0.5 / sxx ** 0.5
+        verdict = ('RISING' if slope > 2 * se else 'falling' if slope < -2 * se else 'flat (not significant)')
+        print(f'  {mode:5s} D {ys[0]:.2f} -> {ys[-1]:.2f}, slope {slope:+.3f} +- {se:.3f} per 10k steps: {verdict}')
 
 
 if __name__ == '__main__':

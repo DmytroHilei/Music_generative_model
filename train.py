@@ -464,7 +464,7 @@ for iter_num in pbar:
                 optimizer.zero_grad(set_to_none=True)
                 torch.cuda.empty_cache()
                 tqdm.write(f"samples @{iter_num}: FAILED ({type(e).__name__}: {str(e)[:200]}), training continues")
-            tqdm.write(f"samples @{iter_num} ({time.time() - t_s:.0f} s): " + " | ".join(
+            tqdm.write(f"samples @{iter_num} ({sample_eval_rows} rows, {time.time() - t_s:.0f} s): " + " | ".join(
                 f"{mode}: instr {m['instruments']:.1f} oob {m['out_of_band']:.0%} nps {m['notes_per_s']:.0f} "
                 f"top {m['top_share']:.0%} runaway {m['runaway']:.0%} takeover {m['takeover']:.0%}"
                 for mode, m in samples.items() if m)) if samples else None
