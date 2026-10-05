@@ -316,9 +316,10 @@ def fetch_info(output_dir, log_path):
         args = dict(re.findall(r'--([\w-]+)(?:\s+(?!--)(\S+))?', cmd))
         info['paused'] = subprocess.run(['ps', '-o', 'stat=', '-p', pid], capture_output=True,
                                         text=True).stdout.strip().startswith('T')
-        if run_start is None:
-            run_start = time.time() - int(subprocess.run(['ps', '-o', 'etimes=', '-p', pid], capture_output=True,
-                                                         text=True).stdout or 0)
+        # a run started without a separator line (older fetch_songs.py) begins at its process start
+        proc_start = time.time() - int(subprocess.run(['ps', '-o', 'etimes=', '-p', pid], capture_output=True,
+                                                      text=True).stdout or 0)
+        run_start = max(run_start or 0, proc_start)
     source, mode = args.get('source') or 'youtube', args.get('mode') or 'songs'
     info.update(source=source, mode=mode, cookies='cookies-from-browser' in args,
                 search_size=args.get('search-size') or '80', sleep=float(args.get('sleep') or 3),
@@ -328,6 +329,9 @@ def fetch_info(output_dir, log_path):
         names = [l for l in (ROOT / args['artists']).read_text(encoding='utf-8').splitlines()
                  if l.strip() and not l.startswith('#')]
     info['aliases'] = sum(len(l.split('|')) for l in names) / len(names) if names else 0
+    if names:  # a previous run without a separator line: this run begins where its list's first artist last started
+        first = list(re.finditer(rf'^{re.escape(names[0].split("|")[0].strip())}: \d+ songs$', run, re.M))
+        run = run[first[-1].start():] if first else run
     started = re.findall(r'^(.+): \d+ songs$', run, re.M)
     info['current'] = started[-1] if procs and started else None
     done = max(0, len(started) - (1 if procs else 0))

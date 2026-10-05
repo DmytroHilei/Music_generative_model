@@ -226,6 +226,8 @@ def download(item, out_dir, quality, extra=None):
 def main():
     sys.stdout.reconfigure(line_buffering=True)  # the log is a file: status.py reads progress from it live
     args = parse_args()
+    # run separator: status.py counts this run's progress from the last one (the logs are appended across re-runs)
+    print(f"\n===== {time.strftime('%Y-%m-%d %H:%M:%S')}: {args.source} {args.mode} run of {args.artists} =====")
     # one artist per line, aliases separated by '|': the first name is the folder / CSV name
     artists = [[n.strip() for n in line.split('|')] for line in open(args.artists, encoding='utf-8')
                if line.strip() and not line.startswith('#')]
