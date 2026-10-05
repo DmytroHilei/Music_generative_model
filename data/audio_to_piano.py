@@ -50,6 +50,8 @@ def parse_args():
     parser.add_argument('--min-age', type=float, default=0, help='skip files modified in the last N seconds (still '
                         'being written by a running download)')
     parser.add_argument('--device', default='cuda')
+    parser.add_argument('--stop-file', default=None,
+                        help='exit before the next song once this file exists (a worker stops between songs)')
     parser.add_argument('--delete-audio', action='store_true',
                         help='delete the source audio after its MIDI is written (re-downloadable via songs.csv; saves disk)')
     parser.add_argument('--keep-stems', action='store_true',
@@ -343,6 +345,9 @@ def main():
         piano_csv = open_csv(stack, out_root / 'songs.csv', fields) if not args.no_piano else None
         multi_csv = open_csv(stack, out_root / 'multi.csv', multi_fields) if args.multi else None
         for i, audio in enumerate(files):
+            if args.stop_file and Path(args.stop_file).exists():
+                print(f'stop file {args.stop_file} found, exiting before {audio.name}')
+                break
             # a song is redone only for the outputs it is missing (e.g. multi-track for an already reduced song)
             piano, multi = (c is not None and str(audio) not in c[2] for c in (piano_csv, multi_csv))
             if (not piano and not multi) or str(audio) in failed:

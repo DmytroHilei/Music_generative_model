@@ -29,6 +29,8 @@ def parse_args():
     ap.add_argument('--delete-audio', action='store_true', help='delete each mp3 once its MIDI is written')
     ap.add_argument('--min-age', type=float, default=0, help='skip mp3s modified in the last N seconds (still being '
                     'written by a running download)')
+    ap.add_argument('--stop-file', default=None,
+                    help='exit before the next mp3 once this file exists (a worker stops between songs)')
     return ap.parse_args()
 
 
@@ -44,6 +46,9 @@ def main():
         if new_stats:
             w.writerow(['artist', 'file', 'notes', 'seconds', 'notes_per_sec', 'pitch_min', 'pitch_max'])
         for i, mp3 in enumerate(files, 1):
+            if args.stop_file and Path(args.stop_file).exists():
+                print(f'stop file {args.stop_file} found, exiting before {mp3.name}')
+                break
             artist = mp3.parent.name
             out = Path(args.output) / artist / 'midi' / (mp3.stem + '.mid')
             if out.exists():
