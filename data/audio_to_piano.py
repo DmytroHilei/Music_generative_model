@@ -11,6 +11,10 @@ ghost notes). Instead:
     3. Everything is merged into one piano track (the file the model trains on) plus a debug MIDI with
        one track per part, so each part can be listened to separately.
     4. Key and mode are estimated (Krumhansl-Schmuckler) and written to the CSV, to filter minor-key songs.
+    5. --multi: from the same stems, a multi-track MIDI (multi/<song>.mid, stats in multi.csv) with one GM instrument
+       per stem: vocals -> melody line (--vocal-program), bass 33, guitar, piano 0, other (--other-program), drums
+       via ADTOF (kick/snare/tom/hi-hat/cymbal). Stems quieter than --stem-gate-db vs the mix are left out (Demucs
+       leakage, e.g. a "piano" stem in a guitar song).
 
 Run with the audio env (not the training env):
     .venv-audio/bin/python data/audio_to_piano.py --input Skryabin --output data/finetune/skryabin --limit 3
@@ -22,6 +26,7 @@ import shutil
 import subprocess
 import sys
 import time
+from contextlib import ExitStack
 from pathlib import Path
 
 import numpy as np
@@ -62,6 +67,16 @@ def parse_args():
     parser.add_argument('--bass-range', type=int, nargs=2, default=(28, 55), help='bass pitch range (E1..G3)')
     parser.add_argument('--melody-range', type=int, nargs=2, default=(55, 96), help='melody pitch range')
     parser.add_argument('--min-note-ms', type=float, default=80)
+    parser.add_argument('--multi', action='store_true', help='also write the multi-track MIDI (multi/, multi.csv)')
+    parser.add_argument('--no-piano', action='store_true', help='skip the piano reduction (with --multi)')
+    parser.add_argument('--vocal-program', type=int, default=53, help='GM program of the vocal melody (53 voice oohs)')
+    parser.add_argument('--guitar-program', type=int, default=27, help='GM program of the guitar stem (27 clean electric)')
+    parser.add_argument('--other-program', type=int, default=48, help='GM program of the "other" stem (48 strings)')
+    parser.add_argument('--stem-gate-db', type=float, default=-30,
+                        help='leave a stem out of the multi-track MIDI when its level vs the full mix is below this')
+    parser.add_argument('--multi-max-poly', type=int, default=6, help='max notes sounding together per polyphonic stem')
+    parser.add_argument('--multi-drop-quiet', type=float, default=0.2,
+                        help='drop this fraction of the quietest notes of each polyphonic stem')
     return parser.parse_args()
 
 
@@ -93,6 +108,37 @@ def transcribe(wav_path, min_note_ms, fmin=None, fmax=None, onset_threshold=0.5,
                          minimum_note_length=min_note_ms, minimum_frequency=fmin, maximum_frequency=fmax,
                          multiple_pitch_bends=False, melodia_trick=True)
     return [n for inst in midi.instruments for n in inst.notes]
+
+
+_adtof = None
+
+
+def transcribe_drums(wav_path, device):
+    """ADTOF Frame_RNN (kick 35, snare 38, tom 47, hi-hat 42, cymbal 49) -> list of pretty_midi.Note; the velocity
+    comes from the peak activation (ADTOF itself writes every hit at 100)."""
+    global _adtof
+    import torch
+    from adtof_pytorch import (LABELS_5, PeakPicker, calculate_n_bins, create_frame_rnn_model, get_default_weights_path,
+                               load_audio_for_model, load_pytorch_weights)
+    if _adtof is None:
+        dev = device if device == 'cpu' or torch.cuda.is_available() else 'cpu'
+        _adtof = load_pytorch_weights(create_frame_rnn_model(calculate_n_bins()), get_default_weights_path()).eval().to(dev)
+    with torch.no_grad():
+        act = _adtof(load_audio_for_model(str(wav_path)).to(next(_adtof.parameters()).device)).cpu().numpy()[0]
+    peaks = PeakPicker(fps=100).pick(act)[0]  # pitch -> onset times; frames are 1/100 s
+    return [pretty_midi.Note(int(np.clip(40 + 80 * act[min(round(t * 100), len(act) - 1), c], 1, 127)), pitch, t, t + 0.1)
+            for c, pitch in enumerate(LABELS_5) for t in peaks[pitch]]
+
+
+def stem_levels(paths):
+    """Level of each stem in dB relative to the full mix (the sum of the stems)."""
+    audio = {s: sf.read(str(p), dtype='float32')[0] for s, p in paths.items()}
+    mix_power = np.mean(sum(audio.values()) ** 2) + 1e-12
+    return {s: float(10 * np.log10(np.mean(a ** 2) / mix_power + 1e-12)) for s, a in audio.items()}
+
+
+def copy_notes(notes):
+    return [pretty_midi.Note(n.velocity, n.pitch, n.start, n.end) for n in notes]
 
 
 def fold_into_range(notes, lo, hi):
@@ -187,16 +233,27 @@ def estimate_key(notes):
     return NOTE_NAMES[best[1]], best[2], float(best[0])
 
 
-def reduce_song(audio_path, out_root, args):
+def reduce_song(audio_path, out_root, args, piano=True, multi=False):
+    """Demucs once, then the piano reduction and/or the multi-track MIDI: returns (piano row, multi row), None
+    for a part not asked for."""
     stems_root = out_root / 'stems'
     stems = separate(audio_path, stems_root, args.device)
+    raw_vocals = transcribe(stems['vocals'], args.min_note_ms, fmin=80, fmax=1100, onset_threshold=0.6)
+    raw_bass = transcribe(stems['bass'], args.min_note_ms, fmin=30, fmax=400)
+    row = reduce_to_piano(audio_path, out_root, args, stems, copy_notes(raw_vocals), copy_notes(raw_bass)) \
+        if piano else None
+    multi_row = multi_track(audio_path, out_root, args, stems, raw_vocals, raw_bass) if multi else None
+    if not args.keep_stems:
+        shutil.rmtree(stems['vocals'].parent, ignore_errors=True)
+    return row, multi_row
+
+
+def reduce_to_piano(audio_path, out_root, args, stems, melody, bass):
     harmony_wav = mix_stems([stems[s] for s in HARMONY_STEMS], stems[STEMS[0]].parent / 'harmony_mix.wav')
 
-    melody = transcribe(stems['vocals'], args.min_note_ms, fmin=80, fmax=1100, onset_threshold=0.6)
     melody = monophonic(fold_into_range(melody, *args.melody_range), keep='highest')
     melody = legato(list(merge_retriggers(melody, args.merge_gap_ms / 1000)), args.melody_legato_ms / 1000)
 
-    bass = transcribe(stems['bass'], args.min_note_ms, fmin=30, fmax=400)
     bass = monophonic(fold_into_range(bass, *args.bass_range), keep='lowest')
     bass = legato(list(merge_retriggers(bass, args.merge_gap_ms / 1000)), args.bass_legato_ms / 1000)
 
@@ -228,9 +285,6 @@ def reduce_song(audio_path, out_root, args):
     piano.write(str(midi_path))
     debug.write(str(out_root / 'debug' / f'{audio_path.stem}.parts.mid'))
 
-    if not args.keep_stems:
-        shutil.rmtree(stems['vocals'].parent, ignore_errors=True)
-
     tonic, mode, conf = estimate_key(piano.instruments[0].notes)
     return {
         'midi_filename': str(midi_path.relative_to(out_root)),
@@ -238,6 +292,38 @@ def reduce_song(audio_path, out_root, args):
         'n_melody': len(melody), 'n_bass': len(bass), 'n_harmony': len(harmony),
         'key': f'{tonic} {mode}', 'mode': mode, 'key_confidence': round(conf, 3),
     }
+
+
+def multi_track(audio_path, out_root, args, stems, vocals, bass):
+    """One GM instrument per Demucs stem, at the transcribed pitches (no folding into a piano range)."""
+    levels = stem_levels(stems)
+    gap = args.merge_gap_ms / 1000
+    parts = {}  # stem -> (program, is_drum, notes)
+    vocals = monophonic(vocals, keep='highest')
+    parts['vocals'] = (args.vocal_program, False, legato(list(merge_retriggers(vocals, gap)), args.melody_legato_ms / 1000))
+    bass = monophonic(bass, keep='lowest')
+    parts['bass'] = (33, False, legato(list(merge_retriggers(bass, gap)), args.bass_legato_ms / 1000))
+    for stem, program in (('guitar', args.guitar_program), ('piano', 0), ('other', args.other_program)):
+        if levels[stem] < args.stem_gate_db:
+            continue
+        notes = transcribe(stems[stem], args.min_note_ms)
+        notes = drop_quiet(list(merge_retriggers(notes, gap)), args.multi_drop_quiet)
+        parts[stem] = (program, False, cap_polyphony(notes, args.multi_max_poly))
+    if levels['drums'] >= args.stem_gate_db:
+        parts['drums'] = (0, True, transcribe_drums(stems['drums'], args.device))
+    parts = {s: p for s, p in parts.items() if levels[s] >= args.stem_gate_db and p[2]}
+
+    midi = pretty_midi.PrettyMIDI()
+    for stem, (program, is_drum, notes) in parts.items():
+        inst = pretty_midi.Instrument(program=program, is_drum=is_drum, name=stem)
+        inst.notes = sorted(notes, key=lambda n: (n.start, n.pitch))
+        midi.instruments.append(inst)
+    (out_root / 'multi').mkdir(parents=True, exist_ok=True)
+    midi_path = out_root / 'multi' / f'{audio_path.stem}.mid'
+    midi.write(str(midi_path))
+    return {'midi_filename': str(midi_path.relative_to(out_root)), 'source_audio': str(audio_path),
+            **{f'n_{s}': len(parts[s][2]) if s in parts else 0 for s in STEMS},
+            **{f'db_{s}': round(levels[s], 1) for s in STEMS}}
 
 
 def main():
@@ -249,33 +335,46 @@ def main():
     if args.limit:
         files = files[:args.limit]
 
-    csv_path = out_root / 'songs.csv'
-    done = set()
-    if csv_path.exists():
-        with open(csv_path, newline='', encoding='utf-8') as f:
-            done = {row['source_audio'] for row in csv.DictReader(f)}
-
     fields = ['midi_filename', 'source_audio', 'n_melody', 'n_bass', 'n_harmony', 'key', 'mode', 'key_confidence']
-    new_file = not csv_path.exists()
-    with open(csv_path, 'a', newline='', encoding='utf-8') as f:
-        writer = csv.DictWriter(f, fieldnames=fields)
-        if new_file:
-            writer.writeheader()
+    multi_fields = ['midi_filename', 'source_audio'] + [f'n_{s}' for s in STEMS] + [f'db_{s}' for s in STEMS]
+    with ExitStack() as stack:
+        piano_csv = open_csv(stack, out_root / 'songs.csv', fields) if not args.no_piano else None
+        multi_csv = open_csv(stack, out_root / 'multi.csv', multi_fields) if args.multi else None
         for i, audio in enumerate(files):
-            if str(audio) in done:
+            # a song is redone only for the outputs it is missing (e.g. multi-track for an already reduced song)
+            piano, multi = (c is not None and str(audio) not in c[2] for c in (piano_csv, multi_csv))
+            if not piano and not multi:
                 print(f'[{i + 1}/{len(files)}] skip {audio.name}')
                 continue
             print(f'[{i + 1}/{len(files)}] {audio.name}')
             try:
-                row = reduce_song(audio, out_root, args)
+                row, multi_row = reduce_song(audio, out_root, args, piano=piano, multi=multi)
             except Exception as e:  # one broken file shouldn't stop a batch of hundreds
                 print(f'  FAILED: {e!r}')
                 continue
-            writer.writerow(row)
-            f.flush()
-            if args.delete_audio:  # only songs reduced in this run: skipped (already done) files are never touched
+            for c, r in ((piano_csv, row), (multi_csv, multi_row)):
+                if r is not None:
+                    c[1].writerow(r)
+                    c[0].flush()
+            if args.delete_audio:  # only songs processed in this run: skipped (already done) files are never touched
                 audio.unlink()
-            print(f"  melody {row['n_melody']}, bass {row['n_bass']}, harmony {row['n_harmony']}, key {row['key']}")
+            if row:
+                print(f"  melody {row['n_melody']}, bass {row['n_bass']}, harmony {row['n_harmony']}, key {row['key']}")
+            if multi_row:
+                print('  multi: ' + ', '.join(f"{s} {multi_row[f'n_{s}']} ({multi_row[f'db_{s}']:+.0f} dB)" for s in STEMS))
+
+
+def open_csv(stack, path, fields):
+    """Append-mode CSV: (file, writer, source_audio values already in it)."""
+    done = set()
+    if path.exists():
+        with open(path, newline='', encoding='utf-8') as f:
+            done = {r['source_audio'] for r in csv.DictReader(f)}
+    f = stack.enter_context(open(path, 'a', newline='', encoding='utf-8'))
+    writer = csv.DictWriter(f, fieldnames=fields)
+    if not done and f.tell() == 0:
+        writer.writeheader()
+    return f, writer, done
 
 
 if __name__ == '__main__':
