@@ -11,6 +11,9 @@ ghost notes). Instead:
     3. Everything is merged into one piano track (the file the model trains on) plus a debug MIDI with
        one track per part, so each part can be listened to separately.
     4. Key and mode are estimated (Krumhansl-Schmuckler) and written to the CSV, to filter minor-key songs.
+    Pipelined: Demucs (and ADTOF drums) run in this process on the GPU, the model loaded once; basic-pitch and the
+    rest run on the CPU in --cpu-workers processes, so the GPU separates the next songs while earlier ones are
+    transcribed (one song at a time, Demucs as a subprocess, left the GPU idle ~70% of the time).
     5. --multi: from the same stems, a multi-track MIDI (multi/<song>.mid, stats in multi.csv) with one GM instrument
        per stem: vocals -> melody line (--vocal-program), bass 33, guitar, piano 0, other (--other-program), drums
        via ADTOF (kick/snare/tom/hi-hat/cymbal). Stems quieter than --stem-gate-db vs the mix are left out (Demucs
@@ -18,14 +21,18 @@ ghost notes). Instead:
 
 Run with the audio env (not the training env):
     .venv-audio/bin/python data/audio_to_piano.py --input Skryabin --output data/finetune/skryabin --limit 3
+    .venv-audio/bin/python data/audio_to_piano.py --input-root /data/songs_round2 --output-root /data/finetune_round2
+        (every artist folder <input-root>/<artist> -> <output-root>/<artist> in one pipeline: the models load once and
+        the GPU doesn't wait for the CPU workers to drain between artists)
 """
 
 import argparse
 import csv
+import multiprocessing
+import os
 import shutil
-import subprocess
-import sys
 import time
+from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
 from contextlib import ExitStack
 from pathlib import Path
 
@@ -44,12 +51,20 @@ NOTE_NAMES = ['C', 'C#', 'D', 'Eb', 'E', 'F', 'F#', 'G', 'Ab', 'A', 'Bb', 'B']
 
 def parse_args():
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-    parser.add_argument('--input', required=True, help='folder with mp3/wav files')
-    parser.add_argument('--output', required=True, help='output folder (midi/, debug/, stems/, songs.csv)')
+    parser.add_argument('--input', help='folder with mp3/wav files')
+    parser.add_argument('--output', help='output folder (midi/, debug/, stems/, songs.csv)')
+    parser.add_argument('--input-root', help='instead of --input: every subfolder (one per artist) of this folder')
+    parser.add_argument('--output-root', help='with --input-root: <output-root>/<subfolder> is that folder\'s --output')
+    parser.add_argument('--max-minutes', type=float, default=0,
+                        help='start no new song after this many minutes (0 = no limit), so a worker loop regains '
+                             'control now and then; the songs in progress are finished')
     parser.add_argument('--limit', type=int, default=None, help='only process the first N files')
     parser.add_argument('--min-age', type=float, default=0, help='skip files modified in the last N seconds (still '
                         'being written by a running download)')
     parser.add_argument('--device', default='cuda')
+    parser.add_argument('--cpu-workers', type=int, default=4,
+                        help='processes transcribing (basic-pitch, CPU) while the GPU separates the next songs; 0 = '
+                             'everything in this process, one song at a time')
     parser.add_argument('--stop-file', default=None,
                         help='exit before the next song once this file exists (a worker stops between songs)')
     parser.add_argument('--delete-audio', action='store_true',
@@ -79,16 +94,37 @@ def parse_args():
     parser.add_argument('--multi-max-poly', type=int, default=6, help='max notes sounding together per polyphonic stem')
     parser.add_argument('--multi-drop-quiet', type=float, default=0.2,
                         help='drop this fraction of the quietest notes of each polyphonic stem')
-    return parser.parse_args()
+    args = parser.parse_args()
+    if bool(args.input) == bool(args.input_root) or bool(args.input) != bool(args.output) \
+            or bool(args.input_root) != bool(args.output_root):
+        parser.error('give either --input and --output, or --input-root and --output-root')
+    return args
+
+
+_separator = None
 
 
 def separate(audio_path, stems_root, device):
-    """Demucs 6-stem separation, cached: returns dict stem -> wav path."""
+    """Demucs 6-stem separation (the CLI's defaults: 1 random shift, overlap 0.25, 16-bit wav with rescale), model
+    loaded once per process, cached on disk: returns dict stem -> wav path. The stems are written to a temporary
+    folder that is renamed when complete, so an interrupted run never leaves a partial cache behind."""
+    global _separator
     out_dir = stems_root / 'htdemucs_6s' / audio_path.stem
     paths = {s: out_dir / f'{s}.wav' for s in STEMS}
     if not all(p.exists() for p in paths.values()):
-        subprocess.run([sys.executable, '-m', 'demucs', '-n', 'htdemucs_6s', '-d', device,
-                        '-o', str(stems_root), str(audio_path)], check=True)
+        from demucs.api import Separator, save_audio
+        if _separator is None:
+            _separator = Separator(model='htdemucs_6s', device=device, shifts=1, split=True, overlap=0.25,
+                                   progress=False)
+        _, res = _separator.separate_audio_file(audio_path)
+        tmp = out_dir.with_name(out_dir.name + '.partial')
+        shutil.rmtree(tmp, ignore_errors=True)
+        tmp.mkdir(parents=True)
+        for name, source in res.items():
+            save_audio(source, str(tmp / f'{name}.wav'), samplerate=_separator.samplerate, clip='rescale',
+                       bits_per_sample=16, as_float=False)
+        shutil.rmtree(out_dir, ignore_errors=True)
+        tmp.rename(out_dir)
     return paths
 
 
@@ -101,11 +137,30 @@ def mix_stems(paths, out_path):
     return out_path
 
 
+_basic_pitch = None
+
+
+def basic_pitch_model():
+    """basic-pitch's ONNX model, loaded once per process; ONNX_THREADS limits its threads (one CPU worker of several
+    shouldn't take every core)."""
+    global _basic_pitch
+    if _basic_pitch is None:
+        import onnxruntime as ort
+        from basic_pitch import ICASSP_2022_MODEL_PATH
+        from basic_pitch.inference import Model
+        _basic_pitch = Model(ICASSP_2022_MODEL_PATH)
+        if os.environ.get('ONNX_THREADS') and _basic_pitch.model_type == Model.MODEL_TYPES.ONNX:
+            opts = ort.SessionOptions()
+            opts.intra_op_num_threads = int(os.environ['ONNX_THREADS'])
+            _basic_pitch.model = ort.InferenceSession(str(ICASSP_2022_MODEL_PATH), opts,
+                                                      providers=['CPUExecutionProvider'])
+    return _basic_pitch
+
+
 def transcribe(wav_path, min_note_ms, fmin=None, fmax=None, onset_threshold=0.5, frame_threshold=0.3):
     """basic-pitch -> list of pretty_midi.Note."""
     from basic_pitch.inference import predict
-    from basic_pitch import ICASSP_2022_MODEL_PATH
-    _, midi, _ = predict(str(wav_path), ICASSP_2022_MODEL_PATH,
+    _, midi, _ = predict(str(wav_path), basic_pitch_model(),
                          onset_threshold=onset_threshold, frame_threshold=frame_threshold,
                          minimum_note_length=min_note_ms, minimum_frequency=fmin, maximum_frequency=fmax,
                          multiple_pitch_bends=False, melodia_trick=True)
@@ -235,16 +290,32 @@ def estimate_key(notes):
     return NOTE_NAMES[best[1]], best[2], float(best[0])
 
 
-def reduce_song(audio_path, out_root, args, piano=True, multi=False):
-    """Demucs once, then the piano reduction and/or the multi-track MIDI: returns (piano row, multi row), None
-    for a part not asked for."""
-    stems_root = out_root / 'stems'
-    stems = separate(audio_path, stems_root, args.device)
+def gpu_stage(audio_path, out_root, args, multi=False):
+    """Demucs, plus ADTOF drums for the multi-track MIDI (both on the GPU): returns (stem paths, drum notes or None)."""
+    stems = separate(audio_path, out_root / 'stems', args.device)
+    drums = None
+    if multi and stem_levels(stems)['drums'] >= args.stem_gate_db:
+        drums = transcribe_drums(stems['drums'], args.device)
+    return stems, drums
+
+
+def cpu_stage(audio_path, out_root, args, stems, drums, piano=True, multi=False):
+    """The piano reduction and/or the multi-track MIDI from the stems: returns (audio, output folder, piano row,
+    multi row, error);
+    a row is None for a part not asked for, error is None or the exception's repr."""
+    try:
+        row, multi_row = reduce_stems(audio_path, out_root, args, stems, drums, piano, multi)
+        return audio_path, out_root, row, multi_row, None
+    except Exception as e:  # reported by the main process (failed.txt)
+        return audio_path, out_root, None, None, repr(e)
+
+
+def reduce_stems(audio_path, out_root, args, stems, drums, piano, multi):
     raw_vocals = transcribe(stems['vocals'], args.min_note_ms, fmin=80, fmax=1100, onset_threshold=0.6)
     raw_bass = transcribe(stems['bass'], args.min_note_ms, fmin=30, fmax=400)
     row = reduce_to_piano(audio_path, out_root, args, stems, copy_notes(raw_vocals), copy_notes(raw_bass)) \
         if piano else None
-    multi_row = multi_track(audio_path, out_root, args, stems, raw_vocals, raw_bass) if multi else None
+    multi_row = multi_track(audio_path, out_root, args, stems, raw_vocals, raw_bass, drums) if multi else None
     if not args.keep_stems:
         shutil.rmtree(stems['vocals'].parent, ignore_errors=True)
     return row, multi_row
@@ -296,8 +367,9 @@ def reduce_to_piano(audio_path, out_root, args, stems, melody, bass):
     }
 
 
-def multi_track(audio_path, out_root, args, stems, vocals, bass):
-    """One GM instrument per Demucs stem, at the transcribed pitches (no folding into a piano range)."""
+def multi_track(audio_path, out_root, args, stems, vocals, bass, drums):
+    """One GM instrument per Demucs stem, at the transcribed pitches (no folding into a piano range); drums = the
+    ADTOF notes from the GPU stage (None when the drum stem is below the gate)."""
     levels = stem_levels(stems)
     gap = args.merge_gap_ms / 1000
     parts = {}  # stem -> (program, is_drum, notes)
@@ -311,8 +383,8 @@ def multi_track(audio_path, out_root, args, stems, vocals, bass):
         notes = transcribe(stems[stem], args.min_note_ms)
         notes = drop_quiet(list(merge_retriggers(notes, gap)), args.multi_drop_quiet)
         parts[stem] = (program, False, cap_polyphony(notes, args.multi_max_poly))
-    if levels['drums'] >= args.stem_gate_db:
-        parts['drums'] = (0, True, transcribe_drums(stems['drums'], args.device))
+    if drums is not None:
+        parts['drums'] = (0, True, drums)
     parts = {s: p for s, p in parts.items() if levels[s] >= args.stem_gate_db and p[2]}
 
     midi = pretty_midi.PrettyMIDI()
@@ -328,62 +400,117 @@ def multi_track(audio_path, out_root, args, stems, vocals, bass):
             **{f'db_{s}': round(levels[s], 1) for s in STEMS}}
 
 
+FIELDS = ['midi_filename', 'source_audio', 'n_melody', 'n_bass', 'n_harmony', 'key', 'mode', 'key_confidence']
+MULTI_FIELDS = ['midi_filename', 'source_audio'] + [f'n_{s}' for s in STEMS] + [f'db_{s}' for s in STEMS]
+
+
+def done_sources(path):
+    """source_audio values already in a songs.csv / multi.csv"""
+    if not path.exists():
+        return set()
+    with open(path, newline='', encoding='utf-8') as f:
+        return {r['source_audio'] for r in csv.DictReader(f)}
+
+
+def append_row(path, fields, row):
+    with open(path, 'a', newline='', encoding='utf-8') as f:
+        writer = csv.DictWriter(f, fieldnames=fields)
+        if f.tell() == 0:
+            writer.writeheader()
+        writer.writerow(row)
+
+
+def find_jobs(args):
+    """(audio, output folder, piano wanted, multi wanted) for every song that still misses an output and hasn't failed
+    before; returns (jobs, songs skipped, folders with work)."""
+    if args.input:
+        folders = [(Path(args.input), Path(args.output))]
+    else:
+        folders = [(d, Path(args.output_root) / d.name) for d in sorted(Path(args.input_root).iterdir()) if d.is_dir()]
+    jobs, skipped, busy = [], 0, 0
+    for in_dir, out_root in folders:
+        files = sorted(p for p in in_dir.iterdir() if p.suffix.lower() in ('.mp3', '.wav', '.flac', '.m4a')
+                       and time.time() - p.stat().st_mtime >= args.min_age)
+        if not files:
+            continue
+        piano_done = done_sources(out_root / 'songs.csv') if not args.no_piano else None
+        multi_done = done_sources(out_root / 'multi.csv') if args.multi else None
+        failed_path = out_root / 'failed.txt'  # songs that failed once are not retried (a worker loop would spin)
+        failed = set(failed_path.read_text(encoding='utf-8').splitlines()) if failed_path.exists() else set()
+        n = len(jobs)
+        for audio in files:
+            # a song is redone only for the outputs it is missing (e.g. multi-track for an already reduced song)
+            piano, multi = (done is not None and str(audio) not in done for done in (piano_done, multi_done))
+            if (piano or multi) and str(audio) not in failed:
+                jobs.append((audio, out_root, piano, multi))
+            else:
+                skipped += 1
+        busy += len(jobs) > n
+    return jobs[:args.limit] if args.limit else jobs, skipped, busy
+
+
 def main():
     args = parse_args()
-    in_dir, out_root = Path(args.input), Path(args.output)
-    out_root.mkdir(parents=True, exist_ok=True)
-    files = sorted(p for p in in_dir.iterdir() if p.suffix.lower() in ('.mp3', '.wav', '.flac', '.m4a')
-                   and time.time() - p.stat().st_mtime >= args.min_age)
-    if args.limit:
-        files = files[:args.limit]
-
-    fields = ['midi_filename', 'source_audio', 'n_melody', 'n_bass', 'n_harmony', 'key', 'mode', 'key_confidence']
-    multi_fields = ['midi_filename', 'source_audio'] + [f'n_{s}' for s in STEMS] + [f'db_{s}' for s in STEMS]
-    failed_path = out_root / 'failed.txt'  # songs that failed once are not retried (a worker loop would spin on them)
-    failed = set(failed_path.read_text(encoding='utf-8').splitlines()) if failed_path.exists() else set()
+    t0 = time.time()
+    jobs, skipped, busy = find_jobs(args)
+    print(f'{len(jobs)} songs to do in {busy} folder(s), {skipped} already done or failed before')
+    if args.cpu_workers:  # spawned workers inherit these: CPU threads split between them
+        threads = str(max(1, (os.cpu_count() or 4) // args.cpu_workers))
+        os.environ.update(ONNX_THREADS=threads, OMP_NUM_THREADS=threads, OPENBLAS_NUM_THREADS=threads,
+                          MKL_NUM_THREADS=threads)
     with ExitStack() as stack:
-        piano_csv = open_csv(stack, out_root / 'songs.csv', fields) if not args.no_piano else None
-        multi_csv = open_csv(stack, out_root / 'multi.csv', multi_fields) if args.multi else None
-        for i, audio in enumerate(files):
-            if args.stop_file and Path(args.stop_file).exists():
-                print(f'stop file {args.stop_file} found, exiting before {audio.name}')
-                break
-            # a song is redone only for the outputs it is missing (e.g. multi-track for an already reduced song)
-            piano, multi = (c is not None and str(audio) not in c[2] for c in (piano_csv, multi_csv))
-            if (not piano and not multi) or str(audio) in failed:
-                print(f'[{i + 1}/{len(files)}] skip {audio.name}')
-                continue
-            print(f'[{i + 1}/{len(files)}] {audio.name}')
-            try:
-                row, multi_row = reduce_song(audio, out_root, args, piano=piano, multi=multi)
-            except Exception as e:  # one broken file shouldn't stop a batch of hundreds
-                print(f'  FAILED: {e!r}')
-                with open(failed_path, 'a', encoding='utf-8') as f:
+        pool = stack.enter_context(ProcessPoolExecutor(args.cpu_workers, mp_context=multiprocessing.get_context(
+            'spawn'))) if args.cpu_workers and jobs else None
+        pending = set()
+
+        def record(audio, out_root, row, multi_row, error):
+            name = f'{out_root.name}/{audio.name}' if args.input_root else audio.name
+            if error is not None:  # one broken file shouldn't stop a batch of hundreds
+                print(f'  FAILED {name}: {error}')
+                with open(out_root / 'failed.txt', 'a', encoding='utf-8') as f:
                     f.write(f'{audio}\n')
-                continue
-            for c, r in ((piano_csv, row), (multi_csv, multi_row)):
-                if r is not None:
-                    c[1].writerow(r)
-                    c[0].flush()
+                return
+            if row is not None:
+                append_row(out_root / 'songs.csv', FIELDS, row)
+            if multi_row is not None:
+                append_row(out_root / 'multi.csv', MULTI_FIELDS, multi_row)
             if args.delete_audio:  # only songs processed in this run: skipped (already done) files are never touched
                 audio.unlink()
             if row:
-                print(f"  melody {row['n_melody']}, bass {row['n_bass']}, harmony {row['n_harmony']}, key {row['key']}")
+                print(f"  {name}: melody {row['n_melody']}, bass {row['n_bass']}, harmony {row['n_harmony']}, "
+                      f"key {row['key']}")
             if multi_row:
-                print('  multi: ' + ', '.join(f"{s} {multi_row[f'n_{s}']} ({multi_row[f'db_{s}']:+.0f} dB)" for s in STEMS))
+                print(f'  {name}: multi ' + ', '.join(
+                    f"{s} {multi_row[f'n_{s}']} ({multi_row[f'db_{s}']:+.0f} dB)" for s in STEMS))
 
+        def collect(limit):
+            """record finished CPU jobs until at most `limit` are in flight (bounds the stems waiting on disk)"""
+            nonlocal pending
+            while len(pending) > limit:
+                done, pending = wait(pending, return_when=FIRST_COMPLETED)
+                for job in done:
+                    record(*job.result())
 
-def open_csv(stack, path, fields):
-    """Append-mode CSV: (file, writer, source_audio values already in it)."""
-    done = set()
-    if path.exists():
-        with open(path, newline='', encoding='utf-8') as f:
-            done = {r['source_audio'] for r in csv.DictReader(f)}
-    f = stack.enter_context(open(path, 'a', newline='', encoding='utf-8'))
-    writer = csv.DictWriter(f, fieldnames=fields)
-    if not done and f.tell() == 0:
-        writer.writeheader()
-    return f, writer, done
+        for i, (audio, out_root, piano, multi) in enumerate(jobs):
+            if args.stop_file and Path(args.stop_file).exists():
+                print(f'stop file {args.stop_file} found, exiting before {audio.name}')
+                break
+            if args.max_minutes and time.time() - t0 > 60 * args.max_minutes:
+                print(f'--max-minutes {args.max_minutes:g} reached, exiting ({len(jobs) - i} songs left)')
+                break
+            print(f'[{i + 1}/{len(jobs)}] ' + (f'{out_root.name}/{audio.name}' if args.input_root else audio.name))
+            out_root.mkdir(parents=True, exist_ok=True)
+            try:
+                stems, drums = gpu_stage(audio, out_root, args, multi=multi)
+            except Exception as e:
+                record(audio, out_root, None, None, repr(e))
+                continue
+            if pool is None:
+                record(*cpu_stage(audio, out_root, args, stems, drums, piano=piano, multi=multi))
+            else:
+                pending.add(pool.submit(cpu_stage, audio, out_root, args, stems, drums, piano=piano, multi=multi))
+                collect(args.cpu_workers)
+        collect(0)
 
 
 if __name__ == '__main__':
