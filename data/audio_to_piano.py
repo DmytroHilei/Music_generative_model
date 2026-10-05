@@ -337,13 +337,15 @@ def main():
 
     fields = ['midi_filename', 'source_audio', 'n_melody', 'n_bass', 'n_harmony', 'key', 'mode', 'key_confidence']
     multi_fields = ['midi_filename', 'source_audio'] + [f'n_{s}' for s in STEMS] + [f'db_{s}' for s in STEMS]
+    failed_path = out_root / 'failed.txt'  # songs that failed once are not retried (a worker loop would spin on them)
+    failed = set(failed_path.read_text(encoding='utf-8').splitlines()) if failed_path.exists() else set()
     with ExitStack() as stack:
         piano_csv = open_csv(stack, out_root / 'songs.csv', fields) if not args.no_piano else None
         multi_csv = open_csv(stack, out_root / 'multi.csv', multi_fields) if args.multi else None
         for i, audio in enumerate(files):
             # a song is redone only for the outputs it is missing (e.g. multi-track for an already reduced song)
             piano, multi = (c is not None and str(audio) not in c[2] for c in (piano_csv, multi_csv))
-            if not piano and not multi:
+            if (not piano and not multi) or str(audio) in failed:
                 print(f'[{i + 1}/{len(files)}] skip {audio.name}')
                 continue
             print(f'[{i + 1}/{len(files)}] {audio.name}')
@@ -351,6 +353,8 @@ def main():
                 row, multi_row = reduce_song(audio, out_root, args, piano=piano, multi=multi)
             except Exception as e:  # one broken file shouldn't stop a batch of hundreds
                 print(f'  FAILED: {e!r}')
+                with open(failed_path, 'a', encoding='utf-8') as f:
+                    f.write(f'{audio}\n')
                 continue
             for c, r in ((piano_csv, row), (multi_csv, multi_row)):
                 if r is not None:
