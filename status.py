@@ -413,7 +413,7 @@ def songs_round2_rows(t):
     total = len(round2_artists())
     handled = sum(1 for v in states.values() if v == 'done') - (1 if info['running'] else 0)
     redo = sum(1 for v in states.values() if v == 'skipped')
-    waiting = len(list(songs.glob('*/*.mp3')))
+    waiting = len(unreduced_mp3s(songs, red))  # the worker may keep the mp3s (DELETE=0), so not every mp3 is waiting
     line1, line2 = fetch_lines(info)
     line3 = (f"{info['downloaded']} songs downloaded" +
              (f", {info['per_artist_songs']:.0f}/artist this run" if info['per_artist_songs'] else '') +
@@ -438,6 +438,56 @@ def songs_round2_rows(t):
     t.add_row('songs round 2: piano reduction', state,
               ProgressBar(total=max(1, info['downloaded']), completed=len(reduced)),
               f'{len(reduced)}/{info["downloaded"]} songs', detail)
+
+
+def unreduced_mp3s(songs, red):
+    """mp3s under songs/<artist>/ that red/<artist>/ has neither reduced (songs.csv) nor failed on (failed.txt)."""
+    out = []
+    for d in songs.glob('*/'):
+        done = set()
+        if (red / d.name / 'songs.csv').exists():
+            done = {r['source_audio'] for r in csv.DictReader(open(red / d.name / 'songs.csv', encoding='utf-8'))}
+        if (red / d.name / 'failed.txt').exists():
+            done |= set((red / d.name / 'failed.txt').read_text(encoding='utf-8').splitlines())
+        out += [p for p in d.glob('*.mp3') if str(p) not in done]
+    return out
+
+
+def redownload_rows(t):
+    """data/redownload.py streams (lost mp3s fetched again by URL): one row per log, its run after the last '=====' line."""
+    for name, log_name in (('SoundCloud', 'redownload_sc.log'), ('YouTube', 'redownload_yt.log')):
+        log = tail_text(LOGS / log_name, 30_000_000)
+        sep = list(re.finditer(r'^===== (\d{4}-\d\d-\d\d \d\d:\d\d:\d\d): re-download of (\S+) \((\w+)\) =====$',
+                               log or '', re.M))
+        if not sep:
+            continue
+        run = log[sep[-1].end():]
+        start = time.mktime(time.strptime(sep[-1].group(1), '%Y-%m-%d %H:%M:%S'))
+        which = 'round 1' if sep[-1].group(2).startswith('data/audio') else 'round 2'
+        m = re.search(r'^(\d+) to download', run, re.M)
+        total = int(m.group(1)) if m else 0
+        steps = re.findall(r'^\[(\d+)/\d+\] ', run, re.M)
+        at = int(steps[-1]) if steps else 0
+        failed = run.count('    FAILED')
+        finished = 'RE-DOWNLOAD DONE' in run
+        alive = running(f'data/redownload.py .*--source {sep[-1].group(3)}')
+        completed = max(0, at - failed - (1 if alive and not finished else 0))
+        detail = f'{name} · {which} · {failed} failed'
+        if alive:
+            if run.rstrip().endswith('waiting 5 min'):
+                detail += ' · WAITING: disk below the free-space floor'
+            elif at > 1:
+                per_song = (time.time() - start) / (at - 1)
+                detail += f' · {per_song:.0f} s/song, {eta_text((total - at + 1) * per_song)}'
+            if which == 'round 2' and sep[-1].group(3) == 'youtube' and \
+                    running('data/redownload.py --songs-csv data/audio/songs.csv'):  # the YouTube chain's 2nd run
+                detail += ' · then round 1 (queued)'
+        elif 'ABORTED' in run:
+            detail += ' · ABORTED (downloads blocked?)'
+        state = Text('running', style='bold yellow') if alive else \
+            Text('done', style='green') if finished else Text('stopped', style='red')
+        t.add_row(f're-download: {name}', state, ProgressBar(total=max(1, total), completed=completed),
+                  f'{completed}/{total} songs', detail)
 
 
 def pipeline_table():
@@ -507,6 +557,7 @@ def pipeline_table():
     hf_upload_row(t)
     covers_round2_row(t)
     songs_round2_rows(t)
+    redownload_rows(t)
     return t
 
 
