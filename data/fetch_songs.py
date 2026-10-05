@@ -216,6 +216,11 @@ def select(entries, names, args, known=(), have=None):
     return chosen
 
 
+def is_drm(e):
+    """A DRM-protected track (SoundCloud Go): can't be downloaded at all, says nothing about a block."""
+    return 'DRM protected' in str(e)
+
+
 def download(item, out_dir, quality, extra=None):
     opts = {
         **(extra or {}),
@@ -224,6 +229,7 @@ def download(item, out_dir, quality, extra=None):
         'outtmpl': str(out_dir / '%(title)s [%(id)s].%(ext)s'),
         'postprocessors': [{'key': 'FFmpegExtractAudio', 'preferredcodec': 'mp3', 'preferredquality': quality}],
         'noplaylist': True,
+        'overwrites': True,  # a leftover .m4a of an interrupted run would be taken as done and fail in ffprobe
     }
     with yt_dlp.YoutubeDL(opts) as ydl:
         ydl.download([item['url']])
@@ -297,6 +303,8 @@ def main():
                     download(item, out_root / artist, args.quality, extra)
                 except Exception as e:
                     print(f'    FAILED: {e!r}')
+                    if is_drm(e):
+                        continue  # the track, not a block: doesn't count toward --max-fails
                     fails += 1
                     if fails >= args.max_fails:
                         break

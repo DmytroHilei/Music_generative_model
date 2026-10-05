@@ -18,7 +18,7 @@ import sys
 import time
 from pathlib import Path
 
-from fetch_songs import download
+from fetch_songs import download, is_drm
 
 
 def parse_args():
@@ -79,8 +79,10 @@ def main():
             try:
                 download(r, out_root / r['artist'], args.quality, extra)
             except Exception as e:
-                fails += 1
                 print(f'    FAILED: {e!r}')
+                if is_drm(e):
+                    continue  # the track, not a block: doesn't count toward --max-fails
+                fails += 1
                 if fails >= args.max_fails:
                     print(f'\nABORTED: {fails} downloads in a row failed (blocked?)')
                     return
