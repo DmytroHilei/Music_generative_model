@@ -24,6 +24,7 @@ artist up with songs it doesn't have yet.
 
 import argparse
 import csv
+import fcntl
 import re
 import sys
 import time
@@ -93,6 +94,11 @@ def parse_args():
     parser.add_argument('--max-skips', type=int, default=3,
                         help='stop the run after this many artists in a row whose search kept failing (a block, '
                              'not a hiccup): the rest of the list stays untouched for a later re-run')
+    parser.add_argument('--max-fails', type=int, default=5,
+                        help='stop the run after this many failed downloads in a row (a block or the network down), '
+                             'so the rest of the list is not searched while nothing downloads')
+    parser.add_argument('--max-minutes', type=float, default=0,
+                        help='> 0: start no new artist after this many minutes (the current one finishes)')
     parser.add_argument('--ukrainian-only', action='store_true',
                         help="skip videos whose title has Russian-only letters (ы э ъ ё): keeps Ukrainian-language songs "
                              "of artists who also sing in Russian; titles without telling letters pass")
@@ -254,12 +260,24 @@ def main():
 
     fields = ['artist', 'song', 'video_title', 'id', 'url', 'duration']
     with open(csv_path, 'a', newline='', encoding='utf-8') as f:
+        # one run per output folder: two runs at once wrote every song twice (2026-10-05, 330 duplicate rows)
+        try:
+            fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            sys.exit(f'another fetch_songs.py run is writing {csv_path}: stop it first')
         writer = csv.DictWriter(f, fieldnames=fields)
         if not done:
             writer.writeheader()
-        skips = 0
+        skips = fails = 0
+        t_start = time.time()
         for names in artists:
             artist = names[0]
+            if args.max_minutes > 0 and time.time() - t_start > args.max_minutes * 60:
+                print(f'\nSTOPPED before {artist}: --max-minutes {args.max_minutes:g} reached')
+                break
+            if fails >= args.max_fails:
+                print(f'\nABORTED before {artist}: {fails} downloads in a row failed (blocked or network down?)')
+                break
             song_queries = [f'{artist} {t} піаніно' for t in sorted(raw_titles.get(artist, ()))] \
                 if args.mode == 'covers' and args.per_song_queries else []
             entries = search_with_retry(names, args.search_size, args.mode, song_queries, args.song_search_size,
@@ -279,7 +297,12 @@ def main():
                     download(item, out_root / artist, args.quality, extra)
                 except Exception as e:
                     print(f'    FAILED: {e!r}')
+                    fails += 1
+                    if fails >= args.max_fails:
+                        break
                     continue
+                fails = 0
+                done.add(item['id'])
                 writer.writerow(item)
                 f.flush()
                 time.sleep(args.sleep)

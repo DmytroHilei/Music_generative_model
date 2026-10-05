@@ -126,6 +126,20 @@ def tail_text(path, n_bytes=200_000):
         return None
 
 
+def head_until(path, marker, chunk=1 << 20):
+    """The start of a file up to the first marker (the whole file if it never appears)."""
+    out = b''
+    try:
+        with open(path, 'rb') as f:
+            while (block := f.read(chunk)):
+                out += block
+                if marker.encode() in out:
+                    break
+    except FileNotFoundError:
+        return ''
+    return out.decode('utf-8', 'ignore').split(marker)[0]
+
+
 def running(pattern):
     return subprocess.run(['pgrep', '-f', pattern], capture_output=True).returncode == 0
 
@@ -336,13 +350,16 @@ def fetch_info(output_dir, log_path):
     info['current'] = started[-1] if procs and started else None
     done = max(0, len(started) - (1 if procs else 0))
     info.update(run_total=len(names), run_done=done, run_left=max(0, len(names) - done),
-                n403=run.count('HTTP Error 403'), skipped=run.count('SKIPPED'), aborted='ABORTED' in run)
+                n403=run.count('HTTP Error 403'), skipped=run.count('SKIPPED'), aborted='ABORTED' in run,
+        failed=run.count('    FAILED'))
     info['eta'] = None
     if procs and run_start and done:
         per_artist = (time.time() - run_start) / done
         info.update(per_artist=per_artist, eta=info['run_left'] * per_artist)
     csv_path = Path(output_dir) / 'songs.csv'
-    info['downloaded'] = max(0, sum(1 for _ in open(csv_path, encoding='utf-8')) - 1) if csv_path.exists() else 0
+    # unique songs: overlapping runs once wrote rows twice
+    info['downloaded'] = len({r['id'] for r in csv.DictReader(open(csv_path, encoding='utf-8'))}) \
+        if csv_path.exists() else 0
     run_rows = run.count('[get ]') - run.count('FAILED')  # '[get ]' can follow yt-dlp's progress on a line
     info['per_artist_songs'] = run_rows / done if done else None
     return info
@@ -361,7 +378,7 @@ def fetch_lines(info):
         if info['eta'] is not None:
             line1 += f" · {info['per_artist'] / 60:.1f} min/artist, {eta_text(info['eta'])}"
     else:
-        line1 = f'{src} · not running' + (' · last run ABORTED (search blocked)' if info['aborted'] else '')
+        line1 = f'{src} · not running' + (' · last run ABORTED (blocked or network down?)' if info['aborted'] else '')
     queries = ', '.join(f'"{t.format("<artist>")}"' for t in info['templates'])
     line2 = (f"queries ×{info['aliases']:.1f} names/artist: {queries} · {info['search_size']} results each, "
              f"{info['search_sleep']:g} s between searches, {info['sleep']:g} s between downloads") \
@@ -417,7 +434,7 @@ def songs_round2_rows(t):
     line1, line2 = fetch_lines(info)
     line3 = (f"{info['downloaded']} songs downloaded" +
              (f", {info['per_artist_songs']:.0f}/artist this run" if info['per_artist_songs'] else '') +
-             f" · this run: {info['n403']} × 403, {info['skipped']} artists skipped" +
+             f" · this run: {info['failed']} downloads failed, {info['n403']} × 403, {info['skipped']} artists skipped" +
              (f' · {redo} skipped to redo' if redo else ''))
     t.add_row('songs round 2: download', run_state(info, False, 0), ProgressBar(total=total, completed=handled),
               f'{handled}/{total} artists', '\n'.join(l for l in (line1, line2, line3) if l))
@@ -548,10 +565,10 @@ def pipeline_table():
         rate = f'{per_song:.0f} s/song, ~{pending * per_song / 60:.0f} min left for {pending} downloaded songs'
     elif pending:
         rate = f'{pending} downloaded songs waiting'
-    # reduce2.log also receives the round-2 reductions (appended): count round 1 only, up to its DONE line
-    failed = sum((tail_text(LOGS / n) or '').split('REDUCTION DONE')[0].count('FAILED') for n in ('reduce.log', 'reduce2.log'))
+    # reduce2.log also receives the round-2 reductions (appended): count round 1 only, from the start to its DONE line
+    failed = sum(head_until(LOGS / n, 'REDUCTION DONE').count('FAILED') for n in ('reduce.log', 'reduce2.log'))
     t.add_row('songs round 1: piano reduction', red_state, ProgressBar(total=max(1, len(reduced) + pending), completed=len(reduced)),
-              f'{len(reduced)}/{len(reduced) + pending}', rate + (f'; {failed} failed' if failed else ''))
+              f'{len(reduced)}/{len(reduced) + pending}', '; '.join(x for x in (rate, f'{failed} failed' if failed else '') if x))
     gigamidi_row(t)
     discover_row(t)
     hf_upload_row(t)
