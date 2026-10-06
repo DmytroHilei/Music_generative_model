@@ -142,7 +142,14 @@ def head_until(path, marker, chunk=1 << 20):
 
 
 def running(pattern):
-    return subprocess.run(['pgrep', '-f', pattern], capture_output=True).returncode == 0
+    """PID of the oldest process matching pattern (the top of its tree: a runner script, not its children), or None."""
+    out = subprocess.run(['pgrep', '-o', '-f', pattern], capture_output=True, text=True).stdout.split()
+    return out[0] if out else None
+
+
+def running_text(pid, label='running'):
+    """State cell of a live stage, with the PID to kill it by."""
+    return Text(f'{label}\npid {pid}' if pid else label, style='bold yellow')
 
 
 def active_train_logs():
@@ -236,7 +243,7 @@ def gigamidi_row(t):
     text = tail_text(LOGS / 'prepare_gigamidi.log') or ''
     bars = GIGA_BAR.findall(text)
     stopped = 'STOP:' in text[-2000:]
-    state = (Text('running', style='bold yellow') if is_running else Text('stopped (disk)', style='red') if stopped
+    state = (running_text(is_running) if is_running else Text('stopped (disk)', style='red') if stopped
              else Text('done', style='green') if 'train' in done else Text('idle', style='dim'))
     detail = f"done: {', '.join(done) or '—'}"
     if bars and is_running:
@@ -266,13 +273,14 @@ def discover_row(t):
                   ', '.join(f'{sp} {nf} files / {int(nn.replace(",", "")) / 1e6:.0f}M notes' for sp, nf, nn in done))
     elif is_running and bars:
         pct, cur, tot, _, eta, rate, kept, notes, proj = bars[-1]
-        t.add_row('Discover tokenize+dedupe', Text('running', style='bold yellow'),
+        t.add_row('Discover tokenize+dedupe', running_text(is_running),
                   ProgressBar(total=int(tot), completed=int(cur)), f'{int(cur):,}/{int(tot):,}',
                   f'{rate} files/s, ETA {eta}' + (f', kept {kept}%, {notes} notes, ~{proj} GB projected' if kept else ''))
     elif not tar.exists():
         partial = list(Path('/data/discover/.cache/huggingface/download').glob('*.incomplete'))
         size = max((p.stat().st_size for p in partial), default=0)
-        t.add_row('Discover download', Text('running' if running('hf download') else 'idle', style='bold yellow'),
+        hf_pid = running('hf download')
+        t.add_row('Discover download', running_text(hf_pid) if hf_pid else Text('idle', style='dim'),
                   ProgressBar(total=29_378, completed=size // 1_000_000), f'{size / 1e9:.1f}/29.4 GB', '')
     else:
         t.add_row('Discover tokenize+dedupe', Text('waiting' if is_running else 'idle', style='dim'),
@@ -303,7 +311,7 @@ def hf_upload_row(t):
         state, detail = Text('done', style='green'), re.search(r'upload verified.*', text).group(0)
     elif is_running:
         cur, attempt = started[-1] if started else ('hashing', '1')
-        state = Text('running', style='bold yellow')
+        state = running_text(is_running)
         detail = f'now: {cur} ({sizes.get(cur, 0) / 1e9:.1f} GB, attempt {attempt})' + \
                  (f'; {len(failed)} failed attempts so far' if failed else '')
     else:
@@ -355,7 +363,7 @@ def fetch_info(output_dir, log_path):
     procs = [l.split(None, 1) for l in subprocess.run(['pgrep', '-af', 'data/fetch_songs.py'], capture_output=True,
                                                       text=True).stdout.splitlines()
              if f'--output {output_dir}' in l and 'pgrep' not in l]
-    info = {'running': bool(procs), 'paused': False, 'log': log}
+    info = {'running': bool(procs), 'pid': procs[0][0] if procs else None, 'paused': False, 'log': log}
     sep = list(re.finditer(r'^===== (\d{4}-\d\d-\d\d \d\d:\d\d:\d\d)[^\n]*$', log, re.M))
     run = log[sep[-1].end():] if sep else log
     run_start = time.mktime(time.strptime(sep[-1].group(1), '%Y-%m-%d %H:%M:%S')) if sep else None
@@ -428,7 +436,7 @@ def round2_artists():
 
 def run_state(info, busy, pending):
     if info['running'] or busy:
-        return Text('running', style='bold yellow')
+        return running_text(info['pid'])
     if pending or info['run_left'] or info['aborted']:
         return Text('stopped', style='red')
     return Text('done', style='green')
@@ -490,7 +498,7 @@ def songs_round2_rows(t):
         to_come = waiting + (info['run_left'] * info['per_artist_songs'] if info['per_artist_songs'] else 0)
         eta = max(info['eta'] or 0, to_come * per_song)
         detail += f' · ~{to_come:.0f} songs still to reduce, {eta_text(eta)}'
-    state = Text('running', style='bold yellow') if worker else \
+    state = running_text(worker) if worker else \
         Text('done', style='green') if not waiting and not info['running'] else Text('stopped', style='red')
     t.add_row('songs round 2: piano reduction', state,
               ProgressBar(total=max(1, info['downloaded']), completed=len(reduced)),
@@ -541,7 +549,7 @@ def redownload_rows(t):
                 detail += ' · then round 1 (queued)'
         elif 'ABORTED' in run:
             detail += ' · ABORTED (downloads blocked?)'
-        state = Text('running', style='bold yellow') if alive else \
+        state = running_text(alive) if alive else \
             Text('done', style='green') if finished else Text('stopped', style='red')
         t.add_row(f're-download: {name}', state, ProgressBar(total=max(1, total), completed=completed),
                   f'{completed}/{total} songs', detail)
@@ -584,7 +592,7 @@ def pipeline_table():
         missing = [a for a in artists if not per_artist.get(a, 0)]
         detail = f"{done_artists}/{len(artists)} artists of data/artists.txt (YouTube)" + \
             (f"; none for: {', '.join(missing[:4])}" if missing else '')
-    dl_state = Text('running', style='bold yellow') if fetch_running else Text('done', style='green')
+    dl_state = running_text(round1[0][0]) if fetch_running else Text('done', style='green')
     # this run's new downloads: "[get ]" lines in its log minus the failed ones
     new = log_text.count('[get ]') - log_text.count('FAILED')
     t.add_row('songs round 1: download', dl_state, ProgressBar(total=len(artists), completed=done_artists),
@@ -597,7 +605,7 @@ def pipeline_table():
     pending = sum(1 for _, midi in audio if not midi.exists())
     reduced = [p for p in (ROOT / 'data/finetune').glob('*/midi/*.mid') if p.parts[-3] != 'skryabin_test']
     red_running = running('run_reduce.sh') or running('run_fetch_reduce2.sh')
-    red_state = Text('running', style='bold yellow') if red_running else Text('done', style='green')
+    red_state = running_text(red_running) if red_running else Text('done', style='green')
     rate = ''
     recent = [p.stat().st_mtime for p in reduced if time.time() - p.stat().st_mtime < 900]
     if len(recent) >= 2:
@@ -615,6 +623,7 @@ def pipeline_table():
     covers_round2_row(t)
     songs_round2_rows(t)
     redownload_rows(t)
+    t.caption = ('kill <pid> stops a stage; a runner script (.sh) with its children: kill -- -<pid>')
     return t
 
 
