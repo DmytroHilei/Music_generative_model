@@ -45,6 +45,8 @@ checkpoint_format = 'full'  # 'full' = fp32 weights + optimizer (resumable), 'bf
                             # not resumable; fine for generation and for init_from='finetune')
 init_from = 'scratch'     # 'scratch' | 'resume' | 'finetune'
 ckpt_interval_min = 0.0    # >0: also write a full resumable out_dir/ckpt.pt every N minutes and at the end (atomic)
+save_pre_cooldown = True   # wsd: full resumable state to out_dir/pre_cooldown.pt just before the cooldown starts, so a
+                           # later stage can continue the constant-LR phase on more data and do its own cooldown
 init_ckpt = 'checkpoints/ckpt.pt'  # used by 'finetune'
 
 # data
@@ -239,7 +241,9 @@ checkpoint = None
 if init_from in ('resume', 'finetune'):
     ckpt_path = os.path.join(out_dir, 'ckpt.pt') if init_from == 'resume' else init_ckpt
     print(f"{init_from}: loading {ckpt_path}")
-    checkpoint = torch.load(ckpt_path, map_location=device)
+    # to CPU: the weights are copied into the model below, and a GPU copy would stay alive through `state_dict`
+    # (~0.9 GB for the 450M bf16 base, the margin between fitting and OOM at micro 1 on the 8 GB laptop)
+    checkpoint = torch.load(ckpt_path, map_location='cpu')
     for k in arch_keys:
         wanted = model_args[k]
         model_args[k] = checkpoint['model_args'].get(k, legacy_defaults.get(k, model_args[k]))
@@ -270,6 +274,7 @@ if checkpoint is not None:
             print(f"finetune: grown / new parameters (fresh init): {', '.join(grown)}")
     else:
         model.load_state_dict(state_dict)
+    state_dict = None
     if init_from == 'resume':
         iter_num = checkpoint['iter_num']
         best_val_loss = checkpoint['best_val_loss']
@@ -369,13 +374,15 @@ def estimate_val_loss(loader, conditioned=True):
     return out
 
 
+cooldown_start = lr_decay_iters - int(cooldown_frac * lr_decay_iters)  # wsd only
+
+
 def get_lr(it):
     # 1) linear warmup
     if it < warmup_iters:
         return learning_rate * (it + 1) / (warmup_iters + 1)
     if lr_schedule == 'wsd':
         # Hägele et al. 2024: constant LR, then a (1 - sqrt) cooldown; matches or beats cosine at equal compute
-        cooldown_start = lr_decay_iters - int(cooldown_frac * lr_decay_iters)
         if it < cooldown_start:
             return learning_rate
         progress = min(1.0, (it - cooldown_start) / max(1, lr_decay_iters - cooldown_start))
@@ -403,10 +410,10 @@ else:
     wandb_run_id = None
 
 
-def save_resumable(it):
-    """Full state to out_dir/ckpt.pt; `it` = the next iteration to run. tmp + rename, so a crash mid-save keeps the old file."""
+def save_resumable(it, name='ckpt.pt'):
+    """Full state to out_dir/<name>; `it` = the next iteration to run. tmp + rename, so a crash mid-save keeps the old file."""
     os.makedirs(out_dir, exist_ok=True)
-    path = os.path.join(out_dir, 'ckpt.pt')
+    path = os.path.join(out_dir, name)
     torch.save({'model_args': model_args, 'iter_num': it, 'best_val_loss': best_val_loss, 'config': config,
                 'model': raw_model.state_dict(), 'optimizer': optimizer.state_dict(),
                 'wandb_run_id': wandb_run_id}, path + '.tmp')
@@ -527,6 +534,10 @@ for iter_num in pbar:
                 tqdm.write(f"saved checkpoint to {os.path.join(out_dir, name)}")
     if iter_num == 0 and eval_only:
         break
+    if save_pre_cooldown and lr_schedule == 'wsd' and decay_lr and iter_num == cooldown_start and iter_num > 0:
+        # the weights + optimizer after the last constant-LR step; continue from it with init_from='resume' after
+        # copying it to <new out_dir>/ckpt.pt (data, max_iters and lr_decay_iters come from the new config)
+        save_resumable(iter_num, 'pre_cooldown.pt')
 
     # forward backward update, with gradient accumulation
     def accumulate(X, Y, net):

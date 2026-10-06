@@ -14,6 +14,9 @@ Columns: split, midi_filename (absolute), artist, title.
 data/covers/songs.csv. Several covers of one song (different pianists) are all kept; the split uses the same title hash,
 so a song is validation for both sources or for neither.
     python data/prepare_finetune.py --source covers --style cover --out data/finetune/ukrainian_covers.csv
+
+--round2: also the round-2 folders (/data/finetune_round2 with titles from /data/songs_round2/songs.csv, or
+/data/covers_round2). Their ids can be SoundCloud's (numeric); a song filed under two artists (a duet) is kept once.
 """
 
 import argparse
@@ -23,6 +26,11 @@ import zlib
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+# (MIDI folder with <artist>/midi/, songs.csv with the titles by id) per source; round 2 lives on the /data disk
+ROUND1 = {'reductions': (ROOT / 'data/finetune', ROOT / 'data/audio/songs.csv'),
+          'covers': (ROOT / 'data/covers', ROOT / 'data/covers/songs.csv')}
+ROUND2 = {'reductions': (Path('/data/finetune_round2'), Path('/data/songs_round2/songs.csv')),
+          'covers': (Path('/data/covers_round2'), Path('/data/covers_round2/songs.csv'))}
 TRANSLIT = dict(zip('абвгґдеєжзиіїйклмнопрстуфхцчшщьюяэыъё',
                     ['a', 'b', 'v', 'h', 'g', 'd', 'e', 'ie', 'zh', 'z', 'y', 'i', 'i', 'i', 'k', 'l', 'm', 'n', 'o',
                      'p', 'r', 's', 't', 'u', 'f', 'kh', 'ts', 'ch', 'sh', 'shch', '', 'iu', 'ia', 'e', 'y', '', 'e']))
@@ -46,15 +54,16 @@ def main():
     ap.add_argument('--out', default=str(ROOT / 'data/finetune/ukrainian.csv'))
     ap.add_argument('--style', default='', help="write a 'style' column with this label for every song (e.g. "
                     "'reduction' = one domain label); without it the loader uses the artist as the style")
+    ap.add_argument('--round2', action='store_true', help='also the round-2 folders on /data')
     args = ap.parse_args()
 
     by_id = {}
     covers = args.source == 'covers'
-    base = ROOT / ('data/covers' if covers else 'data/finetune')
-    songs_csv = base / 'songs.csv' if covers else ROOT / 'data/audio/songs.csv'
-    if songs_csv.exists():
-        with open(songs_csv, newline='', encoding='utf-8') as f:
-            by_id = {row['id']: row['song'] for row in csv.DictReader(f)}
+    sources = [ROUND1[args.source]] + ([ROUND2[args.source]] if args.round2 else [])
+    for _, songs_csv in sources:
+        if songs_csv.exists():
+            with open(songs_csv, newline='', encoding='utf-8') as f:
+                by_id.update({row['id']: row['song'] for row in csv.DictReader(f)})
 
     # data/finetune/exclude.txt: YouTube ids of wrong search hits (another artist, a vlog, a sped-up copy), '#' comments
     exclude_txt = ROOT / 'data/finetune/exclude.txt'
@@ -62,16 +71,23 @@ def main():
         if exclude_txt.exists() else set()
     train_only = {line.split('|')[0].strip() for line in open(args.train_only_artists, encoding='utf-8')
                   if line.strip() and not line.startswith('#')} if args.train_only_artists else set()
-    rows, seen, dupes, n_excluded = [], {}, [], 0
-    for midi in sorted(base.glob('*/midi/*.mid')):
+    rows, seen, seen_ids, dupes, n_excluded = [], {}, {}, [], 0
+    for midi in sorted(m for base, _ in sources for m in base.glob('*/midi/*.mid')):
         folder = midi.parent.parent.name
         if folder == 'skryabin_test':
             continue
         artist = ARTIST_ALIASES.get(folder, folder)
-        m = re.search(r'\[([\w-]{11})\]', midi.stem)
+        # the id is the last [...] of the name: YouTube (11 chars) or SoundCloud (numeric); older names may carry
+        # other brackets after it
+        m = re.search(r'\[([\w-]+)\]$', midi.stem) or re.search(r'\[([\w-]{11})\]', midi.stem)
         if m and m.group(1) in excluded:
             n_excluded += 1
             continue
+        if m and m.group(1) in seen_ids:
+            dupes.append((midi.name, seen_ids[m.group(1)]))
+            continue
+        if m:
+            seen_ids[m.group(1)] = midi.name
         if m and m.group(1) in by_id:
             title = by_id[m.group(1)]
         else:

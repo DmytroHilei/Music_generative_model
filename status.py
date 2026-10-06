@@ -298,10 +298,20 @@ def query_templates():
     return {}
 
 
-def artist_states(log):
-    """Latest state per artist over all runs in a fetch log: 'done' or 'skipped' (search kept failing)."""
-    states, last_skipped = {}, None
-    for line in log.splitlines():
+_artist_states = {}  # log path -> (bytes read, states, last skipped artist)
+
+
+def artist_states(path):
+    """Latest state per artist over all runs in a fetch log: 'done' or 'skipped' (search kept failing). Reads the
+    whole log (tens of MB of download progress, more than tail_text keeps), only the new part on each refresh."""
+    offset, states, last_skipped = _artist_states.get(path, (0, {}, None))
+    if path.stat().st_size < offset:
+        offset, states, last_skipped = 0, {}, None
+    with open(path, 'rb') as f:
+        f.seek(offset)
+        data = f.read()
+    data = data[:data.rfind(b'\n') + 1]  # whole lines only: the rest is read next time
+    for line in data.decode('utf-8', 'ignore').replace('\r', '\n').splitlines():
         m = re.match(r'\s+SKIPPED (.+): search kept failing$', line)
         if m:
             last_skipped = m.group(1)
@@ -310,6 +320,7 @@ def artist_states(log):
         if m:
             states[m.group(1)] = 'skipped' if m.group(1) == last_skipped else 'done'
             last_skipped = None
+    _artist_states[path] = (offset + len(data), states, last_skipped)
     return states
 
 
@@ -406,7 +417,7 @@ def covers_round2_row(t):
         return
     out = Path('/data/covers_round2')
     info = fetch_info(str(out), LOGS / 'fetch_covers2.log')
-    states = artist_states(info['log'])
+    states = artist_states(LOGS / 'fetch_covers2.log')
     total = len(round2_artists())
     handled = sum(1 for v in states.values() if v == 'done') - (1 if info['running'] else 0)
     redo = sum(1 for v in states.values() if v == 'skipped')
@@ -426,7 +437,7 @@ def songs_round2_rows(t):
         return
     songs, red = Path('/data/songs_round2'), Path('/data/finetune_round2')
     info = fetch_info(str(songs), LOGS / 'fetch_songs2.log')
-    states = artist_states(info['log'])
+    states = artist_states(LOGS / 'fetch_songs2.log')
     total = len(round2_artists())
     handled = sum(1 for v in states.values() if v == 'done') - (1 if info['running'] else 0)
     redo = sum(1 for v in states.values() if v == 'skipped')
@@ -439,10 +450,15 @@ def songs_round2_rows(t):
     t.add_row('songs round 2: download', run_state(info, False, 0), ProgressBar(total=total, completed=handled),
               f'{handled}/{total} artists', '\n'.join(l for l in (line1, line2, line3) if l))
 
-    reduced = [p.stat().st_mtime for p in red.glob('*/midi/*.mid')]
+    # by song id: a duet is downloaded under both artists and reduced in both folders, but is one song of songs.csv
+    reduced = {p.stem.rsplit('[', 1)[-1].rstrip(']'): p.stat().st_mtime for p in red.glob('*/midi/*.mid')}
+    # failed.txt also lists broken partial downloads (.m4a, never in songs.csv): only failed mp3s are songs
+    failed = len({line.rsplit('[', 1)[-1] for f in red.glob('*/failed.txt')
+                  for line in f.read_text(encoding='utf-8').splitlines() if line.endswith('].mp3')}
+                 - {k + '].mp3' for k in reduced})
     worker = running('run_gpu_worker_round2.sh')
-    recent = [m for m in reduced if time.time() - m < 3600]
-    detail = f'{waiting} mp3 waiting'
+    recent = [m for m in reduced.values() if time.time() - m < 3600]
+    detail = f'{waiting} mp3 waiting' + (f' · {failed} failed' if failed else '')
     if worker and len(recent) >= 2:
         per_song = (max(recent) - min(recent)) / (len(recent) - 1)
         detail = f'{3600 / per_song:.0f} songs/h over the last hour · ' + detail
