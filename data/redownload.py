@@ -5,7 +5,8 @@ old folder matches its reduction (audio_to_piano.py then only adds what is missi
 
 Resumable: every finished id is appended to <output>/redownloaded.txt and never fetched again (the mp3 itself may be
 deleted by the worker afterwards). songs.csv is never written. Waits while the disk is below --min-free-gb and stops
-after --max-fails failed downloads in a row (a block, not a broken link).
+after --max-fails failed downloads in a row (a block, not a broken link). Without network (DNS down, e.g. after a
+suspend) it waits until the host resolves again and retries the song; that doesn't count as a failure.
 
     .venv-audio/bin/python data/redownload.py --songs-csv /data/songs_round2/songs.csv --output /data/songs_round2 \
         --source soundcloud
@@ -18,7 +19,7 @@ import sys
 import time
 from pathlib import Path
 
-from fetch_songs import download, is_drm
+from fetch_songs import download_when_online, is_drm
 
 
 def parse_args():
@@ -77,7 +78,7 @@ def main():
             if args.dry_run:
                 continue
             try:
-                download(r, out_root / r['artist'], args.quality, extra)
+                download_when_online(r, out_root / r['artist'], args.quality, extra)
             except Exception as e:
                 print(f'    FAILED: {e!r}')
                 if is_drm(e):

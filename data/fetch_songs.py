@@ -26,10 +26,12 @@ import argparse
 import csv
 import fcntl
 import re
+import socket
 import sys
 import time
 from collections import Counter
 from pathlib import Path
+from urllib.parse import urlparse
 
 import yt_dlp
 
@@ -95,8 +97,8 @@ def parse_args():
                         help='stop the run after this many artists in a row whose search kept failing (a block, '
                              'not a hiccup): the rest of the list stays untouched for a later re-run')
     parser.add_argument('--max-fails', type=int, default=5,
-                        help='stop the run after this many failed downloads in a row (a block or the network down), '
-                             'so the rest of the list is not searched while nothing downloads')
+                        help='stop the run after this many failed downloads in a row (a block; without network it '
+                             'waits instead), so the rest of the list is not searched while nothing downloads')
     parser.add_argument('--max-minutes', type=float, default=0,
                         help='> 0: start no new artist after this many minutes (the current one finishes)')
     parser.add_argument('--ukrainian-only', action='store_true',
@@ -144,14 +146,19 @@ def song_title(video_title, names, covers=False, known=()):
 
 def search_with_retry(names, n, mode='songs', song_queries=(), song_n=8, source='youtube', extra=None, pause=0.0,
                       attempts=4):
-    """Network hiccups (DNS, timeouts) shouldn't kill a multi-hour run: retry with backoff, then skip the artist
-    (returns None)."""
-    for attempt in range(attempts):
+    """Network hiccups (timeouts) shouldn't kill a multi-hour run: retry with backoff, then skip the artist
+    (returns None). Without network (DNS down) it waits until it is back, without using up an attempt."""
+    attempt = 0
+    while attempt < attempts:
         try:
             return search(names, n, mode, song_queries, song_n, source, extra, pause)
         except Exception as e:
+            if is_offline(e):
+                wait_online('www.youtube.com' if source == 'youtube' else 'soundcloud.com')
+                continue
             wait = 30 * 2 ** attempt
-            print(f'  search failed ({type(e).__name__}), retry {attempt + 1}/{attempts} in {wait}s')
+            attempt += 1
+            print(f'  search failed ({type(e).__name__}), retry {attempt}/{attempts} in {wait}s')
             time.sleep(wait)
     print(f'  SKIPPED {names[0]}: search kept failing')
     return None
@@ -221,6 +228,24 @@ def is_drm(e):
     return 'DRM protected' in str(e)
 
 
+def is_offline(e):
+    """No network on our side (DNS down, e.g. right after the laptop wakes up): says nothing about the song or a
+    block."""
+    return any(m in str(e) for m in ('Failed to resolve', 'name resolution', 'Network is unreachable'))
+
+
+def wait_online(host, poll=30):
+    """Block until host resolves again."""
+    print(f'    offline, waiting for {host}')
+    while True:
+        try:
+            socket.getaddrinfo(host, 443)
+            print(f"    online again {time.strftime('%Y-%m-%d %H:%M:%S')}")
+            return
+        except OSError:
+            time.sleep(poll)
+
+
 def download(item, out_dir, quality, extra=None):
     opts = {
         **(extra or {}),
@@ -233,6 +258,17 @@ def download(item, out_dir, quality, extra=None):
     }
     with yt_dlp.YoutubeDL(opts) as ydl:
         ydl.download([item['url']])
+
+
+def download_when_online(item, out_dir, quality, extra=None):
+    """download(), but without network it waits until the host resolves again and retries the song."""
+    while True:
+        try:
+            return download(item, out_dir, quality, extra)
+        except Exception as e:
+            if not is_offline(e):
+                raise
+            wait_online(urlparse(item['url']).hostname)
 
 
 def main():
@@ -282,7 +318,7 @@ def main():
                 print(f'\nSTOPPED before {artist}: --max-minutes {args.max_minutes:g} reached')
                 break
             if fails >= args.max_fails:
-                print(f'\nABORTED before {artist}: {fails} downloads in a row failed (blocked or network down?)')
+                print(f'\nABORTED before {artist}: {fails} downloads in a row failed (blocked?)')
                 break
             song_queries = [f'{artist} {t} піаніно' for t in sorted(raw_titles.get(artist, ()))] \
                 if args.mode == 'covers' and args.per_song_queries else []
@@ -300,7 +336,7 @@ def main():
                 if args.dry_run or item['id'] in done:
                     continue
                 try:
-                    download(item, out_root / artist, args.quality, extra)
+                    download_when_online(item, out_root / artist, args.quality, extra)
                 except Exception as e:
                     print(f'    FAILED: {e!r}')
                     if is_drm(e):
