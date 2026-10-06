@@ -283,6 +283,15 @@ if checkpoint is not None:
         torch.manual_seed(seed + iter_num)
         random.seed(seed + iter_num)
 
+# the window conditions follow the model, not the config: a finetune of a conditioned base (long_450m) left them
+# at the config default (off), so it trained and evaluated only the 'none' condition (ua_450_s1, 2026-10-06)
+if (cond_inst, n_density) != (model_args['cond_inst'], model_args['n_density']):
+    print(f"conditioning from the checkpoint: cond_inst={model_args['cond_inst']}, n_density={model_args['n_density']}")
+    cond_inst, n_density = model_args['cond_inst'], model_args['n_density']
+    config.update(cond_inst=cond_inst, n_density=n_density)
+assert not cond_inst or n_programs == model_args['n_programs'], \
+    f"cond_inst: set n_programs={model_args['n_programs']} (the model's instrument vocabulary)"
+
 if block_size < model.config.block_size:
     model.crop_block_size(block_size)
     model_args['block_size'] = block_size
