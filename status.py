@@ -109,6 +109,7 @@ RUNS = [
     ('AdamW newblock seed 3', 'abl_adamw_nb_s3.log', '42M 98Mt'),
     ('abl iso-S, new block (C=3.2e16)', 'abl_iso_S_nb.log', '6Lx256 681Mt'),
     ('conditioning A/B: newblock + instruments + density', 'abl_cond.log', '42M 98Mt'),
+    ('ua-450 stage 1 (round 1+2 data, 450M)', 'ua_450_s1.log', 'FT 450M'),
 ]
 
 TQDM = re.compile(r'Training:\s+(\d+)%\|[^|]*\|\s*(\d+)/(\d+) \[([\d:]+)<([\d:?]+),\s*([\d.?]+)(it/s|s/it)')
@@ -144,6 +145,29 @@ def running(pattern):
     return subprocess.run(['pgrep', '-f', pattern], capture_output=True).returncode == 0
 
 
+def active_train_logs():
+    """{log name: (pid, log path, config)} of the live train.py runs. A run is live if a train.py process has its
+    stdout on that log (works for --out_dir and config-file runs); pid is the main process, not a data worker."""
+    pids = subprocess.run(['pgrep', '-f', 'python train.py'], capture_output=True, text=True).stdout.split()
+    active = {}
+    for pid in pids:
+        try:
+            with open(f'/proc/{pid}/stat') as f:
+                ppid = f.read().rsplit(')', 1)[1].split()[1]
+            if ppid in pids:  # a DataLoader worker shares the parent's stdout
+                continue
+            path = Path(os.readlink(f'/proc/{pid}/fd/1'))
+            with open(f'/proc/{pid}/cmdline', 'rb') as f:
+                args = f.read().decode().split('\0')
+        except OSError:
+            continue
+        if not path.is_file():  # stdout on a terminal or pipe: no log to read
+            continue
+        config = next((Path(a).stem for a in args if a.startswith('config/')), '')
+        active[path.name] = (pid, path, config)
+    return active
+
+
 def training_table(done_keep=None):
     """All unfinished runs plus the last done_keep finished ones (None = all)."""
     t = Table(title='Training runs', expand=True, title_justify='left')
@@ -152,16 +176,15 @@ def training_table(done_keep=None):
                     ('main val CE', {'justify': 'right'}), ('2nd val CE', {'justify': 'right'}),
                     ('pit/vel/dur/dt', {'justify': 'right'})]:
         t.add_column(col, **kw)
-    # a run is live if some train.py process has its stdout on that log (works for --out_dir and config-file runs)
-    active = set()
-    for pid in subprocess.run(['pgrep', '-f', 'python train.py'], capture_output=True, text=True).stdout.split():
-        try:
-            active.add(Path(os.readlink(f'/proc/{pid}/fd/1')).name)
-        except OSError:
-            pass
+    active = active_train_logs()
+    # live runs not listed in RUNS are picked up from their process: label = log name, params = config file
+    known = {log for _, log, _ in RUNS}
+    runs = [(label, LOGS / log, params) for label, log, params in RUNS]
+    runs += [(path.stem, path, config) for name, (_, path, config) in sorted(active.items()) if name not in known]
     rows = []  # (finished?, cells)
-    for label, log, params in RUNS:
-        text = tail_text(LOGS / log)
+    for label, path, params in runs:
+        log = path.name
+        text = tail_text(path)
         if not text or not text.strip():
             rows.append((False, (label, params, Text('queued', style='dim'), '', '', '', '', '', '', '')))
             continue
@@ -171,7 +194,8 @@ def training_table(done_keep=None):
         cur, tot = int(cur), int(tot)
         is_running = log in active
         done = steps and int(steps[-1][0]) >= tot - 1
-        state = (Text('done', style='green') if done else Text('running', style='bold yellow') if is_running
+        state = (Text('done', style='green') if done
+                 else Text(f'running\npid {active[log][0]}', style='bold yellow') if is_running
                  else Text('stopped', style='red'))
         if 'Traceback' in text[-5000:] or 'out of memory' in text[-5000:]:
             state = Text('CRASHED', style='bold red')
