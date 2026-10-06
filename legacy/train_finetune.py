@@ -11,7 +11,7 @@ from tqdm import tqdm
 from torch.utils.data import Subset
 import random
 
-from model import MusicConfig, GPT
+from musicar.model import MusicConfig, GPT
 
 # -----------------------------------------------------------------------------
 # default config values designed to train a gpt2 (124M) on OpenWebText
@@ -71,7 +71,7 @@ compile = False # use PyTorch 2.0 to compile the model to be faster
 
 """# -----------------------------------------------------------------------------
 config_keys = [k for k,v in globals().items() if not k.startswith('_') and isinstance(v, (int, float, bool, str))]
-exec(open('configurator.py').read()) # overrides from command line or config file
+exec(open('musicar/configurator.py').read()) # overrides from command line or config file
 config = {k: globals()[k] for k in config_keys} # will be useful for logging
 # -----------------------------------------------------------------------------"""
 
@@ -89,7 +89,7 @@ device_type = 'cuda' if 'cuda' in device else 'cpu' # for later use in torch.aut
 ptdtype = {'float32': torch.float32, 'bfloat16': torch.bfloat16, 'float16': torch.float16}[dtype]
 ctx = nullcontext() if device_type == 'cpu' else torch.amp.autocast(device_type=device_type, dtype=ptdtype)
 
-from data_loader import MaestroDataset
+from musicar.data_loader import MaestroDataset
 
 def collate_fn(batch):
     xs, ys = zip(*batch)

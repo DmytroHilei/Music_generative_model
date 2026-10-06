@@ -26,9 +26,7 @@ from pathlib import Path
 import numpy as np
 from tqdm import tqdm
 
-import sys
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from data_loader import _tokenize_to_array  # noqa: E402
+from musicar.data_loader import _tokenize_to_array
 
 
 def parse_args():

@@ -34,7 +34,7 @@ STOP_FLAG=()
 POST=()
 # after a finished run: the per-style settings sweep (style_search.py), its results to <user>/<run>-results
 if [ "${POST_SWEEP:-1}" = 1 ]; then
-    POST=(--post-run ".venv/bin/python style_search.py --checkpoint $OUT/model_bf16.pt --out results/${RUN}_sweep"
+    POST=(--post-run ".venv/bin/python eval/style_search.py --checkpoint $OUT/model_bf16.pt --out results/${RUN}_sweep"
           --post-run-dir "results/${RUN}_sweep")
 fi
 setsid nohup .venv/bin/python cloud/ckpt.py loop --run "$RUN" --every-min "${SYNC_EVERY_MIN:-60}" "${STOP_FLAG[@]}" \

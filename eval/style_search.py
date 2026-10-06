@@ -1,7 +1,7 @@
 """
 Post-run sweep: the best generation settings per style, chosen without the winner's curse.
 
-    python style_search.py --checkpoint checkpoints/long_450m/model_bf16.pt --out results/long_450m_sweep
+    python eval/style_search.py --checkpoint checkpoints/long_450m/model_bf16.pt --out results/long_450m_sweep
 
 Measure: style_eval's robust per-style distance (each sample vs its own song's real continuation, spreads per style,
 log scale for density / instrument count, terms capped). Lower = closer to real music.
@@ -24,8 +24,8 @@ from pathlib import Path
 os.environ.setdefault('PYTORCH_CUDA_ALLOC_CONF', 'expandable_segments:True')
 import torch  # noqa: E402
 
-import style_eval  # noqa: E402
-from style_eval import STYLES, TRACK  # noqa: E402
+from musicar.eval import style_eval  # noqa: E402
+from musicar.eval.style_eval import STYLES, TRACK  # noqa: E402
 
 GRID = dict(temperature=[0.8, 0.9, 1.0], top_p=[None, 0.95, 0.9, 0.85], instrument_temperature=[None, 0.6],
             dt_bias=[0.0, 0.1], cond=['none', 'band'])
@@ -37,7 +37,7 @@ def name(c):
 
 
 def load(path):
-    from model import GPT, MusicConfig
+    from musicar.model import GPT, MusicConfig
     ck = torch.load(path, map_location='cuda')
     cfg = MusicConfig(**{k: v for k, v in ck['model_args'].items() if k in MusicConfig.__dataclass_fields__},
                       dropout=0.0)

@@ -1,7 +1,7 @@
 """
 Objective sanity metrics for generated MIDI: compare simple statistics of generated files with real files.
 
-    python eval_samples.py --generated samples/*.mid --reference-csv data/combined.csv --split validation
+    python eval/eval_samples.py --generated samples/*.mid --reference-csv data/combined.csv --split validation
 
 For each feature we compute a histogram over all notes of each set and report the overlapping area (OA, 0..1,
 1 = identical distributions, cf. Yang & Lerch 2020) plus the mean of both sets. This doesn't measure "musicality",

@@ -39,9 +39,7 @@ import numpy as np
 import pretty_midi
 from tqdm import tqdm
 
-import sys
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from data_loader import quantize_time, quantize_velocity  # noqa: E402
+from musicar.data_loader import quantize_time, quantize_velocity
 
 SPLITS = {'training': 'train', 'validation': 'validation', 'test': 'test'}  # inner zip prefix -> store split
 CATEGORIES = ('drums-only', 'no-drums', 'all-instruments-with-drums')

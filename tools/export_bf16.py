@@ -1,7 +1,7 @@
 """
 Export a training checkpoint for inference/storage: bf16 weights, no optimizer state (~6x smaller).
 
-    python export_bf16.py checkpoints/ladder_L/ckpt.pt            # -> checkpoints/ladder_L/model_bf16.pt
+    python tools/export_bf16.py checkpoints/ladder_L/ckpt.pt            # -> checkpoints/ladder_L/model_bf16.pt
 
 generate.py loads it like any checkpoint (weights are upcast to the fp32 model on load).
 Don't resume training from it: fp32 master weights and Adam moments are gone.

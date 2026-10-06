@@ -44,7 +44,8 @@ if [ ! -f .venv/.installed ] || [ cloud/requirements-lock.txt -nt .venv/.install
     rm -rf "$ROOT/.uv-cache"
     touch .venv/.installed
 fi
-.venv/bin/python -c "import torch, torchao; print('torch', torch.__version__, '| torchao', torchao.__version__)"
+uv pip install --python .venv/bin/python --no-deps -e .   # the musicar package: train.py, eval/ and tools/ import it
+.venv/bin/python -c "import torch, torchao, musicar; print('torch', torch.__version__, '| torchao', torchao.__version__)"
 
 step "4/6 GPU"
 nvidia-smi --query-gpu=name,driver_version,memory.total --format=csv,noheader

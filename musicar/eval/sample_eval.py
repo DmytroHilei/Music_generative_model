@@ -3,7 +3,7 @@ Generative evaluation: sample from fixed prompts and measure what the val loss c
 instrument taking over, runaway density, ...). Used by train.py at every evaluation (sample_eval_rows > 0) and as a
 command for any checkpoint:
 
-    python sample_eval.py --checkpoint checkpoints/long_450m_snap          # prints the metrics per mode
+    python -m musicar.eval.sample_eval --checkpoint checkpoints/long_450m_snap          # prints the metrics per mode
 
 Prompts: the same rows every time (the first files of the clean GigaMIDI val store with >= min_instruments
 instruments and >= prompt_notes notes, at evenly spaced indices), the same seed, so changes reflect the model.
@@ -21,7 +21,7 @@ import argparse
 import numpy as np
 import torch
 
-from model import BOS_PITCH, EOS_PITCH, DRUM_PROGRAM, window_conditions
+from musicar.model import BOS_PITCH, EOS_PITCH, DRUM_PROGRAM, window_conditions
 
 STORE = 'data/cache/gigamidi_clean_validation'
 
@@ -166,7 +166,7 @@ def _sample_modes(model, cfg, streams, programs, tokens, modes, new_notes, tempe
 def _load_reference():
     import json
     import os
-    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'cloud', 'sample_reference.json')
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'cloud', 'sample_reference.json')
     try:
         return json.loads(open(path).read())
     except (OSError, ValueError):
@@ -191,8 +191,8 @@ def main():
         return
     if not args.checkpoint:
         p.error('--checkpoint is required (or --reference to write the real-music reference)')
-    from generate import resolve_checkpoint
-    from model import GPT, MusicConfig
+    from musicar.checkpoint import resolve_checkpoint
+    from musicar.model import GPT, MusicConfig
     ckpt = torch.load(resolve_checkpoint(args.checkpoint), map_location='cuda')
     fields = set(MusicConfig.__dataclass_fields__)
     cfg = MusicConfig(**{k: v for k, v in ckpt['model_args'].items() if k in fields}, dropout=0.0)

@@ -1,13 +1,13 @@
 """
 GPU-side training throughput benchmark on synthetic data (no data loader): forward + backward + AdamW step.
 
-    python bench.py                                   # default sweep for the L model
-    python bench.py --n_layer 6 --n_embd 256 --n_head 8 --micro 6 24 48 --compile 0 1
+    python tools/bench.py                                   # default sweep for the L model
+    python tools/bench.py --n_layer 6 --n_embd 256 --n_head 8 --micro 6 24 48 --compile 0 1
 
 Reports tokens/s, ms per optimizer step (at a fixed tokens-per-step budget) and peak memory.
 --profile: time per phase (forward / backward incl. checkpoint recompute / clip / optimizer) and the top CUDA kernels.
 Steps carry NVTX ranges; for a timeline in Nsight Systems:
-    nsys profile --trace=cuda,nvtx --capture-range=cudaProfilerApi -o logs/prof/x python bench.py ... --profile
+    nsys profile --trace=cuda,nvtx --capture-range=cudaProfilerApi -o logs/prof/x python tools/bench.py ... --profile
 """
 
 import argparse
@@ -20,7 +20,7 @@ os.environ.setdefault('PYTORCH_CUDA_ALLOC_CONF', 'expandable_segments:True')
 import torch
 from torch.nn.attention import SDPBackend, sdpa_kernel
 
-from model import GPT, MusicConfig, convert_fp8, refresh_fp8_weights
+from musicar.model import GPT, MusicConfig, convert_fp8, refresh_fp8_weights
 
 BACKENDS = {
     'default': None,
@@ -74,7 +74,7 @@ def bench(args, micro, compiled, attn, fp8, profile=False, act_ckpt=0):
     if args.optim == 'adamw':
         opt = model.configure_optimizers(0.1, 6e-4, (0.9, 0.95), 'cuda')
     else:
-        from optim import build_muon_optimizer
+        from musicar.optim import build_muon_optimizer
         opt = build_muon_optimizer(model, 0.1, 1e-3, (0.9, 0.95), 'cuda',
                                    momentum_dtype=torch.bfloat16 if args.optim == 'muon_bf16' else None,
                                    compile_ns=bool(args.compile_ns))

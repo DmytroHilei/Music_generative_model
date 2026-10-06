@@ -2,7 +2,7 @@
 Compare sampling settings without listening: continue the same real prompts under several settings and
 measure the continuations against what the piece really does next.
 
-    python sample_sweep.py --checkpoint checkpoints/big_107M --device cpu --threads 6 \\
+    python eval/sample_sweep.py --checkpoint checkpoints/big_107M --device cpu --threads 6 \\
         --configs "T=1.0" "T=0.9" "T=1.0,density=prompt" "T=1.0,dt_bias=1"
 
 Config keys: T (temperature), top_k, dt_bias, density (notes/s or 'prompt'), anchor.
@@ -20,9 +20,9 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from generate import resolve_checkpoint
-from jobstatus import JobStatus
-from model import GPT, MusicConfig
+from musicar.checkpoint import resolve_checkpoint
+from musicar.jobstatus import JobStatus
+from musicar.model import GPT, MusicConfig
 
 DT_SECONDS = 0.02
 

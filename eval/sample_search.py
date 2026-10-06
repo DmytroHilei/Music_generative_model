@@ -2,7 +2,7 @@
 Autotuning of the generation settings: which sampling parameters make the samples closest to real music, overall and
 per kind of music. Runs on any checkpoint (e.g. a Hub snapshot) on the laptop GPU.
 
-    python sample_search.py --checkpoint checkpoints/long_450m_snap --out samples/search_50k
+    python eval/sample_search.py --checkpoint checkpoints/long_450m_snap --out samples/search_50k
 
 Prompts: clean GigaMIDI val files grouped by how they sound (instrument families of their first 1,128 notes):
   rock_pop      drums + bass + guitar               orchestral   >= 2 of strings/brass/winds, no drums
@@ -34,8 +34,8 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from model import BOS_PITCH, DRUM_PROGRAM, GPT, MusicConfig, window_conditions
-from sample_eval import DIST_WEIGHTS, SD_FLOOR, STORE, distance, row_metrics
+from musicar.model import BOS_PITCH, DRUM_PROGRAM, GPT, MusicConfig, window_conditions
+from musicar.eval.sample_eval import DIST_WEIGHTS, SD_FLOOR, STORE, distance, row_metrics
 
 KINDS = ('rock_pop', 'orchestral', 'piano_keys', 'electronic', 'acoustic')
 METRICS = list(DIST_WEIGHTS)
@@ -172,7 +172,7 @@ def main():
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
 
-    from generate import resolve_checkpoint
+    from musicar.checkpoint import resolve_checkpoint
     ck = torch.load(resolve_checkpoint(args.checkpoint), map_location='cuda')
     mcfg = MusicConfig(**{k: v for k, v in ck['model_args'].items() if k in MusicConfig.__dataclass_fields__},
                        dropout=0.0)

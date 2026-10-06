@@ -109,7 +109,7 @@ def check_environment(args, cfg):
 
 
 def bench(cfg, micro, act_ckpt):
-    cmd = [PY, 'bench.py', '--n_layer', str(cfg['n_layer']), '--n_embd', str(cfg['n_embd']),
+    cmd = [PY, 'tools/bench.py', '--n_layer', str(cfg['n_layer']), '--n_embd', str(cfg['n_embd']),
            '--n_head', str(cfg['n_head']), '--block', str(BLOCK), '--pos_emb', 'rope',
            '--n_programs', str(cfg.get('n_programs', 0)), '--tokens_per_step', str(NOTES_PER_STEP),
            '--optim', 'muon_bf16' if cfg.get('muon_bf16') else 'muon', '--micro', str(micro), '--compile', '1',

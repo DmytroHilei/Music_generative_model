@@ -1,8 +1,8 @@
 """
 Live dashboard of everything running in this project: training runs, song download, piano reduction, GPU, disk.
 
-    .venv/bin/python status.py            # refreshes every 5 s, Ctrl+C to quit
-    .venv/bin/python status.py --once     # print once
+    .venv/bin/python tools/status.py            # refreshes every 5 s, Ctrl+C to quit
+    .venv/bin/python tools/status.py --once     # print once
 
 Everything is read from files (logs/*.log, data/audio, data/finetune) and nvidia-smi, so it never touches
 the running jobs.
@@ -27,9 +27,9 @@ from rich.progress_bar import ProgressBar
 from rich.table import Table
 from rich.text import Text
 
-from jobstatus import read_jobs
+from musicar.jobstatus import read_jobs
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parent.parent
 LOGS = ROOT / 'logs'
 
 # training runs in the order they execute: (label, log file, params)
@@ -222,7 +222,7 @@ def training_table(done_keep=None):
         if i not in hidden:
             t.add_row(*cells)
     if hidden:
-        t.caption = f'{len(hidden)} older finished runs hidden (status.py --all shows them)'
+        t.caption = f'{len(hidden)} older finished runs hidden (tools/status.py --all shows them)'
     return t
 
 

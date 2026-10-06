@@ -1,8 +1,8 @@
 """
 Per-style generative evaluation: does the model continue songs of different kinds the way real songs continue?
 
-    python style_eval.py --checkpoint checkpoints/long_450m_snap          # prints the table for a checkpoint
-    python style_eval.py --list                                           # the chosen songs and their profiles
+    python -m musicar.eval.style_eval --checkpoint checkpoints/long_450m_snap          # prints the table for a checkpoint
+    python -m musicar.eval.style_eval --list                                           # the chosen songs and their profiles
 
 Styles (from the instruments of a file's first 1,128 notes, clean GigaMIDI val; GM program groups below):
   electronic   drums + >= 30% of notes on synths (leads, pads, synth bass/strings/brass)
@@ -27,8 +27,8 @@ import math
 import numpy as np
 import torch
 
-from model import BOS_PITCH, DRUM_PROGRAM, window_conditions
-from sample_eval import row_metrics
+from musicar.model import BOS_PITCH, DRUM_PROGRAM, window_conditions
+from musicar.eval.sample_eval import row_metrics
 
 STORE = 'data/cache/gigamidi_clean_validation'
 STYLES = ('rock_pop', 'orchestral', 'piano_keys', 'electronic', 'acoustic')
@@ -208,8 +208,8 @@ def main():
                 print(f"  file {x['file']:>6}  {x['real']['notes_per_s']:5.1f} notes/s  top {x['real']['top_share']:.0%}  "
                       + ', '.join(name(g) for g in x['instruments'])[:110])
         return
-    from generate import resolve_checkpoint
-    from model import GPT, MusicConfig
+    from musicar.checkpoint import resolve_checkpoint
+    from musicar.model import GPT, MusicConfig
     ck = torch.load(resolve_checkpoint(args.checkpoint), map_location='cuda')
     cfg = MusicConfig(**{k: v for k, v in ck['model_args'].items() if k in MusicConfig.__dataclass_fields__},
                       dropout=0.0)

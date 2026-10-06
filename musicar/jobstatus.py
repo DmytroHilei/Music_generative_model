@@ -14,7 +14,7 @@ import os
 import time
 from pathlib import Path
 
-JOBS_DIR = Path(__file__).resolve().parent / 'logs' / 'jobs'
+JOBS_DIR = Path(__file__).resolve().parent.parent / 'logs' / 'jobs'
 
 
 class JobStatus:

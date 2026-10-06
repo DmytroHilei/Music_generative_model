@@ -1,7 +1,7 @@
 """
 Song-structure metrics for whole generated pieces, next to the same metrics on real songs (the reference).
 
-    python structure_eval.py --checkpoints checkpoints/ua_2048_covers checkpoints/ua_2048_mix --style cover \\
+    python -m musicar.eval.structure_eval --checkpoints checkpoints/ua_2048_covers checkpoints/ua_2048_mix --style cover \\
         --real data/finetune/ukrainian_covers.csv --samples 8 --device cpu --out-dir samples/structure
 
 Each checkpoint samples --samples pieces from BOS (+ --style), EOS allowed after --min-notes, up to --max-new notes
@@ -34,10 +34,11 @@ import numpy as np
 import pandas as pd
 import torch
 
-from data_loader import load_styles, tokenize_midi
-from generate import resolve_checkpoint, tokens_to_midi
-from jobstatus import JobStatus
-from model import BOS_PITCH, EOS_PITCH, GPT, MusicConfig
+from musicar.data_loader import load_styles, tokenize_midi
+from musicar.checkpoint import resolve_checkpoint
+from musicar.midi_io import tokens_to_midi
+from musicar.jobstatus import JobStatus
+from musicar.model import BOS_PITCH, EOS_PITCH, GPT, MusicConfig
 
 DT = 0.02
 MAJOR = np.array([6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88])

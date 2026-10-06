@@ -26,8 +26,8 @@ import torch
 from torch.utils.data import DataLoader, Subset
 from tqdm import tqdm
 
-from model import MusicConfig, GPT, STREAM_ORDER, convert_fp8, refresh_fp8_weights, spill_to_cpu, window_conditions
-from data_loader import MaestroDataset
+from musicar.model import MusicConfig, GPT, STREAM_ORDER, convert_fp8, refresh_fp8_weights, spill_to_cpu, window_conditions
+from musicar.data_loader import MaestroDataset
 
 # -----------------------------------------------------------------------------
 # I/O
@@ -149,8 +149,8 @@ sdpa_backend = ''         # '' = PyTorch default, or 'flash' | 'cudnn' | 'effici
 seed = 1337
 # -----------------------------------------------------------------------------
 config_keys = [k for k, v in globals().items() if not k.startswith('_') and isinstance(v, (int, float, bool, str))]
-exec(open('configurator.py').read())  # overrides from command line or config file
-from data_loader import load_styles
+exec(open('musicar/configurator.py').read())  # overrides from command line or config file
+from musicar.data_loader import load_styles
 styles = load_styles(style_map) if style_map else None
 if styles:
     n_styles = len(styles)
@@ -316,7 +316,7 @@ if sdpa_backend:
     sdpa_kernel(backend).__enter__()  # for the whole process
 scaler = torch.amp.GradScaler(device_type, enabled=(dtype == 'float16'))
 if optimizer_name == 'muon':
-    from optim import build_muon_optimizer
+    from musicar.optim import build_muon_optimizer
     optimizer = build_muon_optimizer(model, weight_decay, learning_rate, (beta1, beta2), device_type,
                                      momentum=muon_momentum, style_lr_mult=style_lr_mult,
                                      momentum_dtype=torch.bfloat16 if muon_bf16 else None, compile_ns=compile)
@@ -440,10 +440,10 @@ print(f"Planned epochs   : {tokens_per_iter * (max_iters - iter_num) / n_train_n
 # -----------------------------------------------------------------------------
 # training loop
 if sample_eval_rows and n_programs:
-    import sample_eval
+    from musicar.eval import sample_eval
     sample_prompts = sample_eval.fixed_prompts(sample_eval_rows)
 if style_eval_songs and n_programs:
-    import style_eval
+    from musicar.eval import style_eval
     style_songs = style_eval.style_set(style_eval_songs)
     print('Style eval: ' + ', '.join(f'{s} {len(v)}' for s, v in style_songs.items()) + ' songs')
 batches = infinite_batches(train_loader)
