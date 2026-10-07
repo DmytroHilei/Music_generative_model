@@ -555,6 +555,34 @@ def redownload_rows(t):
                   f'{completed}/{total} songs', detail)
 
 
+def multi_pass_rows(t):
+    """Multi-track pass (logs/run_multi_pass.sh): one row per round, songs in multi.csv / failed.txt vs mp3s kept."""
+    worker = running('run_multi_pass.sh')
+    for name, songs, out, log in (('round 1', Path('/data/songs_round1'), ROOT / 'data/finetune', 'multi_round1.log'),
+                                  ('round 2', Path('/data/songs_round2'), Path('/data/finetune_round2'),
+                                   'multi_round2.log')):
+        if not (LOGS / log).exists():
+            continue
+        total = len(list(songs.glob('*/*.mp3')))
+        done = failed = 0
+        for d in out.iterdir() if out.exists() else []:
+            if (d / 'multi.csv').exists():
+                with open(d / 'multi.csv', newline='', encoding='utf-8') as f:
+                    done += sum(1 for r in csv.DictReader(f) if r['source_audio'].startswith(str(songs)))
+            if (d / 'failed.txt').exists():
+                failed += sum(1 for l in (d / 'failed.txt').read_text(encoding='utf-8').splitlines() if l.strip())
+        alive = running(f'audio_to_piano.py --input-root {songs} ')
+        recent = sorted(p.stat().st_mtime for p in out.glob('*/multi/*.mid') if time.time() - p.stat().st_mtime < 900)
+        detail = f'{failed} failed (all passes)' if failed else ''
+        if alive and len(recent) >= 2:
+            per_song = (recent[-1] - recent[0]) / (len(recent) - 1)
+            detail = '; '.join(x for x in (f'{per_song:.0f} s/song, {eta_text((total - done) * per_song)}', detail) if x)
+        state = running_text(alive) if alive else running_text(worker, 'queued') if worker and done < total else \
+            Text('done', style='green') if done >= total else Text('stopped', style='red')
+        t.add_row(f'multi-track: {name}', state, ProgressBar(total=max(1, total), completed=done),
+                  f'{done}/{total} songs', detail)
+
+
 def pipeline_table():
     t = Table(title='Data pipeline', expand=True, title_justify='left')
     for col in ('stage', 'state', 'progress', 'count', 'detail'):
@@ -623,6 +651,7 @@ def pipeline_table():
     covers_round2_row(t)
     songs_round2_rows(t)
     redownload_rows(t)
+    multi_pass_rows(t)
     t.caption = ('kill <pid> stops a stage; a runner script (.sh) with its children: kill -- -<pid>')
     return t
 
