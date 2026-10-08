@@ -41,6 +41,8 @@ sample_eval_rows = 0      # > 0: at every evaluation also generate from this man
 sample_eval_notes = 1000  # log sample metrics (sample_eval.py: instruments, out-of-band, density, takeover, ...)
 eval_only = False
 always_save_checkpoint = False
+save_iters = ''            # e.g. '25,50,100': also keep bf16 weights at these iterations (out_dir/model_bf16_it<N>.pt),
+                           # for judging fine-tune checkpoints by generation, not only by val CE
 checkpoint_format = 'full'  # 'full' = fp32 weights + optimizer (resumable), 'bf16' = bf16 weights only (~6x smaller,
                             # not resumable; fine for generation and for init_from='finetune')
 init_from = 'scratch'     # 'scratch' | 'resume' | 'finetune'
@@ -119,6 +121,8 @@ wandb_run_name = 'maestro-v1'
 
 # adamw optimizer
 optimizer_name = 'adamw'   # 'adamw' | 'muon' (Muon for transformer-block matrices, AdamW for the rest; same lr/wd)
+                           # | 'adamw8bit' (torchao 8-bit AdamW states: fits a 450M full fine-tune in 8 GB)
+freeze = ''                # comma-separated parameter-name prefixes kept frozen (e.g. 'transformer.music_embeddings')
 muon_momentum = 0.95
 learning_rate = 6e-4
 max_iters = 30000
@@ -315,11 +319,23 @@ if sdpa_backend:
                'efficient': SDPBackend.EFFICIENT_ATTENTION}[sdpa_backend]
     sdpa_kernel(backend).__enter__()  # for the whole process
 scaler = torch.amp.GradScaler(device_type, enabled=(dtype == 'float16'))
+if freeze:
+    prefixes = tuple(x.strip() for x in freeze.split(',') if x.strip())
+    frozen = [n for n, p in model.named_parameters() if n.startswith(prefixes)]
+    assert frozen, f"freeze={freeze!r} matches no parameter"
+    for n, p in model.named_parameters():
+        if n.startswith(prefixes):
+            p.requires_grad_(False)
+    print(f"frozen: {len(frozen)} tensors, {sum(p.numel() for n, p in model.named_parameters() if n in frozen):,} "
+          f"params ({', '.join(sorted({n.rsplit('.', 1)[0] for n in frozen}))})")
 if optimizer_name == 'muon':
     from musicar.optim import build_muon_optimizer
     optimizer = build_muon_optimizer(model, weight_decay, learning_rate, (beta1, beta2), device_type,
                                      momentum=muon_momentum, style_lr_mult=style_lr_mult,
                                      momentum_dtype=torch.bfloat16 if muon_bf16 else None, compile_ns=compile)
+elif optimizer_name == 'adamw8bit':
+    from musicar.optim import build_adamw8bit
+    optimizer = build_adamw8bit(model, weight_decay, learning_rate, (beta1, beta2), style_lr_mult=style_lr_mult)
 else:
     optimizer = model.configure_optimizers(weight_decay, learning_rate, (beta1, beta2), device_type)
 if init_from == 'resume':
@@ -419,6 +435,10 @@ else:
     wandb_run_id = None
 
 
+# the configurator turns --save_iters=25,50 into a tuple, a single value into an int
+save_iter_set = {int(x) for x in str(save_iters).strip('()').split(',') if x.strip()}
+
+
 def save_resumable(it, name='ckpt.pt'):
     """Full state to out_dir/<name>; `it` = the next iteration to run. tmp + rename, so a crash mid-save keeps the old file."""
     os.makedirs(out_dir, exist_ok=True)
@@ -469,7 +489,10 @@ pbar = tqdm(range(iter_num, max_iters), desc="Training", initial=iter_num, total
 for iter_num in pbar:
     lr = get_lr(iter_num) if decay_lr else learning_rate
     for param_group in optimizer.param_groups:
-        param_group['lr'] = lr * param_group.get('lr_mult', 1.0)
+        if torch.is_tensor(param_group['lr']):  # torchao optimizers keep lr as a tensor (in place only)
+            param_group['lr'].fill_(lr * param_group.get('lr_mult', 1.0))
+        else:
+            param_group['lr'] = lr * param_group.get('lr_mult', 1.0)
 
     if iter_num % eval_interval == 0 or iter_num == max_iters - 1:
         val = estimate_val_loss(val_loader)
@@ -541,6 +564,13 @@ for iter_num in pbar:
                     name = 'best.pt'  # ckpt.pt is the periodic resume state, don't roll it back to an older iter
                 torch.save(ckpt, os.path.join(out_dir, name))
                 tqdm.write(f"saved checkpoint to {os.path.join(out_dir, name)}")
+    if iter_num in save_iter_set:
+        os.makedirs(out_dir, exist_ok=True)
+        torch.save({'model_args': model_args, 'iter_num': iter_num, 'config': config,
+                    'model': {k: v.to(torch.bfloat16) if v.is_floating_point() else v
+                              for k, v in raw_model.state_dict().items()}},
+                   os.path.join(out_dir, f'model_bf16_it{iter_num}.pt'))
+        tqdm.write(f"saved weights of iter {iter_num} to {out_dir}/model_bf16_it{iter_num}.pt")
     if iter_num == 0 and eval_only:
         break
     if save_pre_cooldown and lr_schedule == 'wsd' and decay_lr and iter_num == cooldown_start and iter_num > 0:

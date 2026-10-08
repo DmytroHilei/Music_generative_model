@@ -132,3 +132,27 @@ def build_muon_optimizer(model, weight_decay, learning_rate, betas, device_type,
           f"AdamW: {sum(p.numel() for p in adam_decay + adam_nodecay):,} params"
           + (f" | style table: {sum(p.numel() for p in style_params):,} params, lr x{style_lr_mult:g}" if style_params else ""))
     return CombinedOptimizer(muon, adamw)
+
+
+def build_adamw8bit(model, weight_decay, learning_rate, betas, style_lr_mult=1.0):
+    """torchao AdamW with 8-bit (block-quantized) moments for every trainable parameter: ~2 bytes of state per
+    parameter instead of 8, so a full fine-tune of the 450M fits in 8 GB. Groups as in GPT.configure_optimizers (no
+    weight decay on 1D tensors and the v2 cascade's cond_emb), plus the style table in its own group (lr x
+    style_lr_mult, no weight decay) as in build_muon_optimizer."""
+    from torchao.optim import AdamW8bit
+    decay, nodecay, style = [], [], []
+    for n, p in model.named_parameters():
+        if not p.requires_grad:
+            continue
+        if n.startswith('transformer.style.'):
+            style.append(p)
+        elif p.dim() >= 2 and not (model.config.cascade_residual and 'cond_emb' in n):
+            decay.append(p)
+        else:
+            nodecay.append(p)
+    groups = [{'params': decay, 'weight_decay': weight_decay}, {'params': nodecay, 'weight_decay': 0.0}]
+    if style:
+        groups.append({'params': style, 'weight_decay': 0.0, 'lr_mult': style_lr_mult})
+    print(f"AdamW8bit: {sum(p.numel() for g in groups for p in g['params']):,} params"
+          + (f" | style table lr x{style_lr_mult:g}" if style else ""))
+    return AdamW8bit(groups, lr=learning_rate, betas=betas)
