@@ -46,8 +46,24 @@ UKRAINIAN_ONLY = re.compile("[іїєґʼ']", re.I)
 RUSSIAN_HINT = re.compile(r'\w(ая|яя|ое|ее|ые|ие)\b|\b(и|что|тебя|меня|люблю|любви|время|года|под|тот|уходит)\b', re.I)
 
 
+HOMOGLYPHS = str.maketrans('aceiopxykmthbACEIOPXYKMTHB', 'асеіорхукмтнвАСЕІОРХУКМТНВ')
+
+
 def key(artist, title):
     return artist, norm_title(str(title))
+
+
+def search_title(title):
+    """Title for the YouTube search and the match against video titles: the round-2 songs.csv titles carry a Latin
+    transliteration ('там де нас нема tam de nas nema') and Latin look-alike letters ('cерце'). Words with Cyrillic
+    get the look-alikes replaced; pure-Latin words and bare numbers are dropped."""
+    words = []
+    for w in str(title).split():
+        if UKRAINIAN.search(w):
+            words.append(w.translate(HOMOGLYPHS))
+        elif not re.fullmatch(r'[A-Za-z0-9]+', w):
+            words.append(w)
+    return ' '.join(words)
 
 
 def candidates(args):
@@ -67,11 +83,15 @@ def candidates(args):
         if not UKRAINIAN_ONLY.search(str(t)) and not ukrainian_artist.get(a, False):
             continue
         assert zlib.crc32(k[1].encode()) % 100 < 10, f'{k} is not a validation title'
+        song = search_title(t)
+        if not song or key(a, song) in seen:
+            continue
         seen.add(k)
-        rows.append({'artist': a, 'song': str(t).strip()})
+        seen.add(key(a, song))
+        rows.append({'artist': a, 'song': song, 'title': str(t).strip()})
     FRESH.mkdir(parents=True, exist_ok=True)
     with open(FRESH / 'candidates.csv', 'w', newline='', encoding='utf-8') as f:
-        w = csv.DictWriter(f, fieldnames=['artist', 'song'])
+        w = csv.DictWriter(f, fieldnames=['artist', 'song', 'title'])  # song = search title, title = original
         w.writeheader()
         w.writerows(rows)
 
@@ -93,7 +113,7 @@ def candidates(args):
 def split(args):
     cand = pd.read_csv(FRESH / 'candidates.csv')
     # fetch_songs writes the song as its normalize() of the candidate title: compare both via norm_title
-    by_key = {key(a, s): s for a, s in zip(cand.artist, cand.song)}
+    by_key = {key(a, s): t for a, s, t in zip(cand.artist, cand.song, cand.title)}  # -> the original title
     with open(COVERS_ROOT / 'songs.csv', newline='', encoding='utf-8') as f:
         song_of = {r['id']: (r['artist'], r['song']) for r in csv.DictReader(f)}
     excluded = set()

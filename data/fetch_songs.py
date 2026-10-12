@@ -109,8 +109,8 @@ def parse_args():
                         help="covers mode: also one search per known song ('<artist> <song> піаніно', --song-search-size "
                              "results), not only per artist")
     parser.add_argument('--only-known-songs', action='store_true',
-                        help='covers mode: only the per-song searches (implies --per-song-queries), and keep only videos '
-                             'of a song in --songs-csv')
+                        help='covers mode: only the per-song searches (implies --per-song-queries), keep only videos '
+                             'of a song in --songs-csv; a piano word in the title is enough (no cover cue needed)')
     parser.add_argument('--song-search-size', type=int, default=8)
     parser.add_argument('--per-song', type=int, default=2, help='covers mode: max videos of the same song')
     return parser.parse_args()
@@ -206,7 +206,8 @@ def select(entries, names, args, known=(), have=None):
             bare = low
             for n in sorted(names, key=len, reverse=True):
                 bare = bare.replace(n.lower(), ' ')
-            if not any(w in bare for w in PIANO_WORDS) or not COVER_CUES.search(bare):
+            # --only-known-songs: the song match is strict already, a piano word is enough ('<song> piano')
+            if not any(w in bare for w in PIANO_WORDS) or (not COVER_CUES.search(bare) and not args.only_known_songs):
                 continue
         if args.ukrainian_only and RUSSIAN_ONLY.search(title):
             continue
