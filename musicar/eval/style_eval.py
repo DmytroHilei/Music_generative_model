@@ -191,10 +191,12 @@ def main():
     p = argparse.ArgumentParser()
     p.add_argument('--checkpoint', default=None)
     p.add_argument('--per-style', type=int, default=16)
+    p.add_argument('--store', default=STORE,
+                   help='laptop: data/cache/gigamidi_heldout_validation (the val store is on the cloud repo only)')
     p.add_argument('--list', action='store_true', help='print the chosen songs and their profiles, then exit')
     p.add_argument('--no-cuda-graph', action='store_true')
     args = p.parse_args()
-    sset = style_set(args.per_style)
+    sset = style_set(args.per_style, store=args.store)
     if args.list:
         import pretty_midi
         name = lambda g: 'Drums' if g == DRUM_PROGRAM else pretty_midi.program_to_instrument_name(g)
