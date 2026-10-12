@@ -108,6 +108,9 @@ def parse_args():
     parser.add_argument('--per-song-queries', action='store_true',
                         help="covers mode: also one search per known song ('<artist> <song> піаніно', --song-search-size "
                              "results), not only per artist")
+    parser.add_argument('--only-known-songs', action='store_true',
+                        help='covers mode: only the per-song searches (implies --per-song-queries), and keep only videos '
+                             'of a song in --songs-csv')
     parser.add_argument('--song-search-size', type=int, default=8)
     parser.add_argument('--per-song', type=int, default=2, help='covers mode: max videos of the same song')
     return parser.parse_args()
@@ -145,13 +148,13 @@ def song_title(video_title, names, covers=False, known=()):
 
 
 def search_with_retry(names, n, mode='songs', song_queries=(), song_n=8, source='youtube', extra=None, pause=0.0,
-                      attempts=4):
+                      attempts=4, artist_queries=True):
     """Network hiccups (timeouts) shouldn't kill a multi-hour run: retry with backoff, then skip the artist
     (returns None). Without network (DNS down) it waits until it is back, without using up an attempt."""
     attempt = 0
     while attempt < attempts:
         try:
-            return search(names, n, mode, song_queries, song_n, source, extra, pause)
+            return search(names, n, mode, song_queries, song_n, source, extra, pause, artist_queries)
         except Exception as e:
             if is_offline(e):
                 wait_online('www.youtube.com' if source == 'youtube' else 'soundcloud.com')
@@ -164,11 +167,12 @@ def search_with_retry(names, n, mode='songs', song_queries=(), song_n=8, source=
     return None
 
 
-def search(names, n, mode='songs', song_queries=(), song_n=8, source='youtube', extra=None, pause=0.0):
-    """extra: more yt-dlp options (cookies); pause: seconds between queries."""
+def search(names, n, mode='songs', song_queries=(), song_n=8, source='youtube', extra=None, pause=0.0,
+           artist_queries=True):
+    """extra: more yt-dlp options (cookies); pause: seconds between queries; artist_queries=False: song_queries only."""
     opts = {'quiet': True, 'extract_flat': True, 'skip_download': True, **(extra or {})}
     found = {}
-    templates = QUERY_TEMPLATES[source, mode]
+    templates = QUERY_TEMPLATES[source, mode] if artist_queries else []
     prefix = 'ytsearch' if source == 'youtube' else 'scsearch'
     queries = [(t.format(name), n) for name in names for t in templates] + [(q, song_n) for q in song_queries]
     with yt_dlp.YoutubeDL(opts) as ydl:
@@ -214,6 +218,8 @@ def select(entries, names, args, known=(), have=None):
             match_title = f'{names[0]} - {title}'  # the artist's own upload: the title is just the song
         song = song_title(match_title, names, covers, known)
         if not song or seen_titles.get(song, 0) >= (args.per_song if covers else 1):
+            continue
+        if covers and args.only_known_songs and song not in known:
             continue
         seen_titles[song] = seen_titles.get(song, 0) + 1
         url = f"https://www.youtube.com/watch?v={e['id']}" if args.source == 'youtube' else e['url']
@@ -320,10 +326,13 @@ def main():
             if fails >= args.max_fails:
                 print(f'\nABORTED before {artist}: {fails} downloads in a row failed (blocked?)')
                 break
+            only_known = args.mode == 'covers' and args.only_known_songs
             song_queries = [f'{artist} {t} піаніно' for t in sorted(raw_titles.get(artist, ()))] \
-                if args.mode == 'covers' and args.per_song_queries else []
+                if args.mode == 'covers' and (args.per_song_queries or only_known) else []
+            if only_known and not song_queries:
+                continue  # no candidate song of this artist
             entries = search_with_retry(names, args.search_size, args.mode, song_queries, args.song_search_size,
-                                        args.source, extra, args.search_sleep)
+                                        args.source, extra, args.search_sleep, artist_queries=not only_known)
             skips = skips + 1 if entries is None else 0
             if skips >= args.max_skips:
                 print(f'\nABORTED at {artist}: {skips} artists in a row failed to search (blocked?)')
