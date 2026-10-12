@@ -2,8 +2,8 @@
 #   python train.py config/finetune_ua450.py config/finetune_ua450_multi.py
 # Data: data/finetune/ukrainian_multi_v1.csv (4,811 train / 547 val songs, 13.77M / 1.52M notes, drums bass guitar
 # vocals piano other as GM programs) + replay from store:data/cache/gigamidi_replay (167.9M notes).
-# Optimizer: the piano AdamW recipe (overfit_adamw8_1e-4: adamw8bit, LR 1e-4, dropout 0, warmup 10, WSD 20 %);
-# set learning_rate / max_iters / dropout to the tools/adamw_sweep.py winner before running.
+# Optimizer: the piano AdamW recipe (tools/adamw_sweep.py finalist adamw_lr2e-4: adamw8bit, LR 2e-4, dropout 0,
+# warmup 10, WSD 20 %, ~2 passes; 2x the steps and dropout 0.1 were no better).
 # Length: 12 windows x ~2,048 notes x 0.75 multi share ~ 18.4k multi notes/step -> 1,500 it ~ 2 passes over the
 # multi-track train set (the piano winner = ~2 passes over the covers); ~75 min + evals on the laptop.
 init_ckpt = 'checkpoints/long_450m_final/model_bf16.pt'
@@ -22,7 +22,7 @@ val_extra = ''
 style_map = ''                     # the base has no style table; no style label for this set
 
 optimizer_name = 'adamw8bit'
-learning_rate = 1e-4
+learning_rate = 2e-4
 dropout = 0.0
 max_iters = 1500
 lr_decay_iters = 1500
