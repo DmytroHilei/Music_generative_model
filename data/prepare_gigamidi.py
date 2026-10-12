@@ -36,10 +36,9 @@ from multiprocessing import Pool
 from pathlib import Path
 
 import numpy as np
-import pretty_midi
 from tqdm import tqdm
 
-from musicar.data_loader import quantize_time, quantize_velocity
+from musicar.data_loader import tokenize_tracks  # also imported from here by prepare_discover.py
 
 SPLITS = {'training': 'train', 'validation': 'validation', 'test': 'test'}  # inner zip prefix -> store split
 CATEGORIES = ('drums-only', 'no-drums', 'all-instruments-with-drums')
@@ -60,29 +59,6 @@ def parse_args():
     parser.add_argument('--checkpoint', type=int, default=20_000, help='files between checkpoints')
     parser.add_argument('--workers', type=int, default=os.cpu_count())
     return parser.parse_args()
-
-
-def tokenize_tracks(data, velocity_bins=32, time_resolution=0.02, max_duration_bin=511, max_delta_bin=511):
-    """MIDI bytes -> ((n, 4) uint16 tokens, (n,) uint8 programs), all tracks incl. drums; None if empty/broken."""
-    try:
-        midi = pretty_midi.PrettyMIDI(io.BytesIO(data))
-    except Exception:
-        return None
-    notes = [(n.start, 128 if inst.is_drum else inst.program, n.pitch, n.velocity, n.end - n.start)
-             for inst in midi.instruments for n in inst.notes]
-    if not notes:
-        return None
-    notes.sort(key=lambda n: n[:3])
-    tokens = np.empty((len(notes), 4), dtype=np.uint16)
-    programs = np.empty(len(notes), dtype=np.uint8)
-    prev = notes[0][0]
-    for i, (start, program, pitch, velocity, length) in enumerate(notes):
-        tokens[i] = (pitch, quantize_velocity(velocity, velocity_bins),
-                     quantize_time(max(0.0, length), time_resolution, max_duration_bin),
-                     quantize_time(max(0.0, start - prev), time_resolution, max_delta_bin))
-        programs[i] = program
-        prev = start
-    return tokens, programs
 
 
 def work(item):

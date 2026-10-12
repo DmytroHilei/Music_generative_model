@@ -1,7 +1,9 @@
 from concurrent.futures import ProcessPoolExecutor
 from functools import partial
 from pathlib import Path
+import contextlib
 import hashlib
+import io
 import json
 import os
 import random
@@ -76,7 +78,9 @@ class MaestroDataset(Dataset):
     ):
         """
         csv_path:    one or more sources separated by ',': a CSV (paths inside relative to root_dir or absolute),
-                     or 'store:<prefix>' = a prebuilt token store <prefix>_<split>/ (e.g. from data/prepare_aria.py)
+                     or 'store:<prefix>' = a prebuilt token store <prefix>_<split>/ (e.g. from data/prepare_aria.py).
+                     A CSV with a 'programs' column is multi-track: all tracks incl. drums are kept with their
+                     programs (tokenize_tracks, as GigaMIDI), which needs programs=True; otherwise piano (tokenize_midi)
         eval_stride: if set, the dataset is deterministic (no randomness, no augmentation): use it for validation
         source_weights: optional sampling weight per store (each CSV is its own store, CSVs first in order; then
                      each 'store:' source in order). Default: uniform over all note positions, i.e. by size. Use it to mix a
@@ -138,9 +142,9 @@ class MaestroDataset(Dataset):
         self.style_ids = {name: i for i, name in enumerate(styles)} if styles else None
         self.store_dirs, file_styles = [], []
         for csv in self.csv_paths:  # one store per CSV, so source_weights can weight each CSV
-            paths, csv_styles = self._load_midi_paths(csv)
+            paths, csv_styles, multi = self._load_midi_paths(csv)
             file_styles.append(csv_styles)
-            self.store_dirs.append(self._build_store(csv, paths))
+            self.store_dirs.append(self._build_store(csv, paths, multi))
         for store in prebuilt:
             if not (store / "meta.json").exists():
                 raise FileNotFoundError(f"Prebuilt token store {store} missing or incomplete")
@@ -216,12 +220,13 @@ class MaestroDataset(Dataset):
         return list(df.loc[df["split"] == self.split, "genre"])
 
     def _load_midi_paths(self, csv_path):
-        """(MIDI paths, styles) of one CSV's rows in this split."""
+        """(MIDI paths, styles, multi-track?) of one CSV's rows in this split."""
         if not csv_path.exists():
             raise FileNotFoundError(f"CSV file not found: {csv_path}")
         df = pd.read_csv(csv_path)
         if "split" not in df.columns or "midi_filename" not in df.columns:
             raise ValueError(f"{csv_path} must contain 'split' and 'midi_filename' columns.")
+        multi = "programs" in df.columns
         df = df[df["split"] == self.split]
         if self.debug:
             df = df.head(5)
@@ -240,14 +245,14 @@ class MaestroDataset(Dataset):
             paths = [p for p in paths if p.exists()]
             if not paths:
                 raise FileNotFoundError(f"All MIDI files for split='{self.split}' are missing.")
-        return paths, styles
+        return paths, styles, multi
 
-    def _build_store(self, csv_path, midi_paths):
-        key = repr((
+    def _build_store(self, csv_path, midi_paths, multi=False):
+        key = (
             [str(p) for p in midi_paths],
             self.velocity_bins, self.time_resolution, self.max_duration_bin, self.max_delta_bin,
-        ))
-        digest = hashlib.sha1(key.encode()).hexdigest()[:16]
+        ) + (('programs',) if multi else ())
+        digest = hashlib.sha1(repr(key).encode()).hexdigest()[:16]
         name = csv_path.stem  # same name and key as before for a single CSV -> existing stores still match
         store = self.cache_dir / f"{name}_{self.split}_{digest}"
         if (store / "meta.json").exists():
@@ -256,23 +261,28 @@ class MaestroDataset(Dataset):
             return store
 
         store.mkdir(parents=True, exist_ok=True)
-        parse = partial(_tokenize_to_array, velocity_bins=self.velocity_bins,
+        parse = partial(tokenize_tracks if multi else _tokenize_to_array, velocity_bins=self.velocity_bins,
                         time_resolution=self.time_resolution,
                         max_duration_bin=self.max_duration_bin, max_delta_bin=self.max_delta_bin)
         workers = min(len(midi_paths), os.cpu_count() or 1)
         offsets, n_notes, n_failed = [0], 0, 0
         # streamed to disk in order, so memory stays flat no matter how large the dataset is
-        with open(store / "tokens.u16", "wb") as f, ProcessPoolExecutor(max_workers=workers) as pool:
+        with open(store / "tokens.u16", "wb") as f, \
+                open(store / "programs.u8", "wb") if multi else contextlib.nullcontext() as fp, \
+                ProcessPoolExecutor(max_workers=workers) as pool:
             for arr in tqdm(pool.map(parse, midi_paths, chunksize=16), total=len(midi_paths),
                             desc=f"Tokenizing {self.split} ({workers} workers)"):
                 if arr is None:
                     n_failed += 1
                 else:
+                    if multi:
+                        arr, programs = arr
+                        fp.write(programs.tobytes())
                     f.write(arr.tobytes())
                     n_notes += len(arr)
                 offsets.append(n_notes)
         np.save(store / "offsets.npy", np.array(offsets, dtype=np.int64))
-        meta = dict(n_files=len(midi_paths), n_notes=n_notes, n_empty_or_failed=n_failed)
+        meta = dict(n_files=len(midi_paths), n_notes=n_notes, n_empty_or_failed=n_failed, **({'programs': True} if multi else {}))
         (store / "meta.json").write_text(json.dumps(meta))  # written last = store is complete
         print(f"Tokenized {self.split}: {n_notes:,} notes, {n_failed} empty/broken files skipped -> {store}")
         return store
@@ -479,6 +489,31 @@ def _tokenize_to_array(midi_path, **kwargs):
     except Exception:
         return None
     return None if tokens is None else np.stack([t.numpy() for t in tokens], axis=1).astype(np.uint16)
+
+
+def tokenize_tracks(midi, velocity_bins=32, time_resolution=0.02, max_duration_bin=511, max_delta_bin=511):
+    """MIDI file (path or bytes) -> ((n, 4) uint16 tokens, (n,) uint8 programs), all tracks incl. drums
+    (program DRUM_PROGRAM), sorted by (onset, program, pitch); None if empty/broken. The multi-instrument stores
+    (data/prepare_gigamidi.py, prepare_discover.py) and multi-track CSVs are tokenized with it."""
+    try:
+        midi = pretty_midi.PrettyMIDI(io.BytesIO(midi) if isinstance(midi, (bytes, bytearray)) else str(midi))
+    except Exception:
+        return None
+    notes = [(n.start, DRUM_PROGRAM if inst.is_drum else inst.program, n.pitch, n.velocity, n.end - n.start)
+             for inst in midi.instruments for n in inst.notes]
+    if not notes:
+        return None
+    notes.sort(key=lambda n: n[:3])
+    tokens = np.empty((len(notes), 4), dtype=np.uint16)
+    programs = np.empty(len(notes), dtype=np.uint8)
+    prev = notes[0][0]
+    for i, (start, program, pitch, velocity, length) in enumerate(notes):
+        tokens[i] = (pitch, quantize_velocity(velocity, velocity_bins),
+                     quantize_time(max(0.0, length), time_resolution, max_duration_bin),
+                     quantize_time(max(0.0, start - prev), time_resolution, max_delta_bin))
+        programs[i] = program
+        prev = start
+    return tokens, programs
 
 
 def quantize_time(time_sec, time_resolution, max_bin):

@@ -17,6 +17,12 @@ so a song is validation for both sources or for neither.
 
 --round2: also the round-2 folders (/data/finetune_round2 with titles from /data/songs_round2/songs.csv, or
 /data/covers_round2). Their ids can be SoundCloud's (numeric); a song filed under two artists (a duet) is kept once.
+
+--source multi: the multi-track transcriptions of the same songs (<artist>/multi/*.mid from audio_to_piano.py --multi:
+drums, bass, guitar, vocals, piano, other as separate tracks). Same titles, dedupe and split hash as the reductions,
+so a song is validation in both or in neither. Writes a 'programs' column: the loader then keeps every track with
+its GM program (models with n_programs).
+    python data/prepare_finetune.py --source multi --round2 --out data/finetune/ukrainian_multi_v1.csv
 """
 
 import argparse
@@ -31,6 +37,8 @@ ROUND1 = {'reductions': (ROOT / 'data/finetune', ROOT / 'data/audio/songs.csv'),
           'covers': (ROOT / 'data/covers', ROOT / 'data/covers/songs.csv')}
 ROUND2 = {'reductions': (Path('/data/finetune_round2'), Path('/data/songs_round2/songs.csv')),
           'covers': (Path('/data/covers_round2'), Path('/data/covers_round2/songs.csv'))}
+ROUND1['multi'], ROUND2['multi'] = ROUND1['reductions'], ROUND2['reductions']  # same songs, <artist>/multi/
+SUBDIR = {'reductions': 'midi', 'covers': 'midi', 'multi': 'multi'}
 TRANSLIT = dict(zip('абвгґдеєжзиіїйклмнопрстуфхцчшщьюяэыъё',
                     ['a', 'b', 'v', 'h', 'g', 'd', 'e', 'ie', 'zh', 'z', 'y', 'i', 'i', 'i', 'k', 'l', 'm', 'n', 'o',
                      'p', 'r', 's', 't', 'u', 'f', 'kh', 'ts', 'ch', 'sh', 'shch', '', 'iu', 'ia', 'e', 'y', '', 'e']))
@@ -48,7 +56,7 @@ def norm_title(text):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--val-percent', type=int, default=10)
-    ap.add_argument('--source', choices=['reductions', 'covers'], default='reductions')
+    ap.add_argument('--source', choices=['reductions', 'covers', 'multi'], default='reductions')
     ap.add_argument('--train-only-artists', default='', help="artists file (fetch_songs.py format) whose songs all go "
                     "to train: their titles can't be matched to known songs, so a song could otherwise land in both")
     ap.add_argument('--out', default=str(ROOT / 'data/finetune/ukrainian.csv'))
@@ -59,6 +67,7 @@ def main():
 
     by_id = {}
     covers = args.source == 'covers'
+    multi = args.source == 'multi'
     sources = [ROUND1[args.source]] + ([ROUND2[args.source]] if args.round2 else [])
     for _, songs_csv in sources:
         if songs_csv.exists():
@@ -72,7 +81,7 @@ def main():
     train_only = {line.split('|')[0].strip() for line in open(args.train_only_artists, encoding='utf-8')
                   if line.strip() and not line.startswith('#')} if args.train_only_artists else set()
     rows, seen, seen_ids, dupes, n_excluded = [], {}, {}, [], 0
-    for midi in sorted(m for base, _ in sources for m in base.glob('*/midi/*.mid')):
+    for midi in sorted(m for base, _ in sources for m in base.glob(f'*/{SUBDIR[args.source]}/*.mid')):
         folder = midi.parent.parent.name
         if folder == 'skryabin_test':
             continue
@@ -102,10 +111,11 @@ def main():
         split = 'validation' if zlib.crc32(key[1].encode()) % 100 < args.val_percent and artist not in train_only \
             else 'train'
         rows.append(dict(split=split, midi_filename=str(midi), artist=artist, title=title.strip(),
-                         **({'style': args.style} if args.style else {})))
+                         **({'style': args.style} if args.style else {}), **({'programs': 1} if multi else {})))
 
     with open(args.out, 'w', newline='', encoding='utf-8') as f:
-        w = csv.DictWriter(f, fieldnames=['split', 'midi_filename', 'artist', 'title'] + (['style'] if args.style else []))
+        w = csv.DictWriter(f, fieldnames=['split', 'midi_filename', 'artist', 'title'] + (['style'] if args.style else [])
+                           + (['programs'] if multi else []))
         w.writeheader()
         w.writerows(rows)
     n_val = sum(r['split'] == 'validation' for r in rows)
