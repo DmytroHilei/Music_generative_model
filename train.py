@@ -45,7 +45,7 @@ style_eval_songs = 0      # > 0: at every evaluation generate from this many fix
                           # per-style distances to the real continuations (style_eval.py: styles/<mode>/<style>)
 style_eval_csv = ''       # a multi-track CSV: style_eval_songs of its validation songs instead (style_eval.csv_set)
 style_eval_settings = 'track'  # sampling settings by name (style_eval.SETTINGS): 'track' (base) | 'ua_multi'
-style_eval_interval = 0   # > 0: generate only every this many iterations (and at the end), 0 = at every evaluation
+style_eval_interval = 0   # run the style check every this many iterations (and at the end); 0 = every eval_interval
 style_eval_chunk = 20     # songs generated at once (KV cache ~0.26 GB per song for the 450M at 2,048 notes)
 sample_eval_rows = 0      # > 0: at every evaluation also generate from this many fixed multi-instrument prompts and
 sample_eval_notes = 1000  # log sample metrics (sample_eval.py: instruments, out-of-band, density, takeover, ...)
@@ -369,9 +369,10 @@ if style_eval_songs and n_programs:
 
 
 def run_style_eval(it):
-    """Per-style distances of generated continuations ({} when off or failed: a failure never stops the run)."""
+    """Per-style distances of generated continuations, every style_eval_interval iterations (else eval_interval)
+    and at the end ({} when off, not due or failed: a failure never stops the run)."""
     if not (style_eval_songs and n_programs and device_type == 'cuda' and (
-            not style_eval_interval or it % style_eval_interval == 0 or it == max_iters - 1)):
+            it % (style_eval_interval or eval_interval) == 0 or it == max_iters - 1)):
         return {}
     t_s = time.time()
     try:
@@ -444,13 +445,16 @@ for iter_num in pbar:
     lr = lr_at(iter_num, lr_schedule, learning_rate, min_lr, warmup_iters, lr_decay_iters, cooldown_frac)
     set_lr(optimizer, lr)
 
+    style_res = run_style_eval(iter_num)  # on its own interval, independent of the val evaluation
+    if wandb_log and style_res:
+        wandb.log({"iter": iter_num,
+                   **{f"styles/{mode}/{k}": v for mode, m in style_res.items() for k, v in m.items()}})
     if iter_num % eval_interval == 0 or iter_num == max_iters - 1:
         val = val_loss(val_loader_main)
         val2 = val_loss(val2_loader) if val2_loader else {}
         extra = {name: val_loss(loader) for name, loader in extra_loaders.items()}
         if cond_inst or n_density:  # the main val set again with no conditions: the model's unconditional quality
             extra['nocond'] = val_loss(val_loader_main, conditioned=False)
-        style_res = run_style_eval(iter_num)
         samples = run_sample_eval(iter_num)
         train = {k: (v / train_n).item() for k, v in train_sums.items()} if train_n else {}
         if train:
@@ -468,7 +472,6 @@ for iter_num in pbar:
                        **{f"val2/{k}": v for k, v in val2.items()},
                        **{f"{name}/{k}": v for name, e in extra.items() for k, v in e.items()},
                        **{f"samples/{mode}/{k}": v for mode, m in samples.items() for k, v in m.items()},
-                       **{f"styles/{mode}/{k}": v for mode, m in style_res.items() for k, v in m.items()},
                        **{f"train/{k}": v for k, v in train.items()}})
         train_sums, train_n = {}, 0
 
