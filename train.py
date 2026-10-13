@@ -526,6 +526,9 @@ for iter_num in pbar:
                 style_res = {}
                 torch.cuda.empty_cache()
                 tqdm.write(f"styles @{iter_num}: FAILED ({type(e).__name__}: {str(e)[:200]}), training continues")
+        if style_res:  # give training back the generation's memory (cuBLAS stream workspaces, freed cache blocks)
+            torch._C._cuda_clearCublasWorkspaces()
+            torch.cuda.empty_cache()
         samples = {}
         if sample_eval_rows and n_programs and device_type == 'cuda':
             t_s = time.time()

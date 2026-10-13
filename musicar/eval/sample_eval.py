@@ -115,6 +115,62 @@ def row_metrics(pitch, dt, prog, prompt_prog, dt_seconds=0.02):
                 same_onset=sum(1 for d in dt if d == 0) / len(dt), ended=float(ended))
 
 
+def consistency_metrics(pitch, vel, dt, prog, prompt_prog, window_s=4.0, dt_seconds=0.02):
+    """Consistency over time of one row (new notes only, cut at the first EOS), from whole window_s windows of the
+    onset timeline (the incomplete tail dropped, empty windows kept); None with fewer than 3 windows. thirds = the
+    first / last floor(K / 3) of the K windows. prompt_prog: the instrument of every prompt note (a sequence, not a
+    set: the 5 % rule counts them).
+      density_var      std / mean of the windows' notes/s
+      density_drift    log((last-third notes/s + 0.25) / (first-third notes/s + 0.25))
+      velocity_var     std of the mean velocity bin of the non-empty windows
+      mix_change       mean Jensen-Shannon distance (base 2) between the instrument shares of neighbouring windows,
+                       over pairs where both have notes
+      prompt_kept      share of the prompt's main instruments (>= 5 % of its notes) with a note in the last third
+      dominance_drift  mean top-instrument share of the last third minus that of the first third (non-empty windows)
+    """
+    pitch, vel, dt, prog = pitch.tolist(), vel.tolist(), dt.tolist(), prog.tolist()
+    if EOS_PITCH in pitch:
+        cut = pitch.index(EOS_PITCH)
+        pitch, vel, dt, prog = pitch[:cut], vel[:cut], dt[:cut], prog[:cut]
+    onset = np.cumsum(dt) * dt_seconds  # the BOS/EOS rows' delta_time still moves the clock, like in the MIDI
+    keep = [i for i, p in enumerate(pitch) if p < BOS_PITCH]
+    if not keep:
+        return None
+    onset, vel, prog = onset[keep], np.asarray(vel)[keep], np.asarray(prog)[keep]
+    n_win = int(onset[-1] // window_s)
+    if n_win < 3:
+        return None
+    win = (onset // window_s).astype(int)
+    inside = win < n_win
+    win, vel, prog = win[inside], vel[inside], prog[inside]
+    counts = np.zeros((n_win, DRUM_PROGRAM + 1))
+    np.add.at(counts, (win, prog), 1)
+    n = counts.sum(1)
+    nps = n / window_s
+    full = n > 0
+    third = n_win // 3
+    first, last = slice(0, third), slice(n_win - third, n_win)
+
+    def js(p, q):
+        m = (p + q) / 2
+        kl = lambda a: float((a[a > 0] * np.log2(a[a > 0] / m[a > 0])).sum())
+        return np.sqrt(max((kl(p) + kl(q)) / 2, 0.0))
+
+    pairs = [js(counts[k] / n[k], counts[k + 1] / n[k + 1]) for k in range(n_win - 1) if full[k] and full[k + 1]]
+    vel_win = np.array([vel[win == k].mean() for k in range(n_win) if full[k]])
+    top = np.array([counts[k].max() / n[k] if full[k] else np.nan for k in range(n_win)])
+    pp = np.bincount(np.asarray(list(prompt_prog), dtype=np.int64), minlength=DRUM_PROGRAM + 1)
+    main = np.flatnonzero(pp >= 0.05 * pp.sum())
+    played_last = counts[last].sum(0)
+    return dict(density_var=float(nps.std() / max(nps.mean(), 1e-6)),
+                density_drift=float(np.log((nps[last].mean() + 0.25) / (nps[first].mean() + 0.25))),
+                velocity_var=float(vel_win.std()) if len(vel_win) else 0.0,
+                mix_change=float(np.mean(pairs)) if pairs else 0.0,
+                prompt_kept=float((played_last[main] > 0).mean()) if len(main) else 1.0,
+                dominance_drift=float(np.nan_to_num(np.nanmean(top[last]) - np.nanmean(top[first]))
+                                      if full[last].any() and full[first].any() else 0.0))
+
+
 @torch.no_grad()
 def evaluate(model, prompts, new_notes=1000, temperature=0.9, seed=1234, device='cuda'):
     """{mode: {metric: mean over rows}} for 'none' and (cond_inst models) 'band'."""

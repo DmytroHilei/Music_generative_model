@@ -36,8 +36,9 @@ import torch
 from musicar.data_loader import DRUM_PROGRAM
 from musicar.eval.sample_eval import row_metrics
 from musicar.eval.structure_eval import load_model
-from musicar.eval.style_eval import (CLIP, SETTINGS, STYLES, TRACK, WEIGHTS, csv_set, row_distance, style_scales,
-                                     style_set)
+from musicar.eval.sample_eval import consistency_metrics
+from musicar.eval.style_eval import (CLIP, SETTINGS, STYLES, TRACK, WEIGHTS, consistency_distance, consistency_scales,
+                                     csv_set, row_distance, style_scales, style_set)
 from musicar.midi_io import render_mp3, tokens_to_midi
 from musicar.model import BOS_PITCH, EOS_PITCH, window_conditions
 
@@ -115,6 +116,7 @@ def main():
         min_new = args.min_new if args.min_new is not None else int(st.get('min_new', 0))
         st.update(min_new=min_new, density=args.density, target_nps=args.target_nps)
         scale = style_scales(songs)
+        c_scale = consistency_scales(songs)
         tok = torch.stack([torch.from_numpy(s['prompt']) for s in songs]).to(dev)
         prog = torch.stack([torch.from_numpy(s['prompt_prog']) for s in songs]).to(dev)
         streams = [tok[:, :, j] for j in range(4)]
@@ -148,6 +150,9 @@ def main():
             m = row_metrics(res[0][r, n0:].cpu(), res[3][r, n0:].cpu(), res[4][r, n0:].cpu(),
                             set(song['prompt_prog'].tolist()))
             d = CLIP * sum(WEIGHTS.values()) if m is None else row_distance(m, song['real'], scale)
+            c = consistency_metrics(res[0][r, n0:].cpu(), res[1][r, n0:].cpu(), res[3][r, n0:].cpu(),
+                                    res[4][r, n0:].cpu(), song['prompt_prog'].tolist())
+            dc = consistency_distance(c, song.get('real_c'), c_scale)
             rows = np.stack([x[r].float().cpu().numpy().astype(np.int64) for x in res[:4]], 1)[int(has_bos):]
             progs = res[4][r].cpu().numpy().astype(np.int64)[int(has_bos):]
             p0 = n0 - int(has_bos)  # first new note in rows
@@ -159,19 +164,24 @@ def main():
             rows, progs = rows[keep], progs[keep]
             name = f"{group}_{song['name']}"
             write(out / f'{name}.mid', rows, progs)
-            print(f"  {name}: d {d:.2f} | {m['notes_per_s'] if m else 0:.1f} notes/s (real "
+            c_txt = '-' if dc is None else f'{dc:.2f}'
+            print(f"  {name}: d {d:.2f} C {c_txt} | {m['notes_per_s'] if m else 0:.1f} notes/s (real "
                   f"{song['real']['notes_per_s']:.1f}), {m['instruments'] if m else 0} instr (real "
                   f"{song['real']['instruments']}), out-of-band {m['out_of_band'] if m else 0:.0%} | prompt "
                   f"[{names(song['prompt_prog'])}] -> sample [{names(progs[p0:])}]", flush=True)
-            rows_out.append(dict(song=song['name'], file=song['file'], dist=d, metrics=m, real=song['real']))
+            rows_out.append(dict(song=song['name'], file=song['file'], dist=d, metrics=m, real=song['real'], cons=dc,
+                                 cons_metrics=c, cons_real=song.get('real_c')))
             # the real song, as long as the sample
             off, tokens, programs = store_arrays(song['store'])
             a = off[song['file']]
             write(out / 'real' / f'{name}.mid', np.asarray(tokens[a:a + len(rows)], dtype=np.int64),
                   np.asarray(programs[a:a + len(rows)], dtype=np.int64))
         mean = float(np.mean([x['dist'] for x in rows_out]))
-        print(f"  {group} mean distance {mean:.3f} over {len(rows_out)} songs", flush=True)
-        scores['groups'][group] = dict(settings=st, mean_dist=mean, songs=rows_out)
+        cs = [x['cons'] for x in rows_out if x['cons'] is not None]
+        mean_c = float(np.mean(cs)) if cs else float('nan')
+        print(f"  {group} mean distance {mean:.3f} over {len(rows_out)} songs, consistency C {mean_c:.3f} over "
+              f"{len(cs)}", flush=True)
+        scores['groups'][group] = dict(settings=st, mean_dist=mean, mean_cons=mean_c, songs=rows_out)
     if len(scores['groups']) > 1:
         scores['mean_dist'] = float(np.mean([g['mean_dist'] for g in scores['groups'].values()]))
         print(f"\nmean over groups {scores['mean_dist']:.3f}")

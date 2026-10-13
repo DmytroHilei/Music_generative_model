@@ -19,6 +19,9 @@ t = log for notes_per_s and instruments (ratios, not differences: 300 vs 20 note
 s_style,k = the spread of t(metric k) over the real continuations of THAT style only (rock density is never compared
 with folk density), floored; every term capped at 3 spreads so one runaway sample can't swamp a style.
 style score = mean d_row over the style's songs; overall = mean over styles (each style counts the same).
+Consistency C (logged next to P): the same distance over sample_eval.consistency_metrics (4 s windows: density
+variation and drift, velocity variation, instrument-mix change between windows, prompt instruments kept, dominance
+drift), C_WEIGHTS / C_FLOOR; songs whose sample or real continuation spans < 3 windows are left out of C.
 
 csv_set: the same for validation songs of a multi-track CSV (one group, spreads over its songs), e.g. the Ukrainian
 set during a fine-tune (train.py style_eval_csv). Settings: TRACK (base model) or UA_MULTI (SETTINGS by name).
@@ -31,7 +34,7 @@ import numpy as np
 import torch
 
 from musicar.model import BOS_PITCH, DRUM_PROGRAM, window_conditions
-from musicar.eval.sample_eval import row_metrics
+from musicar.eval.sample_eval import consistency_metrics, row_metrics
 
 STORE = 'data/cache/gigamidi_clean_validation'
 STYLES = ('rock_pop', 'orchestral', 'piano_keys', 'electronic', 'acoustic')
@@ -41,6 +44,12 @@ LOG = {'notes_per_s', 'instruments'}
 FLOOR = {'takeover': 0.22, 'runaway': 0.22, 'top_share': 0.05, 'out_of_band': 0.05, 'notes_per_s': 0.15,
          'instruments': 0.15}  # log-scale floors: ~15% ratio
 CLIP = 3.0
+# consistency over time (sample_eval.consistency_metrics, 4 s windows), scored like the distance above against each
+# song's own real continuation; logged as C next to P, not added to it
+C_WEIGHTS = {'density_var': 0.20, 'density_drift': 0.15, 'velocity_var': 0.15, 'mix_change': 0.20, 'prompt_kept': 0.15,
+             'dominance_drift': 0.15}
+C_FLOOR = {'density_var': 0.1, 'density_drift': 0.15, 'velocity_var': 0.5, 'mix_change': 0.05, 'prompt_kept': 0.1,
+           'dominance_drift': 0.05}
 # the fixed tracking setting (the best of the 60-song stage of the 2026-10-04 search: top-p 0.9 was in every good one)
 TRACK = dict(temperature=0.9, top_p=0.9, dt_bias=0.1)
 # the Ukrainian multi-track fine-tune (2026-10-13 grid on ua_450_multi, c8; the user's pick after listening): the
@@ -105,8 +114,10 @@ def style_set(per_style=16, prompt_notes=128, new_notes=1000, store=STORE, candi
         t = np.asarray(tokens[a:a + prompt_notes + new_notes], dtype=np.int64)
         real = row_metrics(torch.from_numpy(t[prompt_notes:, 0]), torch.from_numpy(t[prompt_notes:, 3]),
                            torch.from_numpy(p[prompt_notes:]), set(p[:prompt_notes].tolist()))
-        out[s].append(dict(prompt=t[:prompt_notes], prompt_prog=p[:prompt_notes], real=real, file=int(i),
-                           instruments=sorted(set(p.tolist()))))
+        real_c = consistency_metrics(*[torch.from_numpy(t[prompt_notes:, j]) for j in (0, 1, 3)],
+                                     torch.from_numpy(p[prompt_notes:]), p[:prompt_notes].tolist())
+        out[s].append(dict(prompt=t[:prompt_notes], prompt_prog=p[:prompt_notes], real=real, real_c=real_c,
+                           file=int(i), instruments=sorted(set(p.tolist()))))
         if all(len(v) >= per_style + skip for v in out.values()):
             break
     return {s: v[skip:] for s, v in out.items()}
@@ -146,9 +157,11 @@ def csv_set(csv, n_songs=24, prompt_notes=128, new_notes=1000, match=''):
         p = np.asarray(programs[a:a + prompt_notes + new_notes], dtype=np.int64)
         real = row_metrics(torch.from_numpy(t[prompt_notes:, 0]), torch.from_numpy(t[prompt_notes:, 3]),
                            torch.from_numpy(p[prompt_notes:]), set(p[:prompt_notes].tolist()))
+        real_c = consistency_metrics(*[torch.from_numpy(t[prompt_notes:, j]) for j in (0, 1, 3)],
+                                     torch.from_numpy(p[prompt_notes:]), p[:prompt_notes].tolist())
         name = re.sub(r'[^\w-]+', '_', f"{df['artist'][i]} - {df['title'][i]}").strip('_')[:60]
-        songs.append(dict(prompt=t[:prompt_notes], prompt_prog=p[:prompt_notes], real=real, file=i, store=str(store),
-                          name=name))
+        songs.append(dict(prompt=t[:prompt_notes], prompt_prog=p[:prompt_notes], real=real, real_c=real_c, file=i,
+                          store=str(store), name=name))
     return {Path(csv).stem: songs}
 
 
@@ -164,6 +177,20 @@ def style_scales(songs):
 
 def row_distance(m, real, scale):
     return sum(w * min(abs(tf(k, m[k]) - tf(k, real[k])) / scale[k], CLIP) for k, w in WEIGHTS.items())
+
+
+def consistency_scales(songs):
+    """Spread of each consistency term over the real continuations (songs with >= 3 windows), floored."""
+    reals = [s['real_c'] for s in songs if s.get('real_c')]
+    return {k: max(float(np.std([r[k] for r in reals], ddof=1)) if len(reals) > 1 else 0.0, C_FLOOR[k])
+            for k in C_WEIGHTS}
+
+
+def consistency_distance(c, real_c, scale):
+    """C of one sample against its song's real continuation; None when either is too short (< 3 windows)."""
+    if c is None or real_c is None:
+        return None
+    return sum(w * min(abs(c[k] - real_c[k]) / scale[k], CLIP) for k, w in C_WEIGHTS.items())
 
 
 @torch.no_grad()
@@ -186,10 +213,12 @@ def _evaluate(model, sset, new_notes, seed, chunk, cuda_graph, device, settings,
     groups = [s for s in sset if sset[s]]
     rows = [(s, song) for s in groups for song in sset[s]]
     scales = {s: style_scales(sset[s]) for s in groups}
+    c_scales = {s: consistency_scales(sset[s]) for s in groups}
     modes = modes or ([settings['cond']] if 'cond' in settings else ['none'] + (['band'] if cfg.cond_inst else []))
     out = {}
     for mode in modes:
         per_style, metrics = {s: [] for s in groups}, []
+        per_style_c, c_metrics = {s: [] for s in groups}, []
         for c in range(0, len(rows), chunk):
             part = rows[c:c + chunk]
             tok = torch.stack([torch.from_numpy(song['prompt']) for _, song in part]).to(device)
@@ -216,6 +245,12 @@ def _evaluate(model, sset, new_notes, seed, chunk, cuda_graph, device, settings,
             for r, (style, song) in enumerate(part):
                 m = row_metrics(res[0][r, n0:].cpu(), res[3][r, n0:].cpu(), res[4][r, n0:].cpu(),
                                 set(song['prompt_prog'].tolist()))
+                c = consistency_metrics(res[0][r, n0:].cpu(), res[1][r, n0:].cpu(), res[3][r, n0:].cpu(),
+                                        res[4][r, n0:].cpu(), song['prompt_prog'].tolist())
+                dc = consistency_distance(c, song.get('real_c'), c_scales[style])
+                if dc is not None:
+                    per_style_c[style].append(dc)
+                    c_metrics.append(c)
                 if m is None:  # nothing but EOS: count as maximally far
                     per_style[style].append(CLIP * sum(WEIGHTS.values()))
                     continue
@@ -225,11 +260,16 @@ def _evaluate(model, sset, new_notes, seed, chunk, cuda_graph, device, settings,
         res_mode['all'] = float(np.mean([res_mode[s] for s in groups if s in res_mode]))
         for k in ('notes_per_s', 'top_share', 'takeover', 'runaway', 'out_of_band', 'instruments', 'pc_entropy'):
             res_mode[k] = float(np.mean([m[k] for m in metrics])) if metrics else float('nan')
+        c_means = [float(np.mean(v)) for v in per_style_c.values() if v]
+        res_mode['consistency'] = float(np.mean(c_means)) if c_means else float('nan')
+        for k in C_WEIGHTS:
+            res_mode[f'c_{k}'] = float(np.mean([c[k] for c in c_metrics])) if c_metrics else float('nan')
         out[mode] = res_mode
     return out
 
 
-METRICS = {'all', 'notes_per_s', 'top_share', 'takeover', 'runaway', 'out_of_band', 'instruments', 'pc_entropy'}
+METRICS = {'all', 'notes_per_s', 'top_share', 'takeover', 'runaway', 'out_of_band', 'instruments', 'pc_entropy',
+           'consistency'} | {f'c_{k}' for k in C_WEIGHTS}
 
 
 def format_line(step, rows, secs, res):
@@ -238,7 +278,8 @@ def format_line(step, rows, secs, res):
     for mode, r in res.items():
         groups = [s for s in r if s not in METRICS]
         parts.append(f"{mode}: P {r['all']:.2f} [" + ' '.join(f"{s} {r[s]:.2f}" for s in groups) +
-                     f"] nps {r['notes_per_s']:.0f} top {r['top_share']:.0%} takeover {r['takeover']:.0%}")
+                     f"] nps {r['notes_per_s']:.0f} top {r['top_share']:.0%} takeover {r['takeover']:.0%}"
+                     + (f" C {r['consistency']:.2f}" if 'consistency' in r else ''))
     return f"styles @{step} ({rows} rows, {secs:.0f} s): " + ' | '.join(parts)
 
 

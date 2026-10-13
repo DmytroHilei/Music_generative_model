@@ -102,6 +102,9 @@ class _CachedFp8Weight(torch.autograd.Function):
 
 
 _CACHED_FP8_LINEAR = None
+# one side stream per device for generate()'s CUDA-graph warm-up and capture: cuBLAS keeps a workspace for every
+# stream it has run on (~32 MB each, never freed), so a new stream per call grew the memory of every evaluation
+_SIDE_STREAMS = {}
 
 
 def _cached_float8_linear_class():
@@ -1016,7 +1019,9 @@ class GPT(nn.Module):
         step_style = style  # constant during generation, so the graph can read it directly
         graph = None
         if cuda_graph and device.type == 'cuda':
-            stream = torch.cuda.Stream()
+            if str(device) not in _SIDE_STREAMS:
+                _SIDE_STREAMS[str(device)] = torch.cuda.Stream(device)
+            stream = _SIDE_STREAMS[str(device)]
             stream.wait_stream(torch.cuda.current_stream())
             with torch.cuda.stream(stream):  # warm-up outside the graph (allocator, kernel selection)
                 for _ in range(2):
