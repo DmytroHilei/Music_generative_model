@@ -449,6 +449,13 @@ def save_resumable(it, name='ckpt.pt'):
     os.replace(path + '.tmp', path)
     tqdm.write(f"saved resumable checkpoint at iter {it} to {path}")
 
+def bf16_cpu_state():
+    """The weights as bf16 on the CPU. A bf16 copy on the GPU (~0.9 GB for the 450M) kept alive by the module-level
+    `ckpt` dict caused an OOM in every step after the first best-checkpoint save on the 8 GB laptop (ua_450_multi)."""
+    return {k: v.to('cpu', torch.bfloat16) if v.is_floating_point() else v.cpu()
+            for k, v in raw_model.state_dict().items()}
+
+
 n_params = sum(p.numel() for p in raw_model.parameters())
 n_train_notes = train_dataset.num_notes()
 print(f"Model parameters : {n_params:,} ({n_params / 1e6:.2f}M)")
@@ -553,8 +560,7 @@ for iter_num in pbar:
                 ckpt = {'model_args': model_args, 'iter_num': iter_num, 'best_val_loss': best_val_loss,
                         'config': config, 'wandb_run_id': wandb_run_id}
                 if checkpoint_format == 'bf16':
-                    ckpt['model'] = {k: v.to(torch.bfloat16) if v.is_floating_point() else v
-                                     for k, v in raw_model.state_dict().items()}
+                    ckpt['model'] = bf16_cpu_state()
                     name = 'model_bf16.pt'
                 else:
                     ckpt['model'] = raw_model.state_dict()
@@ -563,12 +569,12 @@ for iter_num in pbar:
                 if name == 'ckpt.pt' and ckpt_interval_min > 0:
                     name = 'best.pt'  # ckpt.pt is the periodic resume state, don't roll it back to an older iter
                 torch.save(ckpt, os.path.join(out_dir, name))
+                del ckpt
                 tqdm.write(f"saved checkpoint to {os.path.join(out_dir, name)}")
     if iter_num in save_iter_set:
         os.makedirs(out_dir, exist_ok=True)
         torch.save({'model_args': model_args, 'iter_num': iter_num, 'config': config,
-                    'model': {k: v.to(torch.bfloat16) if v.is_floating_point() else v
-                              for k, v in raw_model.state_dict().items()}},
+                    'model': bf16_cpu_state()},
                    os.path.join(out_dir, f'model_bf16_it{iter_num}.pt'))
         tqdm.write(f"saved weights of iter {iter_num} to {out_dir}/model_bf16_it{iter_num}.pt")
     if iter_num == 0 and eval_only:
@@ -634,5 +640,8 @@ for iter_num in pbar:
             sys.exit(143)
 
     t1 = time.time()
-    pbar.set_postfix(loss=f"{train_sums['loss'] / train_n:.3f}", lr=f"{lr:.1e}", ms=f"{(t1 - t0) * 1000:.0f}")
+    pbar.set_postfix(loss=f"{train_sums['loss'] / train_n:.3f}", lr=f"{lr:.1e}", ms=f"{(t1 - t0) * 1000:.0f}",
+                     **({'gb': f"{torch.cuda.max_memory_allocated() / 2**30:.2f}"} if device_type == 'cuda' else {}))
+    if device_type == 'cuda':
+        torch.cuda.reset_peak_memory_stats()
     t0 = t1
