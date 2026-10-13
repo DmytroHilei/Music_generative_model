@@ -9,6 +9,7 @@ ladder_L_pitchhead, fut_w0.2_*, fut_w1.0_*) load only with that version.
 """
 
 import math
+import random
 
 import torch
 import torch.nn as nn
@@ -215,3 +216,19 @@ def future_loss(heads, h, pitch, delta_time, program, tgt):
     if program is not None and 'program' in tgt:
         valid = valid & (seq(program, tgt['program']) != DRUM_PROGRAM)
     return heads.loss(h, fp, fdt, valid, real)
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# Velocity augmentation (ua-C, 2026-10-01, 7396237)
+# Result: B3 x30 recipe on the 448 Ukrainian songs, 600 it: tempo aug 10.479, tempo + velocity shift up to ±2 bins
+# 10.497 best Ukrainian val CE (seed noise about ±0.01); val2 (Aria pop+rock) 6.07 -> 6.27. Velocity aug hurts.
+# To use again: in MaestroDataset.__getitem__, inside `if self.augment and not self.eval_stride:` after the tempo
+# stretch: `if self.aug_velocity and store_augmented: velocity = shift_velocity(velocity, notes, self.aug_velocity,
+# self.velocity_bins)`, plus the aug_velocity argument of MaestroDataset and train.py.
+
+def shift_velocity(velocity, notes, max_shift, velocity_bins=32):
+    """Shift the velocity bins of all notes (mask `notes`, i.e. not BOS/EOS) of a window by one random amount in
+    ±max_shift, clamped. Symmetric shift, clamped: a no-clip bound would bias it downwards (-0.9 bins on the
+    reductions), since most windows hold a few melody notes saturated at the top bin (the melody boost clips at 127)."""
+    shift = random.randint(-max_shift, max_shift)
+    return torch.where(notes, (velocity + shift).clamp(0, velocity_bins - 1), velocity)

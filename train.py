@@ -76,8 +76,7 @@ style_lr_mult = 1.0       # Muon runs: LR multiplier for the style table (own Ad
 style_dropout = 0.1       # training: probability of dropping the style to 'none' (keeps an unconditional mode)
 boundary_frac = 0.1       # with special_tokens: share of train windows placed at a piece's start/end
 aug_tempo = 0.0           # training: time stretch up to x(1+aug_tempo) either way per window (0 = off)
-aug_velocity = 0          # training: velocity shift up to ±N bins (of 32) per window, clamped (0 = off)
-aug_stores = ''           # e.g. '1,0': which train stores get tempo/velocity aug (same order as source_weights); '' = all
+aug_stores = ''           # e.g. '1,0': which train stores get tempo aug (same order as source_weights); '' = all
 source_weights = ''       # e.g. '0.8,0.2': sampling weight per train store (CSVs = one store, then each store:); '' = by size
 batch_size = 6
 block_size = 512
@@ -188,7 +187,7 @@ data_kw = dict(root_dir=root_dir, cache_dir=cache_dir, special_tokens=special_to
 # train: random windows (uniform over all note positions of all files), with augmentation
 train_dataset = MaestroDataset(csv_path, split='train', block_size=block_size, augment=True, **data_kw,
                                style_dropout=style_dropout, boundary_frac=boundary_frac, aug_tempo=aug_tempo,
-                               aug_velocity=aug_velocity, pack_short=pack_short,
+                               pack_short=pack_short,
                                aug_stores=as_list(aug_stores, int), source_weights=as_list(source_weights, float))
 train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=num_workers, drop_last=True,
                           collate_fn=partial(collate_windows, extra_names=tuple(extra_names)),

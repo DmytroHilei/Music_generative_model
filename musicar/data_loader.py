@@ -95,7 +95,6 @@ class MaestroDataset(Dataset):
         style_dropout=0.0,
         boundary_frac=0.0,
         aug_tempo=0.0,
-        aug_velocity=0,
         aug_stores=None,
         programs=False,
         pad_short=False,
@@ -120,9 +119,7 @@ class MaestroDataset(Dataset):
                      start (half) or end (half), so openings and EOS are seen often (otherwise ~0.2% of windows)
         aug_tempo:   training only: stretch time (duration and delta_time) by a log-uniform factor in
                      [1/(1+aug_tempo), 1+aug_tempo] per window, with stochastic rounding (0 = off)
-        aug_velocity: training only: shift all velocity bins of a window by up to ±aug_velocity, clamped to the
-                     bin range (0 = off)
-        aug_stores:  optional 0/1 per store (same order as source_weights): which stores get the tempo/velocity
+        aug_stores:  optional 0/1 per store (same order as source_weights): which stores get the tempo
                      augmentation (e.g. [1, 0] = only the fine-tune CSVs, the replay store stays real). Default: all.
                      Transposition applies to every store regardless
         pad_short:   keep files shorter than the window (>= min_notes notes) as one whole-file window, zero-padded at the
@@ -152,7 +149,6 @@ class MaestroDataset(Dataset):
         self.debug = debug
         self.augment = augment
         self.aug_tempo = aug_tempo
-        self.aug_velocity = aug_velocity
         self.aug_stores = aug_stores
         self.cache_dir = Path(cache_dir)
         self.eval_stride = eval_stride
@@ -410,11 +406,6 @@ class MaestroDataset(Dataset):
                 s = (1 + self.aug_tempo) ** random.uniform(-1, 1)
                 duration = self._stretch(duration, s, self.max_duration_bin)
                 delta_time = self._stretch(delta_time, s, self.max_delta_bin)
-            if self.aug_velocity and store_augmented:
-                # symmetric shift, clamped: a no-clip bound would bias it downwards (-0.9 bins on the reductions), since
-                # most windows hold a few melody notes saturated at the top bin (the melody boost clips at 127)
-                shift = random.randint(-self.aug_velocity, self.aug_velocity)
-                velocity = torch.where(notes, (velocity + shift).clamp(0, self.velocity_bins - 1), velocity)
 
         streams = (pitch, velocity, duration, delta_time) + ((program,) if program is not None else ())
         n_rows = len(pitch)
