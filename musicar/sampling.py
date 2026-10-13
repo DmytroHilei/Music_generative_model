@@ -3,12 +3,37 @@
 import torch
 from torch.nn import functional as F
 
-from musicar.data_loader import BOS_PITCH, EOS_PITCH
+from musicar.data_loader import BOS_PITCH, EOS_PITCH, window_conditions
 from musicar.model import KVCache, STREAM_ORDER
 
 # one side stream per device for the CUDA-graph warm-up and capture: cuBLAS keeps a workspace for every
 # stream it has run on (~32 MB each, never freed), so a new stream per call grew the memory of every evaluation
 _SIDE_STREAMS = {}
+
+
+
+def with_bos(streams, programs=None):
+    """A BOS note (pitch BOS_PITCH, other attributes 0, instrument 0) in front of every row of 4 prompt streams
+    (B, T), T may be 0, and of their programs (B, T) if given. Returns (streams, programs)."""
+    rows = streams[0].size(0)
+    bos = [streams[0].new_full((rows, 1), BOS_PITCH if j == 0 else 0) for j in range(4)]
+    streams = tuple(torch.cat([b, s], 1) for b, s in zip(bos, streams))
+    return streams, None if programs is None else torch.cat([programs.new_zeros(rows, 1), programs], 1)
+
+
+def prompt_inputs(model, tokens, programs, band=False, density=False):
+    """generate()'s inputs for prompt rows: tokens (B, T, 4) and programs (B, T) on the model's device -> (4 streams,
+    programs, cond). Models with BOS/EOS get BOS in front (the prompts start at their piece's beginning). Conditioned
+    models (cond_inst / n_density) get the prompt's own instrument set if `band` and its density level if `density`,
+    else 'none'; cond is None for unconditioned models."""
+    cfg = model.config
+    streams = tuple(tokens[:, :, j] for j in range(4))
+    if cfg.pitch_size > BOS_PITCH:
+        streams, programs = with_bos(streams, programs)
+    if not (cfg.cond_inst or cfg.n_density):
+        return streams, programs, None
+    inst, dens = window_conditions(streams[0], streams[3], programs, cfg.n_programs, cfg.n_density or 16)
+    return streams, programs, (inst if band else torch.zeros_like(inst), dens if density else torch.zeros_like(dens))
 
 
 @torch.no_grad()

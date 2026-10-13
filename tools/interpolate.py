@@ -14,13 +14,12 @@ from pathlib import Path
 
 import torch
 
-from musicar.checkpoint import resolve_checkpoint
+from musicar.checkpoint import resolve_checkpoint, strip_compile_prefix
 
 
 def load(path):
     ck = torch.load(resolve_checkpoint(path), map_location='cpu', weights_only=False, mmap=True)
-    sd = {k.removeprefix('_orig_mod.'): v for k, v in ck['model'].items()}
-    return ck, sd
+    return ck, strip_compile_prefix(ck['model'])
 
 
 def main():

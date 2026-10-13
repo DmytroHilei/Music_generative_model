@@ -12,11 +12,13 @@ from pathlib import Path
 
 import torch
 
+from musicar.checkpoint import strip_compile_prefix
+
 src = Path(sys.argv[1])
 dst = Path(sys.argv[2]) if len(sys.argv) > 2 else src.with_name('model_bf16.pt')
 ckpt = torch.load(src, map_location='cpu')
-state = {k.removeprefix('_orig_mod.'): (v.to(torch.bfloat16) if v.is_floating_point() else v)
-         for k, v in ckpt['model'].items()}
+state = {k: v.to(torch.bfloat16) if v.is_floating_point() else v
+         for k, v in strip_compile_prefix(ckpt['model']).items()}
 torch.save({'model': state, 'model_args': ckpt['model_args'], 'config': ckpt.get('config', {}),
             'iter_num': ckpt.get('iter_num'), 'best_val_loss': ckpt.get('best_val_loss')}, dst)
 print(f"{src} ({src.stat().st_size / 1e6:.0f} MB) -> {dst} ({dst.stat().st_size / 1e6:.0f} MB)")

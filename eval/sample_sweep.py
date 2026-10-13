@@ -14,15 +14,13 @@ Progress shows on the dashboard (status.py, "Sampling jobs"); the table goes to 
 """
 
 import argparse
-import time
 from pathlib import Path
 
 import numpy as np
 import torch
 
-from musicar.checkpoint import resolve_checkpoint
+from musicar.checkpoint import load_model, resolve_checkpoint
 from musicar.jobstatus import JobStatus
-from musicar.model import GPT, MusicConfig
 from musicar.sampling import generate
 
 DT_SECONDS = 0.02
@@ -64,13 +62,8 @@ def main():
     configs = [(c, parse_config(c)) for c in args.configs]
 
     path = resolve_checkpoint(args.checkpoint)
-    ck = torch.load(path, map_location=args.device)
-    cfg = MusicConfig(**{k: v for k, v in ck['model_args'].items() if k in MusicConfig.__dataclass_fields__},
-                      dropout=0.0)
-    model = GPT(cfg)
-    model.load_state_dict({k.replace('_orig_mod.', ''): v.float() for k, v in ck['model'].items()})
-    model.eval().to(args.device)
-    header = f"checkpoint {path} (iter {ck.get('iter_num', '?')}), {args.prompts} Aria val prompts x " \
+    model, it = load_model(path, args.device)
+    header = f"checkpoint {path} (iter {it}), {args.prompts} Aria val prompts x " \
              f"{args.prompt_notes} notes -> {args.new_notes} new notes"
     print(header)
 

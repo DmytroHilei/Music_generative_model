@@ -24,6 +24,7 @@ from pathlib import Path
 os.environ.setdefault('PYTORCH_CUDA_ALLOC_CONF', 'expandable_segments:True')
 import torch  # noqa: E402
 
+from musicar.checkpoint import load_model  # noqa: E402
 from musicar.eval import style_eval  # noqa: E402
 from musicar.eval.style_eval import STYLES, TRACK  # noqa: E402
 
@@ -34,16 +35,6 @@ GRID = dict(temperature=[0.8, 0.9, 1.0], top_p=[None, 0.95, 0.9, 0.85], instrume
 def name(c):
     return (f"T{c['temperature']} p{c['top_p'] or '-'} iT{c['instrument_temperature'] or '-'} "
             f"dt{c['dt_bias']} {c['cond']}")
-
-
-def load(path):
-    from musicar.model import GPT, MusicConfig
-    ck = torch.load(path, map_location='cuda')
-    cfg = MusicConfig(**{k: v for k, v in ck['model_args'].items() if k in MusicConfig.__dataclass_fields__},
-                      dropout=0.0)
-    model = GPT(cfg)
-    model.load_state_dict({k.removeprefix('_orig_mod.'): v for k, v in ck['model'].items()})
-    return model.cuda().to(torch.bfloat16).eval(), ck.get('iter_num')
 
 
 def run(model, sset, c, chunk):
@@ -71,7 +62,7 @@ def main():
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
     grid = {**GRID, **(json.loads(args.grid) if args.grid else {})}
-    model, it = load(args.checkpoint)
+    model, it = load_model(args.checkpoint, 'cuda', torch.bfloat16)
     cfg = model.config
     if not cfg.cond_inst:
         grid['cond'] = ['none']

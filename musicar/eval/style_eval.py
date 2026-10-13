@@ -33,9 +33,9 @@ import math
 import numpy as np
 import torch
 
-from musicar.data_loader import BOS_PITCH, DRUM_PROGRAM, window_conditions
+from musicar.data_loader import DRUM_PROGRAM
 from musicar.eval.sample_eval import consistency_metrics, row_metrics
-from musicar.sampling import generate
+from musicar.sampling import generate, prompt_inputs
 
 STORE = 'data/cache/gigamidi_clean_validation'
 STYLES = ('rock_pop', 'orchestral', 'piano_keys', 'electronic', 'acoustic')
@@ -194,6 +194,17 @@ def consistency_distance(c, real_c, scale):
     return sum(w * min(abs(c[k] - real_c[k]) / scale[k], CLIP) for k, w in C_WEIGHTS.items())
 
 
+def score_row(res, r, n0, song, scale, c_scale):
+    """Row r of generate()'s output (with programs; new notes from n0) against its song's real continuation:
+    (metrics, distance, consistency metrics, consistency distance or None). A row of nothing but EOS has no
+    metrics and the maximal distance."""
+    pitch, vel, dt, prog = (res[j][r, n0:].cpu() for j in (0, 1, 3, 4))
+    m = row_metrics(pitch, dt, prog, set(song['prompt_prog'].tolist()))
+    d = CLIP * sum(WEIGHTS.values()) if m is None else row_distance(m, song['real'], scale)
+    c = consistency_metrics(pitch, vel, dt, prog, song['prompt_prog'].tolist())
+    return m, d, c, consistency_distance(c, song.get('real_c'), c_scale)
+
+
 @torch.no_grad()
 def evaluate(model, sset, new_notes=1000, seed=1234, chunk=20, cuda_graph=True, device='cuda', settings=TRACK,
              modes=None):
@@ -224,16 +235,7 @@ def _evaluate(model, sset, new_notes, seed, chunk, cuda_graph, device, settings,
             part = rows[c:c + chunk]
             tok = torch.stack([torch.from_numpy(song['prompt']) for _, song in part]).to(device)
             prog = torch.stack([torch.from_numpy(song['prompt_prog']) for _, song in part]).to(device)
-            streams = [tok[:, :, j] for j in range(4)]
-            if cfg.pitch_size > BOS_PITCH:
-                bos = [torch.full_like(streams[0][:, :1], BOS_PITCH if j == 0 else 0) for j in range(4)]
-                streams = [torch.cat([b, x], 1) for b, x in zip(bos, streams)]
-                prog = torch.cat([torch.zeros_like(prog[:, :1]), prog], 1)
-            cond = None
-            if cfg.cond_inst or cfg.n_density:
-                inst, _ = window_conditions(streams[0], streams[3], prog, cfg.n_programs, cfg.n_density or 16)
-                zero = torch.zeros(len(part), dtype=torch.long, device=device)
-                cond = (inst if mode == 'band' else torch.zeros_like(inst), zero)
+            streams, prog, cond = prompt_inputs(model, tok, prog, band=mode == 'band')
             torch.manual_seed(seed + c)
             with torch.autocast('cuda', dtype=torch.bfloat16,
                                 enabled=device == 'cuda' and next(model.parameters()).dtype == torch.float32):
@@ -244,19 +246,13 @@ def _evaluate(model, sset, new_notes, seed, chunk, cuda_graph, device, settings,
                                min_new=settings.get('min_new', 0))
             n0 = streams[0].size(1)
             for r, (style, song) in enumerate(part):
-                m = row_metrics(res[0][r, n0:].cpu(), res[3][r, n0:].cpu(), res[4][r, n0:].cpu(),
-                                set(song['prompt_prog'].tolist()))
-                c = consistency_metrics(res[0][r, n0:].cpu(), res[1][r, n0:].cpu(), res[3][r, n0:].cpu(),
-                                        res[4][r, n0:].cpu(), song['prompt_prog'].tolist())
-                dc = consistency_distance(c, song.get('real_c'), c_scales[style])
+                m, d, c, dc = score_row(res, r, n0, song, scales[style], c_scales[style])
+                per_style[style].append(d)
+                if m is not None:
+                    metrics.append(m)
                 if dc is not None:
                     per_style_c[style].append(dc)
                     c_metrics.append(c)
-                if m is None:  # nothing but EOS: count as maximally far
-                    per_style[style].append(CLIP * sum(WEIGHTS.values()))
-                    continue
-                per_style[style].append(row_distance(m, song['real'], scales[style]))
-                metrics.append(m)
         res_mode = {s: float(np.mean(v)) for s, v in per_style.items() if v}
         res_mode['all'] = float(np.mean([res_mode[s] for s in groups if s in res_mode]))
         for k in ('notes_per_s', 'top_share', 'takeover', 'runaway', 'out_of_band', 'instruments', 'pc_entropy'):
@@ -307,18 +303,12 @@ def main():
                 print(f"  file {x['file']:>6}  {x['real']['notes_per_s']:5.1f} notes/s  top {x['real']['top_share']:.0%}  "
                       + ', '.join(name(g) for g in x['instruments'])[:110])
         return
-    from musicar.checkpoint import resolve_checkpoint
-    from musicar.model import GPT, MusicConfig
-    ck = torch.load(resolve_checkpoint(args.checkpoint), map_location='cuda')
-    cfg = MusicConfig(**{k: v for k, v in ck['model_args'].items() if k in MusicConfig.__dataclass_fields__},
-                      dropout=0.0)
-    model = GPT(cfg)
-    model.load_state_dict({k.removeprefix('_orig_mod.'): v for k, v in ck['model'].items()})
-    model = model.cuda().to(torch.bfloat16)
     import time
+    from musicar.checkpoint import load_model
+    model, it = load_model(args.checkpoint, 'cuda', torch.bfloat16)
     t = time.time()
     res = evaluate(model, sset, cuda_graph=not args.no_cuda_graph)
-    print(format_line(ck.get('iter_num'), sum(len(v) for v in sset.values()), time.time() - t, res))
+    print(format_line(it, sum(len(v) for v in sset.values()), time.time() - t, res))
 
 
 if __name__ == '__main__':

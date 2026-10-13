@@ -21,8 +21,8 @@ import argparse
 import numpy as np
 import torch
 
-from musicar.data_loader import BOS_PITCH, EOS_PITCH, DRUM_PROGRAM, window_conditions
-from musicar.sampling import generate
+from musicar.data_loader import BOS_PITCH, EOS_PITCH, DRUM_PROGRAM
+from musicar.sampling import generate, prompt_inputs
 
 STORE = 'data/cache/gigamidi_clean_validation'
 
@@ -174,31 +174,40 @@ def consistency_metrics(pitch, vel, dt, prog, prompt_prog, window_s=4.0, dt_seco
 
 @torch.no_grad()
 def evaluate(model, prompts, new_notes=1000, temperature=0.9, seed=1234, device='cuda'):
-    """{mode: {metric: mean over rows}} for 'none' and (cond_inst models) 'band'."""
+    """{mode: {metric: mean over rows}} for 'none' and, for cond_inst models, 'band' (the prompt's instrument set) and
+    with n_density also 'band_dens' (band + the prompt's density level: how the model would be used). The model is
+    put back into its previous train/eval mode even after an error."""
     cfg = model.config
+    modes = {'none': (False, False)}
+    if cfg.cond_inst:
+        modes['band'] = (True, False)
+        if cfg.n_density:
+            modes['band_dens'] = (True, True)
     tokens, programs = (t.to(device) for t in prompts)
-    streams = [tokens[:, :, j] for j in range(4)]
-    if cfg.pitch_size > BOS_PITCH:  # models with BOS/EOS: prompts start at the piece's beginning
-        bos = [torch.full_like(streams[0][:, :1], BOS_PITCH if j == 0 else 0) for j in range(4)]
-        streams = [torch.cat([b, s], 1) for b, s in zip(bos, streams)]
-        programs = torch.cat([torch.zeros_like(programs[:, :1]), programs], 1)
-    modes = {'none': None}
-    if cfg.cond_inst or cfg.n_density:
-        none = (torch.zeros(len(tokens), cfg.n_programs, device=device),
-                torch.zeros(len(tokens), dtype=torch.long, device=device))
-        modes = {'none': none}
-        inst, dens = window_conditions(streams[0], streams[3], programs, cfg.n_programs, cfg.n_density or 16)
-        if cfg.cond_inst:
-            modes['band'] = (inst, none[1])
-        if cfg.cond_inst and cfg.n_density:  # band + the prompt's own density level: how it would be used
-            modes['band_dens'] = (inst, dens)
     was_training = model.training
     model.eval()
     try:
-        return _sample_modes(model, cfg, streams, programs, tokens, modes, new_notes, temperature, seed, device)
+        out = {}
+        for mode, (band, density) in modes.items():
+            streams, progs, cond = prompt_inputs(model, tokens, programs, band, density)
+            torch.manual_seed(seed)
+            with torch.autocast('cuda', dtype=torch.bfloat16, enabled=device == 'cuda'):
+                res = generate(model, *streams, max_new_tokens=new_notes, temperature=temperature,
+                               program=None if cfg.n_programs else 0, programs=progs if cfg.n_programs else None,
+                               return_programs=True, cond=cond, cuda_graph=False)
+            n0 = streams[0].size(1)
+            # the prompt's own instruments (without BOS's program 0) define the band
+            rows = [row_metrics(res[0][r, n0:].cpu(), res[3][r, n0:].cpu(), res[4][r, n0:].cpu(),
+                                set(programs[r].tolist())) for r in range(len(tokens))]
+            rows = [r for r in rows if r]
+            out[mode] = {k: float(np.mean([r[k] for r in rows])) for k in rows[0]} if rows else {}
     finally:
         model.train(was_training)  # also after a failure: training must continue in train mode
-
+    ref = _load_reference()
+    for mode, m in out.items():
+        if m and ref and len(tokens) == ref.get('rows'):  # same prompt set as the reference
+            m['distance'] = distance(m, ref)
+    return out
 
 
 def format_line(step, rows, secs, res):
@@ -207,26 +216,6 @@ def format_line(step, rows, secs, res):
         f"{mode}: instr {m['instruments']:.1f} oob {m['out_of_band']:.0%} nps {m['notes_per_s']:.0f} "
         f"top {m['top_share']:.0%} runaway {m['runaway']:.0%} takeover {m['takeover']:.0%}"
         for mode, m in res.items() if m)
-
-def _sample_modes(model, cfg, streams, programs, tokens, modes, new_notes, temperature, seed, device):
-    out = {}
-    for mode, cond in modes.items():
-        torch.manual_seed(seed)
-        with torch.autocast('cuda', dtype=torch.bfloat16, enabled=device == 'cuda'):
-            res = generate(model, *streams, max_new_tokens=new_notes, temperature=temperature,
-                           program=None if cfg.n_programs else 0, programs=programs if cfg.n_programs else None,
-                           return_programs=True, cond=cond, cuda_graph=False)
-        n0 = streams[0].size(1)
-        rows = [row_metrics(res[0][r, n0:].cpu(), res[3][r, n0:].cpu(), res[4][r, n0:].cpu(),
-                            set(programs[r].tolist())) for r in range(len(tokens))]
-        rows = [r for r in rows if r]
-        out[mode] = {k: float(np.mean([r[k] for r in rows])) for k in rows[0]} if rows else {}
-    ref = _load_reference()
-    for mode, m in out.items():
-        if m and ref and len(tokens) == ref.get('rows'):  # same prompt set as the reference
-            m['distance'] = distance(m, ref)
-    return out
-
 
 def _load_reference():
     import json
@@ -239,7 +228,6 @@ def _load_reference():
 
 
 def main():
-    import sys
     p = argparse.ArgumentParser()
     p.add_argument('--checkpoint', default=None)
     p.add_argument('--rows', type=int, default=8)
@@ -256,14 +244,8 @@ def main():
         return
     if not args.checkpoint:
         p.error('--checkpoint is required (or --reference to write the real-music reference)')
-    from musicar.checkpoint import resolve_checkpoint
-    from musicar.model import GPT, MusicConfig
-    ckpt = torch.load(resolve_checkpoint(args.checkpoint), map_location='cuda')
-    fields = set(MusicConfig.__dataclass_fields__)
-    cfg = MusicConfig(**{k: v for k, v in ckpt['model_args'].items() if k in fields}, dropout=0.0)
-    model = GPT(cfg)
-    model.load_state_dict({k.removeprefix('_orig_mod.'): v for k, v in ckpt['model'].items()})
-    model = model.cuda().to(torch.bfloat16)
+    from musicar.checkpoint import load_model
+    model, _ = load_model(args.checkpoint, 'cuda', torch.bfloat16)
     res = evaluate(model, fixed_prompts(args.rows), args.new_notes, args.temperature)
     for mode, m in res.items():
         print(f'{mode:5s} ' + ' | '.join(f'{k} {v:.3g}' for k, v in m.items()))

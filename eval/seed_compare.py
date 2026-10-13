@@ -34,8 +34,9 @@ import torch
 from musicar.data_loader import BOS_PITCH, EOS_PITCH, density_level, tokenize_midi
 from musicar.midi_io import render_mp3, tokens_to_midi
 from musicar.jobstatus import JobStatus
-from musicar.eval.structure_eval import load_model, metrics, pick_style, summarize
-from musicar.sampling import generate
+from musicar.checkpoint import load_model
+from musicar.eval.structure_eval import metrics, pick_style, summarize
+from musicar.sampling import generate, with_bos
 
 # validation covers that are not Ukrainian-language songs (2026-10-07 v4 val set)
 NON_UA_ARTISTS = {'Мішель Андраде', 'Пошлая Молли', 'Луна', 'Витас', 'Ундервуд', 'Pianoбой', 'Ані Лорак'}
@@ -68,7 +69,7 @@ def parse_setting(text):
         k, v = kv.split('=')
         if k not in s:
             raise ValueError(f'unknown setting key {k!r} (T, p, dt, dens)')
-        s[k] = v if k == 'dens' else (None if v == 'none' else float(v))
+        s[k] = v if k == 'dens' else (None if v.lower() == 'none' else float(v))  # str(None) from the CLI defaults
     return s
 
 
@@ -96,9 +97,7 @@ def continue_songs(model, cfg, args, prompts, style, device, job, base, s, level
     for b in range(0, len(prompts), args.batch_size):
         P = np.stack(prompts[b:b + args.batch_size])  # (B, n, 4)
         B = len(P)
-        x = [torch.from_numpy(P[:, :, j]).long().to(device) for j in range(4)]
-        bos = [torch.full((B, 1), BOS_PITCH if j == 0 else 0, dtype=torch.long, device=device) for j in range(4)]
-        x = [torch.cat([s, t], 1) for s, t in zip(bos, x)]
+        x, _ = with_bos([torch.from_numpy(P[:, :, j]).long().to(device) for j in range(4)])
         cond = None
         if cfg.cond_inst or cfg.n_density:
             inst = torch.zeros(B, cfg.n_programs or 1, device=device)
@@ -187,7 +186,8 @@ def main():
     ranking, records = [], []
     run = 0
     for path in args.checkpoints:
-        model, cfg, it = load_model(path, args.device)
+        model, it = load_model(path, args.device)
+        cfg = model.config
         if args.device == 'cuda':
             model = model.to(torch.bfloat16)
         style, style_name = pick_style(model, cfg, [s.strip() for s in args.style.split(',') if s.strip()])

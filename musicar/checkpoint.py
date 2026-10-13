@@ -77,6 +77,17 @@ def merge_model_args(saved, wanted, finetune, block_size):
     return args
 
 
+def load_model(path, device='cpu', dtype=torch.float32):
+    """A trained GPT for inference from a checkpoint file or run dir (resolve_checkpoint): dropout 0, eval mode, on
+    `device` in `dtype`. Keys a checkpoint predates take MusicConfig's defaults. Returns (model, iter_num or None)."""
+    from musicar.model import GPT, MusicConfig
+    ck = torch.load(resolve_checkpoint(path), map_location='cpu')
+    fields = MusicConfig.__dataclass_fields__
+    model = GPT(MusicConfig(**{k: v for k, v in ck['model_args'].items() if k in fields}, dropout=0.0))
+    model.load_state_dict(strip_compile_prefix(ck['model']))
+    return model.eval().to(device=device, dtype=dtype), ck.get('iter_num')
+
+
 def strip_compile_prefix(state_dict):
     """Keys saved from a torch.compile'd model start with '_orig_mod.'; drop it (in place)."""
     for k in list(state_dict):

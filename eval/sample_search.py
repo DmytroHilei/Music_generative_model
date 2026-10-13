@@ -26,7 +26,6 @@ import csv
 import os
 os.environ.setdefault('PYTORCH_CUDA_ALLOC_CONF', 'expandable_segments:True')
 import itertools
-import json
 import random
 import time
 from pathlib import Path
@@ -34,9 +33,9 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from musicar.data_loader import BOS_PITCH, DRUM_PROGRAM, window_conditions
-from musicar.model import GPT, MusicConfig
-from musicar.sampling import generate
+from musicar.checkpoint import load_model
+from musicar.data_loader import DRUM_PROGRAM
+from musicar.sampling import generate, prompt_inputs
 from musicar.eval.sample_eval import DIST_WEIGHTS, SD_FLOOR, STORE, distance, row_metrics
 
 KINDS = ('rock_pop', 'orchestral', 'piano_keys', 'electronic', 'acoustic')
@@ -108,22 +107,13 @@ def name(c):
 @torch.no_grad()
 def run_config(model, c, rows, new_notes, seed, batch=16):
     """Per-row metrics of one configuration on the given prompt rows (list of (kind, prompt, ...))."""
-    cfg = model.config
     out = []
     for s in range(0, len(rows), batch):
         chunk = rows[s:s + batch]
         tok = torch.stack([torch.from_numpy(r[1]) for r in chunk]).cuda()
         prog = torch.stack([torch.from_numpy(r[2]) for r in chunk]).cuda()
-        streams = [tok[:, :, j] for j in range(4)]
-        if cfg.pitch_size > BOS_PITCH:
-            bos = [torch.full_like(streams[0][:, :1], BOS_PITCH if j == 0 else 0) for j in range(4)]
-            streams = [torch.cat([b, x], 1) for b, x in zip(bos, streams)]
-            prog = torch.cat([torch.zeros_like(prog[:, :1]), prog], 1)
-        cond = None
-        if cfg.cond_inst or cfg.n_density:
-            inst, dens = window_conditions(streams[0], streams[3], prog, cfg.n_programs, cfg.n_density or 16)
-            none_i, none_d = torch.zeros_like(inst), torch.zeros_like(dens)
-            cond = {'none': (none_i, none_d), 'band': (inst, none_d), 'band_dens': (inst, dens)}[c['cond']]
+        streams, prog, cond = prompt_inputs(model, tok, prog, band=c['cond'] in ('band', 'band_dens'),
+                                            density=c['cond'] == 'band_dens')
         torch.manual_seed(seed)
         res = generate(model, *streams, max_new_tokens=new_notes, temperature=c['temperature'], top_p=c['top_p'],
                        dt_bias=c['dt_bias'], program=None, programs=prog, return_programs=True, cond=cond,
@@ -174,14 +164,8 @@ def main():
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
 
-    from musicar.checkpoint import resolve_checkpoint
-    ck = torch.load(resolve_checkpoint(args.checkpoint), map_location='cuda')
-    mcfg = MusicConfig(**{k: v for k, v in ck['model_args'].items() if k in MusicConfig.__dataclass_fields__},
-                       dropout=0.0)
-    model = GPT(mcfg)
-    model.load_state_dict({k.removeprefix('_orig_mod.'): v for k, v in ck['model'].items()})
-    model = model.cuda().to(torch.bfloat16).eval()
-    print(f"model {args.checkpoint} (iter {ck.get('iter_num')})")
+    model, it = load_model(args.checkpoint, 'cuda', torch.bfloat16)
+    print(f"model {args.checkpoint} (iter {it})")
 
     stages = [int(x) for x in args.stages.split(',')]
     keep = [int(x) for x in args.keep.split(',')]

@@ -35,10 +35,9 @@ import pandas as pd
 import torch
 
 from musicar.data_loader import BOS_PITCH, EOS_PITCH, load_styles, tokenize_midi
-from musicar.checkpoint import resolve_checkpoint
+from musicar.checkpoint import load_model
 from musicar.midi_io import tokens_to_midi
 from musicar.jobstatus import JobStatus
-from musicar.model import GPT, MusicConfig
 from musicar.sampling import generate
 
 DT = 0.02
@@ -163,15 +162,6 @@ def real_pieces(csvs):
     return pieces
 
 
-def load_model(path, device):
-    ck = torch.load(resolve_checkpoint(path), map_location=device)
-    cfg = MusicConfig(**{k: v for k, v in ck['model_args'].items() if k in MusicConfig.__dataclass_fields__},
-                      dropout=0.0)
-    model = GPT(cfg)
-    model.load_state_dict({k.replace('_orig_mod.', ''): v.float() for k, v in ck['model'].items()}, strict=False)
-    return model.eval().to(device), cfg, ck.get('iter_num', '?')
-
-
 def sample(model, cfg, args, style, device, job, base):
     B = args.samples
     if cfg.pitch_size > BOS_PITCH:
@@ -250,7 +240,8 @@ def main():
     job = JobStatus('structure', max(1, len(args.checkpoints) * args.samples * args.max_new),
                     f'{len(args.checkpoints)} checkpoints')
     for ci, path in enumerate(args.checkpoints):
-        model, cfg, it = load_model(path, args.device)
+        model, it = load_model(path, args.device)
+        cfg = model.config
         style, style_name = pick_style(model, cfg, prefs)
         pieces = sample(model, cfg, args, style, args.device, job, ci * args.samples * args.max_new)
         name = f"{Path(path).name} @{it} [{style_name}]{args.tag}"

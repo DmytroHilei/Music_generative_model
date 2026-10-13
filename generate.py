@@ -8,20 +8,20 @@ import pandas as pd
 import pretty_midi
 import torch
 
-from musicar.checkpoint import resolve_checkpoint
-from musicar.data_loader import tokenize_midi, load_styles, BOS_PITCH, EOS_PITCH, DRUM_PROGRAM, window_conditions, density_level
+from musicar.checkpoint import load_model, resolve_checkpoint
+from musicar.data_loader import (BOS_PITCH, DRUM_PROGRAM, EOS_PITCH, density_level, load_styles, tokenize_midi,
+                                 window_conditions)
 from musicar.jobstatus import JobStatus
 from musicar.midi_io import render_mp3, tokens_to_midi
-from musicar.model import GPT, MusicConfig
-from musicar.sampling import generate
+from musicar.sampling import generate, with_bos
 
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Generate piano MIDI from a trained checkpoint.",
+        description="Generate MIDI (piano or multi-instrument) from a trained checkpoint.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    parser.add_argument("--checkpoint", type=str, default="checkpoints/ckpt.pt",
+    parser.add_argument("--checkpoint", type=str, required=True,
                         help="checkpoint file, or a run directory (uses model_bf16.pt, else best.pt, else ckpt.pt)")
     parser.add_argument("--output", type=str, default="generated.mid",
                         help="output MIDI; with --num-samples > 1 a _<i> suffix is added")
@@ -81,7 +81,7 @@ def parse_args():
                         help="Include the prompt notes in the output MIDI")
     parser.add_argument("--anchor", type=int, default=0,
                         help="optional, off by default: pin the first N notes (e.g. the prompt's theme) at the start "
-                             "of the context once generation runs past the 512-note window")
+                             "of the context once generation runs past the model's context window")
     parser.add_argument("--style", type=str, default=None,
                         help="models trained with styles: a name from data/styles.json (genre or artist, e.g. pop, "
                              "Скрябін) or 'none' (default: none = unconditional)")
@@ -149,25 +149,11 @@ def main():
             print(f"{i:5d}  {label}")
         return
 
-    ckpt = torch.load(resolve_checkpoint(args.checkpoint), map_location=device)
-    ma = ckpt.get("model_args", {})
-    # every architecture field the checkpoint knows; keys it predates fall back to what old checkpoints used
-    fields = set(MusicConfig.__dataclass_fields__)
-    legacy = dict(n_embd=256)
-    config = MusicConfig(**{**legacy, **{k: v for k, v in ma.items() if k in fields}, 'dropout': 0.0})
-
-    model = GPT(config)
-    state_dict = ckpt["model"]
-    # strip torch.compile prefix if present
-    for k in list(state_dict):
-        if k.startswith("_orig_mod."):
-            state_dict[k[len("_orig_mod."):]] = state_dict.pop(k)
-    model.load_state_dict(state_dict)
     dtype = {"fp32": torch.float32, "bf16": torch.bfloat16}.get(args.dtype, torch.bfloat16 if device == "cuda"
                                                                  else torch.float32)
-    model.eval().to(device=device, dtype=dtype)
-
-    print(f"Checkpoint: {resolve_checkpoint(args.checkpoint)} (iter {ckpt.get('iter_num', '?')}), "
+    model, it = load_model(args.checkpoint, device, dtype)
+    config = model.config
+    print(f"Checkpoint: {resolve_checkpoint(args.checkpoint)} (iter {it}), "
           f"device {device}, {str(dtype).replace('torch.', '')}")
     out_base = Path(args.output)
     names = [out_base if args.num_samples == 1 else out_base.with_name(f"{out_base.stem}_{i + 1}{out_base.suffix}")
@@ -191,9 +177,7 @@ def prompt_rows(config, args, pieces, seed, n_rows, device):
     if programs is None:
         programs = torch.zeros_like(streams[0])
     if config.pitch_size > BOS_PITCH and (args.prompt_start == 0 or streams[0].size(1) == 0):
-        bos = [torch.full((n_rows, 1), BOS_PITCH if j == 0 else 0, dtype=torch.long, device=device) for j in range(4)]
-        streams = tuple(torch.cat([b, s], dim=1) for b, s in zip(bos, streams))
-        programs = torch.cat([torch.zeros_like(bos[0]), programs], dim=1)
+        streams, programs = with_bos(streams, programs)
     return streams, labels, programs
 
 
@@ -260,16 +244,7 @@ def generate_batch(model, config, args, pieces, seed, outs, device, progress=Non
         if label:
             print(f"Prompt for {out.name}: {label}")
     has_prompt = bool(pieces or args.prompt)
-    style = None
-    if config.n_styles:
-        names = load_styles()
-        name = args.style or 'none'
-        if name not in names:
-            raise SystemExit(f"unknown style {name!r}; choose from: {', '.join(names)}")
-        style = names.index(name)
-        print(f"Style: {name} (id {style})")
-    elif args.style:
-        raise SystemExit("this checkpoint was trained without styles")
+    style = style_id(config, args.style)
     target_nps = None
     if args.density == "prompt":
         if not has_prompt or pitch.size(1) < 2:
@@ -280,26 +255,7 @@ def generate_batch(model, config, args, pieces, seed, outs, device, progress=Non
     elif args.density:
         target_nps = float(args.density)
     n_prompt = 0 if args.keep_prompt and has_prompt else pitch.size(1)
-
-    cond = None
-    if config.cond_inst or config.n_density:
-        from_prompt = window_conditions(pitch, delta_time, prompt_programs if config.n_programs else None,
-                                        config.n_programs or 1, config.n_density or 16)
-        inst = torch.zeros(len(outs), config.n_programs or 1, device=device)
-        how = args.cond_instruments or ('prompt' if prompt_programs is not None and has_prompt else 'none')
-        if how == 'prompt':
-            inst = from_prompt[0]
-        elif how != 'none':
-            inst[:, [int(x) for x in how.split(',')]] = 1.0
-        density = torch.zeros(len(outs), dtype=torch.long, device=device)
-        dens = args.cond_density or 'none'
-        if dens == 'prompt':
-            density = from_prompt[1]
-        elif dens != 'none':
-            density = density_level(float(dens), config.n_density).expand(len(outs)).to(device)
-        cond = (inst, density)
-        print(f"Conditioning: instruments {how} ({instrument_names(inst[0].nonzero().flatten().tolist()) or 'none'}), "
-              f"density {dens} (levels {density.tolist()})")
+    cond = window_cond(config, args, pitch, delta_time, prompt_programs, has_prompt)
     print(f"Generating {args.max_new_tokens} notes x {len(outs)} rows on {device} (seed {seed})...")
     t0 = time.time()
     with torch.no_grad():
@@ -324,11 +280,52 @@ def generate_batch(model, config, args, pieces, seed, outs, device, progress=Non
             program_temperature=args.instrument_temperature,
             cond=cond,
         )
-    streams = [t.cpu() for t in (pitch, velocity, duration, delta_time, programs)]
     print(f"  {len(outs) * args.max_new_tokens / (time.time() - t0):.0f} notes/s")
+    save_samples(outs, [t.cpu() for t in (pitch, velocity, duration, delta_time, programs)], n_prompt, args, config)
 
+
+def style_id(config, name):
+    """The style id of --style for models trained with styles (default 'none' = 0), else None."""
+    if not config.n_styles:
+        if name:
+            raise SystemExit("this checkpoint was trained without styles")
+        return None
+    names = load_styles()
+    name = name or 'none'
+    if name not in names:
+        raise SystemExit(f"unknown style {name!r}; choose from: {', '.join(names)}")
+    print(f"Style: {name} (id {names.index(name)})")
+    return names.index(name)
+
+
+def window_cond(config, args, pitch, delta_time, prompt_programs, has_prompt):
+    """(instrument multi-hot, density level) per row for models with cond_inst / n_density, else None:
+    --cond-instruments (default: the prompt's set when it has instruments) and --cond-density (default none)."""
+    if not (config.cond_inst or config.n_density):
+        return None
+    n_rows, device = pitch.size(0), pitch.device
+    from_prompt = window_conditions(pitch, delta_time, prompt_programs if config.n_programs else None,
+                                    config.n_programs or 1, config.n_density or 16)
+    inst = torch.zeros(n_rows, config.n_programs or 1, device=device)
+    how = args.cond_instruments or ('prompt' if prompt_programs is not None and has_prompt else 'none')
+    if how == 'prompt':
+        inst = from_prompt[0]
+    elif how != 'none':
+        inst[:, [int(x) for x in how.split(',')]] = 1.0
+    density = torch.zeros(n_rows, dtype=torch.long, device=device)
+    dens = args.cond_density or 'none'
+    if dens == 'prompt':
+        density = from_prompt[1]
+    elif dens != 'none':
+        density = density_level(float(dens), config.n_density).expand(n_rows).to(device)
+    print(f"Conditioning: instruments {how} ({instrument_names(inst[0].nonzero().flatten().tolist()) or 'none'}), "
+          f"density {dens} (levels {density.tolist()})")
+    return inst, density
+
+
+def save_samples(outs, streams, n_prompt, args, config):
+    """One MIDI (and MP3) per row: the prompt dropped unless --keep-prompt, cut at the first EOS, BOS/EOS removed."""
     for r, out in enumerate(outs):
-        # drop the seed / prompt unless --keep-prompt; cut at the first EOS; drop BOS/EOS rows
         rows = [s[r, n_prompt:].tolist() for s in streams]
         new = streams[0][r, streams[0].size(1) - args.max_new_tokens:].tolist()
         if EOS_PITCH in new:

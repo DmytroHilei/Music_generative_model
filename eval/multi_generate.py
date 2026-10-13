@@ -33,14 +33,12 @@ import numpy as np
 import pretty_midi
 import torch
 
-from musicar.data_loader import BOS_PITCH, DRUM_PROGRAM, EOS_PITCH, window_conditions
-from musicar.eval.sample_eval import row_metrics
-from musicar.eval.structure_eval import load_model
-from musicar.eval.sample_eval import consistency_metrics
-from musicar.eval.style_eval import (CLIP, SETTINGS, STYLES, TRACK, WEIGHTS, consistency_distance, consistency_scales,
-                                     csv_set, row_distance, style_scales, style_set)
+from musicar.checkpoint import load_model
+from musicar.data_loader import BOS_PITCH, DRUM_PROGRAM, EOS_PITCH
+from musicar.eval.style_eval import (SETTINGS, STYLES, TRACK, consistency_scales, csv_set, score_row, style_scales,
+                                     style_set)
 from musicar.midi_io import render_mp3, tokens_to_midi
-from musicar.sampling import generate
+from musicar.sampling import generate, prompt_inputs
 
 SOUNDFONT = '/usr/share/sounds/sf2/FluidR3_GM.sf2'
 STORE = 'data/cache/gigamidi_heldout_validation'
@@ -100,8 +98,8 @@ def main():
         groups = {s.strip(): (s.strip(), [dict(song, store=args.store, name=str(song['file'])) for song in sset[s.strip()]])
                   for s in args.styles.split(',')}
     dev = args.device
-    model, cfg, it = load_model(args.checkpoint, dev)
-    model = model.to(torch.bfloat16) if dev == 'cuda' else model
+    model, it = load_model(args.checkpoint, dev, torch.bfloat16 if dev == 'cuda' else torch.float32)
+    cfg = model.config
     out = Path(args.out_dir)
     print(f"{args.checkpoint} @{it}: {', '.join(f'{g} {len(v[1])}' for g, v in groups.items())} songs, "
           f"{args.new_notes} new notes", flush=True)
@@ -119,17 +117,9 @@ def main():
         c_scale = consistency_scales(songs)
         tok = torch.stack([torch.from_numpy(s['prompt']) for s in songs]).to(dev)
         prog = torch.stack([torch.from_numpy(s['prompt_prog']) for s in songs]).to(dev)
-        streams = [tok[:, :, j] for j in range(4)]
+        streams, prog, cond = prompt_inputs(model, tok, prog, band=st['cond'] == 'band',
+                                            density=args.density == 'prompt')
         has_bos = cfg.pitch_size > BOS_PITCH  # models with BOS/EOS: the prompt starts at the piece's beginning
-        if has_bos:
-            bos = [torch.full_like(streams[0][:, :1], BOS_PITCH if j == 0 else 0) for j in range(4)]
-            streams = [torch.cat([b, x], 1) for b, x in zip(bos, streams)]
-            prog = torch.cat([torch.zeros_like(prog[:, :1]), prog], 1)
-        cond = None
-        if cfg.cond_inst or cfg.n_density:
-            inst, density = window_conditions(streams[0], streams[3], prog, cfg.n_programs, cfg.n_density or 16)
-            cond = (inst if st['cond'] == 'band' else torch.zeros_like(inst),
-                    density if args.density == 'prompt' else torch.zeros_like(density))
         target = None
         if args.target_nps == 'prompt':  # same notes/s as window_conditions (BOS rows ignored, 0.02 s per bin)
             real = streams[0] < BOS_PITCH
@@ -147,12 +137,7 @@ def main():
         n0 = streams[0].size(1)
         rows_out = []
         for r, song in enumerate(songs):
-            m = row_metrics(res[0][r, n0:].cpu(), res[3][r, n0:].cpu(), res[4][r, n0:].cpu(),
-                            set(song['prompt_prog'].tolist()))
-            d = CLIP * sum(WEIGHTS.values()) if m is None else row_distance(m, song['real'], scale)
-            c = consistency_metrics(res[0][r, n0:].cpu(), res[1][r, n0:].cpu(), res[3][r, n0:].cpu(),
-                                    res[4][r, n0:].cpu(), song['prompt_prog'].tolist())
-            dc = consistency_distance(c, song.get('real_c'), c_scale)
+            m, d, c, dc = score_row(res, r, n0, song, scale, c_scale)
             rows = np.stack([x[r].float().cpu().numpy().astype(np.int64) for x in res[:4]], 1)[int(has_bos):]
             progs = res[4][r].cpu().numpy().astype(np.int64)[int(has_bos):]
             p0 = n0 - int(has_bos)  # first new note in rows
