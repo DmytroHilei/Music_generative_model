@@ -28,7 +28,7 @@ from tqdm import tqdm
 
 from musicar.checkpoint import (ARCH_KEYS, bf16_cpu_state, load_expanded, merge_model_args, save_atomic,
                                 strip_compile_prefix)
-from musicar.data_loader import (MaestroDataset, collate_windows, load_styles, source_name, val_loader,
+from musicar.data_loader import (NoteWindowDataset, collate_windows, load_styles, source_name, val_loader,
                                  window_conditions)
 from musicar.eval.val_loss import estimate_val_loss, summed_ce
 from musicar.fp8 import convert_fp8, fp8_supported, refresh_fp8_weights
@@ -185,7 +185,7 @@ extra_names = (['program'] if n_programs else []) + (['style'] if styles else []
 data_kw = dict(root_dir=root_dir, cache_dir=cache_dir, special_tokens=special_tokens, styles=styles,
                programs=n_programs > 0, pad_short=pad_short, min_notes=min_notes)
 # train: random windows (uniform over all note positions of all files), with augmentation
-train_dataset = MaestroDataset(csv_path, split='train', block_size=block_size, augment=True, **data_kw,
+train_dataset = NoteWindowDataset(csv_path, split='train', block_size=block_size, augment=True, **data_kw,
                                style_dropout=style_dropout, boundary_frac=boundary_frac, aug_tempo=aug_tempo,
                                pack_short=pack_short,
                                aug_stores=as_list(aug_stores, int), source_weights=as_list(source_weights, float))

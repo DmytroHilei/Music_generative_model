@@ -222,9 +222,9 @@ def future_loss(heads, h, pitch, delta_time, program, tgt):
 # Velocity augmentation (ua-C, 2026-10-01, 7396237)
 # Result: B3 x30 recipe on the 448 Ukrainian songs, 600 it: tempo aug 10.479, tempo + velocity shift up to ±2 bins
 # 10.497 best Ukrainian val CE (seed noise about ±0.01); val2 (Aria pop+rock) 6.07 -> 6.27. Velocity aug hurts.
-# To use again: in MaestroDataset.__getitem__, inside `if self.augment and not self.eval_stride:` after the tempo
+# To use again: in NoteWindowDataset.__getitem__, inside `if self.augment and not self.eval_stride:` after the tempo
 # stretch: `if self.aug_velocity and store_augmented: velocity = shift_velocity(velocity, notes, self.aug_velocity,
-# self.velocity_bins)`, plus the aug_velocity argument of MaestroDataset and train.py.
+# self.velocity_bins)`, plus the aug_velocity argument of NoteWindowDataset and train.py.
 
 def shift_velocity(velocity, notes, max_shift, velocity_bins=32):
     """Shift the velocity bins of all notes (mask `notes`, i.e. not BOS/EOS) of a window by one random amount in

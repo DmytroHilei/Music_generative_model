@@ -1,6 +1,6 @@
 """
 Convert a folder of MP3s to MIDI using piano_transcription_inference,
-then write a CSV compatible with MaestroDataset for fine-tuning.
+then write a CSV compatible with NoteWindowDataset for fine-tuning.
 
 Usage:
     python data/mp3_to_midi.py --input Skryabin --output Skryabin/midi

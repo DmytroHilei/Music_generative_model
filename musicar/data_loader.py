@@ -53,9 +53,10 @@ def window_conditions(pitch, delta_time, program, n_programs, n_density, drop_p=
     return inst, density
 
 
-class MaestroDataset(Dataset):
+class NoteWindowDataset(Dataset):
     """
-    Dataset of MIDI files listed in one or more CSVs (columns: split, midi_filename).
+    Windows of note tokens from MIDI files listed in CSVs (columns: split, midi_filename) and/or prebuilt token
+    stores (MAESTRO, GiantMIDI, Aria, GigaMIDI, the transcribed songs).
 
     Each note is represented by 4 token streams:
         pitch:      MIDI pitch, 0..127
@@ -85,7 +86,6 @@ class MaestroDataset(Dataset):
         time_resolution=0.02,
         max_duration_bin=511,
         max_delta_bin=511,
-        debug=False,
         augment=False,
         cache_dir="data/cache",
         eval_stride=None,
@@ -108,8 +108,8 @@ class MaestroDataset(Dataset):
                      programs (tokenize_tracks, as GigaMIDI), which needs programs=True; otherwise piano (tokenize_midi)
         eval_stride: if set, the dataset is deterministic (no randomness, no augmentation): use it for validation
         source_weights: optional sampling weight per store (each CSV is its own store, CSVs first in order; then
-                     each 'store:' source in order). Default: uniform over all note positions, i.e. by size. Use it to mix a
-                     small fine-tune set with replay, e.g. [0.8, 0.2]
+                     each 'store:' source in order). Default: uniform over all note positions, i.e. by size. Use it
+                     to mix a small fine-tune set with replay, e.g. [0.8, 0.2]
         special_tokens: every file is read as [BOS] + notes + [EOS] (pitch BOS_PITCH / EOS_PITCH, other attributes 0),
                      without touching the token stores
         styles:      a style vocabulary (list of names, index 0 = 'none'): each window then also returns the style id of
@@ -122,9 +122,9 @@ class MaestroDataset(Dataset):
         aug_stores:  optional 0/1 per store (same order as source_weights): which stores get the tempo
                      augmentation (e.g. [1, 0] = only the fine-tune CSVs, the replay store stays real). Default: all.
                      Transposition applies to every store regardless
-        pad_short:   keep files shorter than the window (>= min_notes notes) as one whole-file window, zero-padded at the
-                     end with masked (-1) targets; a short file is sampled as often per note as a long one. Without it
-                     they are dropped (at block_size 2048: 99% of the Ukrainian songs, 57% of Aria's notes)
+        pad_short:   keep files shorter than the window (>= min_notes notes) as one whole-file window, zero-padded at
+                     the end with masked (-1) targets; a short file is sampled as often per note as a long one. Without
+                     it they are dropped (at block_size 2048: 99% of the Ukrainian songs, 57% of Aria's notes)
         pack_short:  training only (pretraining): keep short files too, but fill their window with further random
                      short files of the same store, each read whole as [BOS] + notes + [EOS], until block_size + 1 rows
                      (the last one is cut). No padding, so no wasted compute (GigaMIDI's median file is 160 notes).
@@ -146,7 +146,6 @@ class MaestroDataset(Dataset):
         self.time_resolution = time_resolution
         self.max_duration_bin = max_duration_bin
         self.max_delta_bin = max_delta_bin
-        self.debug = debug
         self.augment = augment
         self.aug_tempo = aug_tempo
         self.aug_stores = aug_stores
@@ -206,7 +205,8 @@ class MaestroDataset(Dataset):
                                       int(np.searchsorted(self.store_ids, i, 'right'))) for i in ids]
             self.source_weights = [float(w) for w in source_weights]
         if aug_stores is not None:
-            assert len(aug_stores) == len(self.store_dirs), f"{len(aug_stores)} aug_stores for {len(self.store_dirs)} stores"
+            assert len(aug_stores) == len(self.store_dirs), \
+                f"{len(aug_stores)} aug_stores for {len(self.store_dirs)} stores"
         # number of valid window starts per file, cumulative (for uniform sampling over all positions)
         # a short (padded) file counts as block_size starts: the per-note rate a long file approaches.
         # Packed, it counts as its length: its notes fill only part of a window, the rest are other short files
@@ -225,7 +225,8 @@ class MaestroDataset(Dataset):
             self.windows = np.concatenate([
                 np.stack([np.full(len(r), fi), r], axis=1)
                 for fi, n in enumerate(self.lengths)
-                for r in [np.arange(0, n - self.block_size, eval_stride) if n > self.block_size else np.zeros(1, np.int64)]
+                for r in [np.arange(0, n - self.block_size, eval_stride) if n > self.block_size
+                          else np.zeros(1, np.int64)]
             ])
 
     # ------------------------------------------------------------------ storage
@@ -250,8 +251,6 @@ class MaestroDataset(Dataset):
             raise ValueError(f"{csv_path} must contain 'split' and 'midi_filename' columns.")
         multi = "programs" in df.columns
         df = df[df["split"] == self.split]
-        if self.debug:
-            df = df.head(5)
         paths = [self.root_dir / f for f in df["midi_filename"]]
         col = "style" if "style" in df.columns else "artist" if "artist" in df.columns else None
         styles = list(df[col]) if col else [DEFAULT_CSV_STYLE.get(csv_path.stem, "none")] * len(df)
@@ -283,7 +282,7 @@ class MaestroDataset(Dataset):
             return store
 
         store.mkdir(parents=True, exist_ok=True)
-        parse = partial(tokenize_tracks if multi else _tokenize_to_array, velocity_bins=self.velocity_bins,
+        parse = partial(tokenize_tracks if multi else tokenize_midi, velocity_bins=self.velocity_bins,
                         time_resolution=self.time_resolution,
                         max_duration_bin=self.max_duration_bin, max_delta_bin=self.max_delta_bin)
         workers = min(len(midi_paths), os.cpu_count() or 1)
@@ -304,7 +303,8 @@ class MaestroDataset(Dataset):
                     n_notes += len(arr)
                 offsets.append(n_notes)
         np.save(store / "offsets.npy", np.array(offsets, dtype=np.int64))
-        meta = dict(n_files=len(midi_paths), n_notes=n_notes, n_empty_or_failed=n_failed, **({'programs': True} if multi else {}))
+        meta = dict(n_files=len(midi_paths), n_notes=n_notes, n_empty_or_failed=n_failed,
+                    **({'programs': True} if multi else {}))
         (store / "meta.json").write_text(json.dumps(meta))  # written last = store is complete
         print(f"Tokenized {self.split}: {n_notes:,} notes, {n_failed} empty/broken files skipped -> {store}")
         return store
@@ -395,7 +395,7 @@ class MaestroDataset(Dataset):
         if self.augment and not self.eval_stride:
             # transpose by up to ±5 semitones, limited so no note leaves 0..127 (clamping would bend them);
             # BOS/EOS (pitch >= 128) and drums (pitch = drum sound) stay as they are
-            notes = pitch < 128
+            notes = pitch < BOS_PITCH
             pitched = notes if drums is None else notes & ~drums
             if pitched.any():
                 lo, hi = int(pitch[pitched].min()), int(pitch[pitched].max())
@@ -413,7 +413,7 @@ class MaestroDataset(Dataset):
             streams = tuple(F.pad(t, (0, self.block_size + 1 - n_rows)) for t in streams)
             if drums is not None:
                 drums = F.pad(drums, (0, self.block_size + 1 - n_rows))
-        x, y = self._split_xy(streams)
+        x, y = tuple(t[:-1] for t in streams), tuple(t[1:] for t in streams)  # y = next note
         if drums is not None:
             y = (y[0], y[1], torch.where(drums[1:], -1, y[2])) + y[3:]  # no duration loss on drum notes
         if n_rows < self.block_size + 1:
@@ -447,90 +447,60 @@ class MaestroDataset(Dataset):
         out = low + (torch.rand_like(scaled) < scaled - low).double()
         return out.long().clamp(max=max_bin)
 
-    def _split_xy(self, tokens):
-        x = tuple(t[:-1] for t in tokens)
-        y = tuple(t[1:] for t in tokens)
-        return x, y
 
-
-def tokenize_midi(midi_path, velocity_bins=32, time_resolution=0.02, max_duration_bin=511, max_delta_bin=511):
-    """
-    MIDI file -> (pitch, velocity, duration, delta_time) LongTensors, one entry per note, or None if no notes.
-    All non-drum instruments are merged, notes sorted by (start, pitch).
-    delta_time = quantized onset difference to the previous note, duration = quantized note length.
-    """
-    # a path, or a file-like object (e.g. BytesIO read straight from a tar archive)
-    midi = pretty_midi.PrettyMIDI(str(midi_path) if isinstance(midi_path, (str, Path)) else midi_path)
-
-    notes = []
-
-    for instrument in midi.instruments:
-        if instrument.is_drum:
-            continue
-
-        notes.extend(instrument.notes)
-
-    if len(notes) == 0:
-        return None
-
-    notes.sort(key=lambda note: (note.start, note.pitch))
-
-    pitches = []
-    velocities = []
-    durations = []
-    delta_times = []
-
-    prev_start = notes[0].start
-
-    for i, note in enumerate(notes):
-        pitches.append(note.pitch)
-        velocities.append(quantize_velocity(note.velocity, velocity_bins))
-        durations.append(quantize_time(max(0.0, note.end - note.start), time_resolution, max_duration_bin))
-        delta_sec = 0.0 if i == 0 else max(0.0, note.start - prev_start)
-        delta_times.append(quantize_time(delta_sec, time_resolution, max_delta_bin))
-        prev_start = note.start
-
-    return (
-        torch.tensor(pitches, dtype=torch.long),
-        torch.tensor(velocities, dtype=torch.long),
-        torch.tensor(durations, dtype=torch.long),
-        torch.tensor(delta_times, dtype=torch.long),
-    )
-
-
-def _tokenize_to_array(midi_path, **kwargs):
-    # worker side of the parallel preload: returns (n_notes, 4) uint16 in STREAM order, None if empty/broken.
-    # Broken files are skipped instead of failing: large crawled datasets always contain a few.
+def _read_midi(midi):
+    """pretty_midi.PrettyMIDI from a path, bytes or a file-like object (e.g. a member read from an archive); None if it
+    can't be parsed (large crawled datasets always contain a few broken files)."""
+    if isinstance(midi, (bytes, bytearray)):
+        midi = io.BytesIO(midi)
     try:
-        tokens = tokenize_midi(midi_path, **kwargs)
+        return pretty_midi.PrettyMIDI(str(midi) if isinstance(midi, (str, Path)) else midi)
     except Exception:
         return None
-    return None if tokens is None else np.stack([t.numpy() for t in tokens], axis=1).astype(np.uint16)
+
+
+def _note_tokens(notes, velocity_bins, time_resolution, max_duration_bin, max_delta_bin):
+    """Sorted (onset s, pitch, velocity, length s) notes -> (n, 4) uint16 tokens (the store layout): pitch, quantized
+    velocity, duration, and delta_time = onset difference to the previous note (0 for the first)."""
+    tokens = np.empty((len(notes), 4), dtype=np.uint16)
+    prev = notes[0][0]
+    for i, (start, pitch, velocity, length) in enumerate(notes):
+        tokens[i] = (pitch, quantize_velocity(velocity, velocity_bins),
+                     quantize_time(max(0.0, length), time_resolution, max_duration_bin),
+                     quantize_time(max(0.0, start - prev), time_resolution, max_delta_bin))
+        prev = start
+    return tokens
+
+
+def tokenize_midi(midi, velocity_bins=32, time_resolution=0.02, max_duration_bin=511, max_delta_bin=511):
+    """MIDI (path, bytes or file-like) -> (n, 4) uint16 tokens, one row per note: all non-drum tracks merged into one
+    piano stream, sorted by (onset, pitch). None if empty or broken."""
+    midi = _read_midi(midi)
+    if midi is None:
+        return None
+    notes = [(n.start, n.pitch, n.velocity, n.end - n.start)
+             for inst in midi.instruments if not inst.is_drum for n in inst.notes]
+    if not notes:
+        return None
+    notes.sort(key=lambda n: n[:2])
+    return _note_tokens(notes, velocity_bins, time_resolution, max_duration_bin, max_delta_bin)
 
 
 def tokenize_tracks(midi, velocity_bins=32, time_resolution=0.02, max_duration_bin=511, max_delta_bin=511):
-    """MIDI file (path or bytes) -> ((n, 4) uint16 tokens, (n,) uint8 programs), all tracks incl. drums
-    (program DRUM_PROGRAM), sorted by (onset, program, pitch); None if empty/broken. The multi-instrument stores
+    """MIDI (path, bytes or file-like) -> ((n, 4) uint16 tokens, (n,) uint8 programs), all tracks incl. drums
+    (program DRUM_PROGRAM), sorted by (onset, program, pitch); None if empty or broken. The multi-instrument stores
     (data/prepare_gigamidi.py, prepare_discover.py) and multi-track CSVs are tokenized with it."""
-    try:
-        midi = pretty_midi.PrettyMIDI(io.BytesIO(midi) if isinstance(midi, (bytes, bytearray)) else str(midi))
-    except Exception:
+    midi = _read_midi(midi)
+    if midi is None:
         return None
     notes = [(n.start, DRUM_PROGRAM if inst.is_drum else inst.program, n.pitch, n.velocity, n.end - n.start)
              for inst in midi.instruments for n in inst.notes]
     if not notes:
         return None
     notes.sort(key=lambda n: n[:3])
-    tokens = np.empty((len(notes), 4), dtype=np.uint16)
-    programs = np.empty(len(notes), dtype=np.uint8)
-    prev = notes[0][0]
-    for i, (start, program, pitch, velocity, length) in enumerate(notes):
-        tokens[i] = (pitch, quantize_velocity(velocity, velocity_bins),
-                     quantize_time(max(0.0, length), time_resolution, max_duration_bin),
-                     quantize_time(max(0.0, start - prev), time_resolution, max_delta_bin))
-        programs[i] = program
-        prev = start
-    return tokens, programs
+    tokens = _note_tokens([(start, pitch, velocity, length) for start, _, pitch, velocity, length in notes],
+                          velocity_bins, time_resolution, max_duration_bin, max_delta_bin)
+    return tokens, np.array([n[1] for n in notes], dtype=np.uint8)
 
 
 def quantize_time(time_sec, time_resolution, max_bin):
@@ -549,13 +519,14 @@ def collate_windows(batch, extra_names=()):
     xs, ys = zip(*batch)
     x = [torch.stack([x[i] for x in xs]) for i in range(len(xs[0]))]
     assert len(x) == 4 + len(extra_names), f"{len(x)} input streams, expected 4 + {list(extra_names)}"
-    return (tuple(x[:4]), dict(zip(extra_names, x[4:]))), tuple(torch.stack([y[i] for y in ys]) for i in range(len(ys[0])))
+    y = tuple(torch.stack([y[i] for y in ys]) for i in range(len(ys[0])))
+    return (tuple(x[:4]), dict(zip(extra_names, x[4:]))), y
 
 
 def val_loader(sources, batch_size, max_batches, num_workers=0, extra_names=(), block_size=512, **dataset_kw):
     """Fixed non-overlapping validation windows (eval_stride = block_size), evenly thinned to at most max_batches
     batches: identical at every evaluation and in every run."""
-    ds = MaestroDataset(sources, split='validation', block_size=block_size, eval_stride=block_size, **dataset_kw)
+    ds = NoteWindowDataset(sources, split='validation', block_size=block_size, eval_stride=block_size, **dataset_kw)
     max_windows = max_batches * batch_size
     if len(ds) > max_windows:
         step = len(ds) / max_windows

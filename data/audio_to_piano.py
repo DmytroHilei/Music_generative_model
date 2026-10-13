@@ -34,6 +34,7 @@ import shutil
 import time
 from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
 from contextlib import ExitStack
+from functools import cache
 from pathlib import Path
 
 import numpy as np
@@ -47,6 +48,10 @@ HARMONY_STEMS = ('piano', 'guitar', 'other')
 MAJOR = np.array([6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88])
 MINOR = np.array([6.33, 2.68, 3.52, 5.38, 2.60, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17])
 NOTE_NAMES = ['C', 'C#', 'D', 'Eb', 'E', 'F', 'F#', 'G', 'Ab', 'A', 'Bb', 'B']
+
+# columns of songs.csv (piano reduction) and multi.csv (multi-track)
+FIELDS = ['midi_filename', 'source_audio', 'n_melody', 'n_bass', 'n_harmony', 'key', 'mode', 'key_confidence']
+MULTI_FIELDS = ['midi_filename', 'source_audio'] + [f'n_{s}' for s in STEMS] + [f'db_{s}' for s in STEMS]
 
 
 def parse_args():
@@ -68,7 +73,8 @@ def parse_args():
     parser.add_argument('--stop-file', default=None,
                         help='exit before the next song once this file exists (a worker stops between songs)')
     parser.add_argument('--delete-audio', action='store_true',
-                        help='delete the source audio after its MIDI is written (re-downloadable via songs.csv; saves disk)')
+                        help='delete the source audio after its MIDI is written (re-downloadable via songs.csv; '
+                             'saves disk)')
     parser.add_argument('--keep-stems', action='store_true',
                         help='keep the Demucs wavs (~350 MB per song!); by default deleted after transcription')
     parser.add_argument('--harmony-max-poly', type=int, default=3, help='max harmony notes sounding together')
@@ -87,7 +93,8 @@ def parse_args():
     parser.add_argument('--multi', action='store_true', help='also write the multi-track MIDI (multi/, multi.csv)')
     parser.add_argument('--no-piano', action='store_true', help='skip the piano reduction (with --multi)')
     parser.add_argument('--vocal-program', type=int, default=53, help='GM program of the vocal melody (53 voice oohs)')
-    parser.add_argument('--guitar-program', type=int, default=27, help='GM program of the guitar stem (27 clean electric)')
+    parser.add_argument('--guitar-program', type=int, default=27,
+                        help='GM program of the guitar stem (27 clean electric)')
     parser.add_argument('--other-program', type=int, default=48, help='GM program of the "other" stem (48 strings)')
     parser.add_argument('--stem-gate-db', type=float, default=-30,
                         help='leave a stem out of the multi-track MIDI when its level vs the full mix is below this')
@@ -101,27 +108,28 @@ def parse_args():
     return args
 
 
-_separator = None
+@cache
+def demucs_separator(device):
+    """Demucs htdemucs_6s with the CLI's defaults (1 random shift, overlap 0.25), loaded once per process."""
+    from demucs.api import Separator
+    return Separator(model='htdemucs_6s', device=device, shifts=1, split=True, overlap=0.25, progress=False)
 
 
 def separate(audio_path, stems_root, device):
-    """Demucs 6-stem separation (the CLI's defaults: 1 random shift, overlap 0.25, 16-bit wav with rescale), model
-    loaded once per process, cached on disk: returns dict stem -> wav path. The stems are written to a temporary
-    folder that is renamed when complete, so an interrupted run never leaves a partial cache behind."""
-    global _separator
+    """Demucs 6-stem separation, cached on disk (16-bit wav with rescale): returns dict stem -> wav path. The stems are
+    written to a temporary folder that is renamed when complete, so an interrupted run never leaves a partial cache
+    behind."""
     out_dir = stems_root / 'htdemucs_6s' / audio_path.stem
     paths = {s: out_dir / f'{s}.wav' for s in STEMS}
     if not all(p.exists() for p in paths.values()):
-        from demucs.api import Separator, save_audio
-        if _separator is None:
-            _separator = Separator(model='htdemucs_6s', device=device, shifts=1, split=True, overlap=0.25,
-                                   progress=False)
-        _, res = _separator.separate_audio_file(audio_path)
+        from demucs.api import save_audio
+        separator = demucs_separator(device)
+        _, res = separator.separate_audio_file(audio_path)
         tmp = out_dir.with_name(out_dir.name + '.partial')
         shutil.rmtree(tmp, ignore_errors=True)
         tmp.mkdir(parents=True)
         for name, source in res.items():
-            save_audio(source, str(tmp / f'{name}.wav'), samplerate=_separator.samplerate, clip='rescale',
+            save_audio(source, str(tmp / f'{name}.wav'), samplerate=separator.samplerate, clip='rescale',
                        bits_per_sample=16, as_float=False)
         shutil.rmtree(out_dir, ignore_errors=True)
         tmp.rename(out_dir)
@@ -137,24 +145,19 @@ def mix_stems(paths, out_path):
     return out_path
 
 
-_basic_pitch = None
-
-
+@cache
 def basic_pitch_model():
     """basic-pitch's ONNX model, loaded once per process; ONNX_THREADS limits its threads (one CPU worker of several
     shouldn't take every core)."""
-    global _basic_pitch
-    if _basic_pitch is None:
-        import onnxruntime as ort
-        from basic_pitch import ICASSP_2022_MODEL_PATH
-        from basic_pitch.inference import Model
-        _basic_pitch = Model(ICASSP_2022_MODEL_PATH)
-        if os.environ.get('ONNX_THREADS') and _basic_pitch.model_type == Model.MODEL_TYPES.ONNX:
-            opts = ort.SessionOptions()
-            opts.intra_op_num_threads = int(os.environ['ONNX_THREADS'])
-            _basic_pitch.model = ort.InferenceSession(str(ICASSP_2022_MODEL_PATH), opts,
-                                                      providers=['CPUExecutionProvider'])
-    return _basic_pitch
+    import onnxruntime as ort
+    from basic_pitch import ICASSP_2022_MODEL_PATH
+    from basic_pitch.inference import Model
+    model = Model(ICASSP_2022_MODEL_PATH)
+    if os.environ.get('ONNX_THREADS') and model.model_type == Model.MODEL_TYPES.ONNX:
+        opts = ort.SessionOptions()
+        opts.intra_op_num_threads = int(os.environ['ONNX_THREADS'])
+        model.model = ort.InferenceSession(str(ICASSP_2022_MODEL_PATH), opts, providers=['CPUExecutionProvider'])
+    return model
 
 
 def transcribe(wav_path, min_note_ms, fmin=None, fmax=None, onset_threshold=0.5, frame_threshold=0.3):
@@ -167,23 +170,26 @@ def transcribe(wav_path, min_note_ms, fmin=None, fmax=None, onset_threshold=0.5,
     return [n for inst in midi.instruments for n in inst.notes]
 
 
-_adtof = None
+@cache
+def adtof_model(device):
+    """ADTOF Frame_RNN drum transcriber, loaded once per process (on the CPU when CUDA isn't available)."""
+    import torch
+    from adtof_pytorch import calculate_n_bins, create_frame_rnn_model, get_default_weights_path, load_pytorch_weights
+    dev = device if device == 'cpu' or torch.cuda.is_available() else 'cpu'
+    return load_pytorch_weights(create_frame_rnn_model(calculate_n_bins()), get_default_weights_path()).eval().to(dev)
 
 
 def transcribe_drums(wav_path, device):
-    """ADTOF Frame_RNN (kick 35, snare 38, tom 47, hi-hat 42, cymbal 49) -> list of pretty_midi.Note; the velocity
-    comes from the peak activation (ADTOF itself writes every hit at 100)."""
-    global _adtof
+    """ADTOF (kick 35, snare 38, tom 47, hi-hat 42, cymbal 49) -> list of pretty_midi.Note; the velocity comes from the
+    peak activation (ADTOF itself writes every hit at 100)."""
     import torch
-    from adtof_pytorch import (LABELS_5, PeakPicker, calculate_n_bins, create_frame_rnn_model, get_default_weights_path,
-                               load_audio_for_model, load_pytorch_weights)
-    if _adtof is None:
-        dev = device if device == 'cpu' or torch.cuda.is_available() else 'cpu'
-        _adtof = load_pytorch_weights(create_frame_rnn_model(calculate_n_bins()), get_default_weights_path()).eval().to(dev)
+    from adtof_pytorch import LABELS_5, PeakPicker, load_audio_for_model
+    model = adtof_model(device)
     with torch.no_grad():
-        act = _adtof(load_audio_for_model(str(wav_path)).to(next(_adtof.parameters()).device)).cpu().numpy()[0]
+        act = model(load_audio_for_model(str(wav_path)).to(next(model.parameters()).device)).cpu().numpy()[0]
     peaks = PeakPicker(fps=100).pick(act)[0]  # pitch -> onset times; frames are 1/100 s
-    return [pretty_midi.Note(int(np.clip(40 + 80 * act[min(round(t * 100), len(act) - 1), c], 1, 127)), pitch, t, t + 0.1)
+    velocity = lambda c, t: int(np.clip(40 + 80 * act[min(round(t * 100), len(act) - 1), c], 1, 127))
+    return [pretty_midi.Note(velocity(c, t), pitch, t, t + 0.1)
             for c, pitch in enumerate(LABELS_5) for t in peaks[pitch]]
 
 
@@ -242,7 +248,7 @@ def cap_polyphony(notes, max_poly):
 
 def merge_retriggers(notes, gap):
     """Join consecutive notes of the same pitch separated by < gap seconds (sustained pads split into repeats)."""
-    by_pitch = {}
+    by_pitch, out = {}, []
     for n in sorted(notes, key=lambda n: n.start):
         prev = by_pitch.get(n.pitch)
         if prev is not None and n.start - prev.end < gap:
@@ -250,7 +256,8 @@ def merge_retriggers(notes, gap):
             prev.velocity = max(prev.velocity, n.velocity)
             continue
         by_pitch[n.pitch] = n
-        yield n
+        out.append(n)
+    return out
 
 
 def legato(notes, max_gap):
@@ -291,48 +298,47 @@ def estimate_key(notes):
 
 
 def gpu_stage(audio_path, out_root, args, multi=False):
-    """Demucs, plus ADTOF drums for the multi-track MIDI (both on the GPU): returns (stem paths, drum notes or None)."""
+    """Demucs, plus ADTOF drums for the multi-track MIDI (both on the GPU): returns (stem paths, stem levels in dB or
+    None, drum notes or None); levels and drums only with multi."""
     stems = separate(audio_path, out_root / 'stems', args.device)
-    drums = None
-    if multi and stem_levels(stems)['drums'] >= args.stem_gate_db:
-        drums = transcribe_drums(stems['drums'], args.device)
-    return stems, drums
+    levels = stem_levels(stems) if multi else None
+    drums = transcribe_drums(stems['drums'], args.device) if multi and levels['drums'] >= args.stem_gate_db else None
+    return stems, levels, drums
 
 
-def cpu_stage(audio_path, out_root, args, stems, drums, piano=True, multi=False):
+def cpu_stage(audio_path, out_root, args, stems, levels, drums, piano=True, multi=False):
     """The piano reduction and/or the multi-track MIDI from the stems: returns (audio, output folder, piano row,
-    multi row, error);
-    a row is None for a part not asked for, error is None or the exception's repr."""
+    multi row, error); a row is None for a part not asked for, error is None or the exception's repr."""
     try:
-        row, multi_row = reduce_stems(audio_path, out_root, args, stems, drums, piano, multi)
+        row, multi_row = reduce_stems(audio_path, out_root, args, stems, levels, drums, piano, multi)
         return audio_path, out_root, row, multi_row, None
     except Exception as e:  # reported by the main process (failed.txt)
         return audio_path, out_root, None, None, repr(e)
 
 
-def reduce_stems(audio_path, out_root, args, stems, drums, piano, multi):
+def reduce_stems(audio_path, out_root, args, stems, levels, drums, piano, multi):
     raw_vocals = transcribe(stems['vocals'], args.min_note_ms, fmin=80, fmax=1100, onset_threshold=0.6)
     raw_bass = transcribe(stems['bass'], args.min_note_ms, fmin=30, fmax=400)
     row = reduce_to_piano(audio_path, out_root, args, stems, copy_notes(raw_vocals), copy_notes(raw_bass)) \
         if piano else None
-    multi_row = multi_track(audio_path, out_root, args, stems, raw_vocals, raw_bass, drums) if multi else None
+    multi_row = multi_track(audio_path, out_root, args, stems, levels, raw_vocals, raw_bass, drums) if multi else None
     if not args.keep_stems:
         shutil.rmtree(stems['vocals'].parent, ignore_errors=True)
     return row, multi_row
 
 
 def reduce_to_piano(audio_path, out_root, args, stems, melody, bass):
-    harmony_wav = mix_stems([stems[s] for s in HARMONY_STEMS], stems[STEMS[0]].parent / 'harmony_mix.wav')
+    harmony_wav = mix_stems([stems[s] for s in HARMONY_STEMS], stems['vocals'].parent / 'harmony_mix.wav')
 
     melody = monophonic(fold_into_range(melody, *args.melody_range), keep='highest')
-    melody = legato(list(merge_retriggers(melody, args.merge_gap_ms / 1000)), args.melody_legato_ms / 1000)
+    melody = legato(merge_retriggers(melody, args.merge_gap_ms / 1000), args.melody_legato_ms / 1000)
 
     bass = monophonic(fold_into_range(bass, *args.bass_range), keep='lowest')
-    bass = legato(list(merge_retriggers(bass, args.merge_gap_ms / 1000)), args.bass_legato_ms / 1000)
+    bass = legato(merge_retriggers(bass, args.merge_gap_ms / 1000), args.bass_legato_ms / 1000)
 
     harmony = transcribe(harmony_wav, args.harmony_min_note_ms, onset_threshold=0.6, frame_threshold=0.4)
     harmony = fold_into_range(harmony, *args.harmony_range)
-    harmony = list(merge_retriggers(harmony, args.merge_gap_ms / 1000))
+    harmony = merge_retriggers(harmony, args.merge_gap_ms / 1000)
     harmony = drop_quiet(harmony, args.harmony_drop_quiet)
     harmony = drop_duplicates(harmony, melody + bass)
     harmony = cap_polyphony(harmony, args.harmony_max_poly)
@@ -349,7 +355,7 @@ def reduce_to_piano(audio_path, out_root, args, stems, melody, bass):
     debug = pretty_midi.PrettyMIDI()
     for name, notes in parts.items():
         inst = pretty_midi.Instrument(program=0, name=name)
-        inst.notes = [pretty_midi.Note(n.velocity, n.pitch, n.start, n.end) for n in notes]
+        inst.notes = copy_notes(notes)
         debug.instruments.append(inst)
 
     (out_root / 'midi').mkdir(parents=True, exist_ok=True)
@@ -367,21 +373,21 @@ def reduce_to_piano(audio_path, out_root, args, stems, melody, bass):
     }
 
 
-def multi_track(audio_path, out_root, args, stems, vocals, bass, drums):
-    """One GM instrument per Demucs stem, at the transcribed pitches (no folding into a piano range); drums = the
-    ADTOF notes from the GPU stage (None when the drum stem is below the gate)."""
-    levels = stem_levels(stems)
+def multi_track(audio_path, out_root, args, stems, levels, vocals, bass, drums):
+    """One GM instrument per Demucs stem, at the transcribed pitches (no folding into a piano range); levels = stem
+    levels in dB vs the mix, drums = the ADTOF notes from the GPU stage (None when the drum stem is below the gate)."""
     gap = args.merge_gap_ms / 1000
     parts = {}  # stem -> (program, is_drum, notes)
     vocals = monophonic(vocals, keep='highest')
-    parts['vocals'] = (args.vocal_program, False, legato(list(merge_retriggers(vocals, gap)), args.melody_legato_ms / 1000))
+    parts['vocals'] = (args.vocal_program, False,
+                       legato(merge_retriggers(vocals, gap), args.melody_legato_ms / 1000))
     bass = monophonic(bass, keep='lowest')
-    parts['bass'] = (33, False, legato(list(merge_retriggers(bass, gap)), args.bass_legato_ms / 1000))
+    parts['bass'] = (33, False, legato(merge_retriggers(bass, gap), args.bass_legato_ms / 1000))
     for stem, program in (('guitar', args.guitar_program), ('piano', 0), ('other', args.other_program)):
         if levels[stem] < args.stem_gate_db:
             continue
         notes = transcribe(stems[stem], args.min_note_ms)
-        notes = drop_quiet(list(merge_retriggers(notes, gap)), args.multi_drop_quiet)
+        notes = drop_quiet(merge_retriggers(notes, gap), args.multi_drop_quiet)
         parts[stem] = (program, False, cap_polyphony(notes, args.multi_max_poly))
     if drums is not None:
         parts['drums'] = (0, True, drums)
@@ -398,10 +404,6 @@ def multi_track(audio_path, out_root, args, stems, vocals, bass, drums):
     return {'midi_filename': str(midi_path.relative_to(out_root)), 'source_audio': str(audio_path),
             **{f'n_{s}': len(parts[s][2]) if s in parts else 0 for s in STEMS},
             **{f'db_{s}': round(levels[s], 1) for s in STEMS}}
-
-
-FIELDS = ['midi_filename', 'source_audio', 'n_melody', 'n_bass', 'n_harmony', 'key', 'mode', 'key_confidence']
-MULTI_FIELDS = ['midi_filename', 'source_audio'] + [f'n_{s}' for s in STEMS] + [f'db_{s}' for s in STEMS]
 
 
 def done_sources(path):
@@ -440,7 +442,8 @@ def find_jobs(args):
         n = len(jobs)
         for audio in files:
             # a song is redone only for the outputs it is missing (e.g. multi-track for an already reduced song)
-            piano, multi = (done is not None and str(audio) not in done for done in (piano_done, multi_done))
+            piano = piano_done is not None and str(audio) not in piano_done
+            multi = multi_done is not None and str(audio) not in multi_done
             if (piano or multi) and str(audio) not in failed:
                 jobs.append((audio, out_root, piano, multi))
             else:
@@ -501,14 +504,15 @@ def main():
             print(f'[{i + 1}/{len(jobs)}] ' + (f'{out_root.name}/{audio.name}' if args.input_root else audio.name))
             out_root.mkdir(parents=True, exist_ok=True)
             try:
-                stems, drums = gpu_stage(audio, out_root, args, multi=multi)
+                stems, levels, drums = gpu_stage(audio, out_root, args, multi=multi)
             except Exception as e:
                 record(audio, out_root, None, None, repr(e))
                 continue
             if pool is None:
-                record(*cpu_stage(audio, out_root, args, stems, drums, piano=piano, multi=multi))
+                record(*cpu_stage(audio, out_root, args, stems, levels, drums, piano=piano, multi=multi))
             else:
-                pending.add(pool.submit(cpu_stage, audio, out_root, args, stems, drums, piano=piano, multi=multi))
+                pending.add(pool.submit(cpu_stage, audio, out_root, args, stems, levels, drums, piano=piano,
+                                        multi=multi))
                 collect(args.cpu_workers)
         collect(0)
 

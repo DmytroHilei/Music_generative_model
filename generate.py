@@ -117,7 +117,7 @@ def val_pieces(source, genre=None):
     if source == "combined":
         df = pd.read_csv("data/combined.csv")
         paths = [Path(f) for f in df.loc[df["split"] == "validation", "midi_filename"] if Path(f).exists()]
-        return [(p.stem, lambda p=p: np.stack([t.numpy() for t in tokenize_midi(p)], axis=1)) for p in paths]
+        return [(p.stem, lambda p=p: tokenize_midi(p).astype(np.int64)) for p in paths]
     # Aria: store files are in the order of the validation rows of data/aria/aria.csv
     store = Path("data/cache/aria_validation")
     offsets = np.load(store / "offsets.npy")
@@ -230,7 +230,10 @@ def _prompt_rows(config, args, pieces, seed, n_rows, device):
         tokens = tokenize_midi(args.prompt, velocity_bins=config.velocity_size,
                                max_duration_bin=config.duration_size - 1,
                                max_delta_bin=config.delta_time_size - 1)
-        streams = tuple(t[a:b].unsqueeze(0).expand(n_rows, -1).contiguous().to(device) for t in tokens)
+        if tokens is None:
+            raise SystemExit(f"no notes in {args.prompt} (empty or unreadable MIDI)")
+        tokens = torch.from_numpy(tokens[a:b].astype(np.int64))
+        streams = tuple(tokens[:, j].unsqueeze(0).expand(n_rows, -1).contiguous().to(device) for j in range(4))
         return streams, [f"notes {a}-{a + streams[0].size(1)} of {args.prompt}"] * n_rows, None
     if config.pitch_size > BOS_PITCH:
         return (tuple(torch.zeros((n_rows, 0), dtype=torch.long, device=device) for _ in range(4)), [None] * n_rows,

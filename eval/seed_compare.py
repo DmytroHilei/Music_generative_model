@@ -53,11 +53,11 @@ def seed_songs(csv, need):
         if r['artist'] in NON_UA_ARTISTS or key in NON_UA_TITLES or key in seen:
             continue
         toks = tokenize_midi(r['midi_filename'])
-        if toks is None or len(toks[0]) < need:
+        if toks is None or len(toks) < need:
             continue
         seen.add(key)
         name = re.sub(r'[^\w-]+', '_', f"{r['artist']} - {r['title']}").strip('_')[:60]
-        songs.append((name, np.stack([t.numpy() for t in toks], 1)))
+        songs.append((name, toks.astype(np.int64)))
     return songs
 
 

@@ -130,8 +130,8 @@ def csv_set(csv, n_songs=24, prompt_notes=128, new_notes=1000, match=''):
     import re
     from pathlib import Path
     import pandas as pd
-    from musicar.data_loader import MaestroDataset
-    ds = MaestroDataset(csv, root_dir='.', split='validation', block_size=prompt_notes + new_notes,
+    from musicar.data_loader import NoteWindowDataset
+    ds = NoteWindowDataset(csv, root_dir='.', split='validation', block_size=prompt_notes + new_notes,
                         programs=True, eval_stride=prompt_notes + new_notes)
     store = ds.store_dirs[0]
     df = pd.read_csv(csv)

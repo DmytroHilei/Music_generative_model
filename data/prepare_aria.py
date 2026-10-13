@@ -4,7 +4,7 @@ Tokenize Aria-MIDI straight from the .tar.gz into token stores, without extracti
     python data/prepare_aria.py --tar data/aria/aria-midi-v1-deduped-ext.tar.gz --name aria
     python data/prepare_aria.py --tar ... --name aria_poprock --genres pop,rock     # fine-tune stage subset
 
-Writes data/cache/<name>_train/ and data/cache/<name>_validation/ (same format MaestroDataset builds:
+Writes data/cache/<name>_train/ and data/cache/<name>_validation/ (same format NoteWindowDataset builds:
 tokens.u16 + offsets.npy + meta.json) and data/aria/<name>.csv with one row per MIDI segment:
 file_id, segment, split, genre, composer, audio_score, n_notes.
 Use in training with csv_path='data/combined.csv,store:data/cache/aria'.
@@ -15,7 +15,6 @@ Aria-MIDI is CC-BY-NC-SA 4.0: non-commercial research use.
 
 import argparse
 import csv
-import io
 import json
 import os
 import tarfile
@@ -26,7 +25,7 @@ from pathlib import Path
 import numpy as np
 from tqdm import tqdm
 
-from musicar.data_loader import _tokenize_to_array
+from musicar.data_loader import tokenize_midi
 
 
 def parse_args():
@@ -43,7 +42,7 @@ def parse_args():
 
 def tokenize_bytes(item):
     name, data = item
-    return name, _tokenize_to_array(io.BytesIO(data))
+    return name, tokenize_midi(data)
 
 
 class StoreWriter:

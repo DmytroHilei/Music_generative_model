@@ -159,7 +159,7 @@ def real_pieces(csvs):
         for f in df.loc[df['split'] == 'validation', 'midi_filename']:
             toks = tokenize_midi(f)
             if toks is not None:
-                pieces.append(np.stack([x.numpy() for x in toks], 1))
+                pieces.append(toks.astype(np.int64))
     return pieces
 
 
