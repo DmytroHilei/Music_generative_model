@@ -22,7 +22,7 @@ Score per sample = style_eval's row distance to its own song's real next --new-n
 share, notes/s, top-instrument share, takeover, runaway; spreads from the real continuations of the same group),
 lower = closer; the mean per group is printed and written to <out-dir>/scores.json.
 Writes <out-dir>/<group>_<song>.mid/.mp3 (prompt + continuation) and real/<group>_<song>.mid/.mp3 (the real song,
-same length) and prints the instruments each sample used.
+same length; --no-mp3: MIDI only) and prints the instruments each sample used.
 """
 
 import argparse
@@ -49,10 +49,11 @@ def names(programs):
                      for p in sorted(set(programs)))
 
 
-def write(path, tokens, programs):
+def write(path, tokens, programs, mp3=True):
     path.parent.mkdir(parents=True, exist_ok=True)
     tokens_to_midi(*[tokens[:, j].tolist() for j in range(4)], programs=programs.tolist()).write(str(path))
-    render_mp3(path, SOUNDFONT)
+    if mp3:
+        render_mp3(path, SOUNDFONT)
 
 
 def store_arrays(store):
@@ -86,6 +87,7 @@ def main():
                     help="density controller target: the prompt's notes/s")
     ap.add_argument('--seed', type=int, default=1)
     ap.add_argument('--out-dir', default='samples/multi_450m')
+    ap.add_argument('--no-mp3', action='store_true', help='write MIDI only (scoring runs)')
     ap.add_argument('--device', default='cuda')
     args = ap.parse_args()
 
@@ -148,7 +150,7 @@ def main():
             keep = rows[:, 0] < BOS_PITCH
             rows, progs = rows[keep], progs[keep]
             name = f"{group}_{song['name']}"
-            write(out / f'{name}.mid', rows, progs)
+            write(out / f'{name}.mid', rows, progs, mp3=not args.no_mp3)
             c_txt = '-' if dc is None else f'{dc:.2f}'
             print(f"  {name}: d {d:.2f} C {c_txt} | {m['notes_per_s'] if m else 0:.1f} notes/s (real "
                   f"{song['real']['notes_per_s']:.1f}), {m['instruments'] if m else 0} instr (real "
@@ -160,7 +162,7 @@ def main():
             off, tokens, programs = store_arrays(song['store'])
             a = off[song['file']]
             write(out / 'real' / f'{name}.mid', np.asarray(tokens[a:a + len(rows)], dtype=np.int64),
-                  np.asarray(programs[a:a + len(rows)], dtype=np.int64))
+                  np.asarray(programs[a:a + len(rows)], dtype=np.int64), mp3=not args.no_mp3)
         mean = float(np.mean([x['dist'] for x in rows_out]))
         cs = [x['cons'] for x in rows_out if x['cons'] is not None]
         mean_c = float(np.mean(cs)) if cs else float('nan')
