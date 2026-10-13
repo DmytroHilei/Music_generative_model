@@ -1,11 +1,36 @@
 # MusicAutoregresiveModel
 
 An autoregressive symbolic-music transformer. It is pretrained on piano and multi-instrument MIDI (MAESTRO,
-GiantMIDI, Aria-MIDI, GigaMIDI) and fine-tuned to make piano arrangements of Ukrainian pop-rock songs.
+GiantMIDI, Aria-MIDI, GigaMIDI, Discover MIDI) and fine-tuned on Ukrainian pop-rock songs, as piano arrangements and as
+multi-track band arrangements.
 
 Each position is one note made of compound tokens (pitch, velocity, duration and delta-time on a 20 ms grid). Cascade
 output heads predict these, plus the instrument. The window can be conditioned on the instrument set, density and
 style.
+
+## Overview
+
+- **Data built:**
+  - public MIDI corpora (MAESTRO, GiantMIDI-Piano, Aria-MIDI, GigaMIDI, Discover MIDI) tokenized straight from their
+    archives into memory-mapped token stores, ≈ 4.5B unique notes, deduplicated across corpora;
+  - a Ukrainian target set built from audio: about 5,900 songs separated into stems (Demucs) and transcribed to piano
+    reductions and multi-track MIDI, plus ~700 transcribed piano covers.
+- **Models:** from 6M to 450M parameters. The 450M multi-instrument model (RoPE, context 2,048 notes, 129 instruments,
+  instrument-set and density conditioning) was trained on 8.3B notes on a rented RTX 5090 (~41 h). Everything else,
+  including fine-tuning the 450M, ran on an 8 GB laptop GPU (fp8, activation checkpointing, 8-bit optimizer states).
+- **Method:** one change per experiment, validation loss per note attribute, generation metrics against the real
+  continuation of each song, seed checks and listening tests for final choices. Scaling ladders and iso-FLOP curves
+  sized the models, and the forecasts held (107M: predicted 5.47–5.72, measured 5.706).
+- **Selected results:**
+  - cascade output heads −0.41 nats/note vs independent heads;
+  - Muon −0.54 vs AdamW in pretraining, but AdamW for small fine-tunes;
+  - RMSNorm + SwiGLU + QK-norm −0.75 over 3 seeds;
+  - growing a trained model 2.5–4× faster than training from scratch;
+  - the fine-tuned 450M halves the distance to real piano covers vs the earlier best model.
+- **Rejected after testing:** mixture of experts, a bigger pitch head, future-prediction heads, velocity augmentation
+  (kept in [`musicar/rejected.py`](musicar/rejected.py) with their results).
+
+Full results: [`docs/experiments.md`](docs/experiments.md).
 
 ## Layout
 
@@ -28,6 +53,7 @@ musicar/              core package
 config/               run configs
 data/                 datasets, token stores and their metadata (see data/README.md)
 data_prep/            dataset preparation: downloads, tokenization into stores, audio -> MIDI
+docs/                 experiment results (experiments.md)
 eval/                 analysis scripts: seeded comparisons, sampling sweeps, settings search
 tools/                status dashboard, throughput benchmark, fine-tune sweep, bf16 export
 cloud/                rented-GPU pipeline (setup, preflight, launch, checkpoint sync)
