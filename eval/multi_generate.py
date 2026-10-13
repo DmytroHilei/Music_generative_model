@@ -13,7 +13,9 @@ test split (tools/split_store.py; the other 90 % is fine-tune replay, and the va
 --csv-style; --match picks songs by name instead. Prompt = the first 128 notes with their instruments, then
 --new-notes notes; the instrument of every new note is sampled. Settings per style from --settings
 (eval/style_search.py's best_settings.json): temperature, top-p, instrument temperature, delta-time bias,
-conditioning 'band' (the prompt's instrument set) or 'none'.
+conditioning 'band' (the prompt's instrument set) or 'none'; --set overrides them (e.g. 'dt_bias=0,temperature=1').
+--min-new: no end-of-piece before that many new notes. --density prompt: density condition = the prompt's level
+(default none). --target-nps prompt: the density controller tracks the prompt's notes/s.
 
 Score per sample = style_eval's row distance to its own song's real next --new-notes notes (instruments, out-of-band
 share, notes/s, top-instrument share, takeover, runaway; spreads from the real continuations of the same group),
@@ -108,6 +110,11 @@ def main():
                                                 "to continue these songs instead of --songs")
     ap.add_argument('--csv-style', default='rock_pop', help="with --csv: whose settings to use ('rock_pop' = band songs)")
     ap.add_argument('--new-notes', type=int, default=1000)
+    ap.add_argument('--set', default='', help="settings overrides, e.g. 'dt_bias=0,temperature=1,top_p=none'")
+    ap.add_argument('--min-new', type=int, default=0, help='no end-of-piece before this many new notes')
+    ap.add_argument('--density', default='none', choices=['none', 'prompt'], help='density condition')
+    ap.add_argument('--target-nps', default='none', choices=['none', 'prompt'],
+                    help="density controller target: the prompt's notes/s")
     ap.add_argument('--seed', type=int, default=1)
     ap.add_argument('--out-dir', default='samples/multi_450m')
     ap.add_argument('--device', default='cuda')
@@ -130,7 +137,11 @@ def main():
 
     scores = {'checkpoint': args.checkpoint, 'iter': it, 'groups': {}}
     for group, (style, songs) in groups.items():
-        st = best.get(style, {}).get('settings', dict(TRACK, cond='band'))
+        st = dict(best.get(style, {}).get('settings', dict(TRACK, cond='band')))
+        for kv in filter(None, args.set.split(',')):
+            k, v = kv.split('=')
+            st[k] = v if k == 'cond' else None if v == 'none' else float(v)
+        st.update(min_new=args.min_new, density=args.density, target_nps=args.target_nps)
         scale = style_scales(songs)
         tok = torch.stack([torch.from_numpy(s['prompt']) for s in songs]).to(dev)
         prog = torch.stack([torch.from_numpy(s['prompt_prog']) for s in songs]).to(dev)
@@ -142,17 +153,23 @@ def main():
             prog = torch.cat([torch.zeros_like(prog[:, :1]), prog], 1)
         cond = None
         if cfg.cond_inst or cfg.n_density:
-            inst, _ = window_conditions(streams[0], streams[3], prog, cfg.n_programs, cfg.n_density or 16)
+            inst, density = window_conditions(streams[0], streams[3], prog, cfg.n_programs, cfg.n_density or 16)
             cond = (inst if st['cond'] == 'band' else torch.zeros_like(inst),
-                    torch.zeros(len(songs), dtype=torch.long, device=dev))
+                    density if args.density == 'prompt' else torch.zeros_like(density))
+        target = None
+        if args.target_nps == 'prompt':  # same notes/s as window_conditions (BOS rows ignored, 0.02 s per bin)
+            real = streams[0] < BOS_PITCH
+            target = (real.sum(1) / ((streams[3] * real).sum(1) * 0.02).clamp(min=0.5)).tolist()
         torch.manual_seed(args.seed)
         with torch.no_grad():
             res = model.generate(*streams, max_new_tokens=args.new_notes, temperature=st['temperature'],
                                  top_p=st['top_p'], dt_bias=st['dt_bias'], program=None, programs=prog,
                                  return_programs=True, cond=cond, cuda_graph=False,
-                                 program_temperature=st.get('instrument_temperature'))
+                                 program_temperature=st.get('instrument_temperature'), min_new=args.min_new,
+                                 target_nps=target)
         print(f"\n{group}: settings of {style}: T {st['temperature']}, top-p {st['top_p']}, instrument T "
-              f"{st.get('instrument_temperature')}, dt bias {st['dt_bias']}, cond {st['cond']}", flush=True)
+              f"{st.get('instrument_temperature')}, dt bias {st['dt_bias']}, cond {st['cond']}, min new "
+              f"{args.min_new}, density {args.density}, target nps {args.target_nps}", flush=True)
         n0 = streams[0].size(1)
         rows_out = []
         for r, song in enumerate(songs):
