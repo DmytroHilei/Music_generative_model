@@ -20,7 +20,8 @@ os.environ.setdefault('PYTORCH_CUDA_ALLOC_CONF', 'expandable_segments:True')
 import torch
 from torch.nn.attention import SDPBackend, sdpa_kernel
 
-from musicar.model import GPT, MusicConfig, convert_fp8, refresh_fp8_weights
+from musicar.fp8 import convert_fp8, refresh_fp8_weights
+from musicar.model import GPT, MusicConfig
 
 BACKENDS = {
     'default': None,
@@ -72,7 +73,8 @@ def bench(args, micro, compiled, attn, fp8, profile=False, act_ckpt=0):
         convert_fp8(model.transformer.h, args.fp8_recipe, args.fp8_skip, cache_weights=bool(args.fp8_cache))
         refresh_fp8_weights(model)
     if args.optim == 'adamw':
-        opt = model.configure_optimizers(0.1, 6e-4, (0.9, 0.95), 'cuda')
+        from musicar.optim import build_adamw
+        opt = build_adamw(model, 0.1, 6e-4, (0.9, 0.95), 'cuda')
     else:
         from musicar.optim import build_muon_optimizer
         opt = build_muon_optimizer(model, 0.1, 1e-3, (0.9, 0.95), 'cuda',

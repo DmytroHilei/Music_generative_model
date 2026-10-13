@@ -33,8 +33,9 @@ import math
 import numpy as np
 import torch
 
-from musicar.model import BOS_PITCH, DRUM_PROGRAM, window_conditions
+from musicar.data_loader import BOS_PITCH, DRUM_PROGRAM, window_conditions
 from musicar.eval.sample_eval import consistency_metrics, row_metrics
+from musicar.sampling import generate
 
 STORE = 'data/cache/gigamidi_clean_validation'
 STYLES = ('rock_pop', 'orchestral', 'piano_keys', 'electronic', 'acoustic')
@@ -236,11 +237,11 @@ def _evaluate(model, sset, new_notes, seed, chunk, cuda_graph, device, settings,
             torch.manual_seed(seed + c)
             with torch.autocast('cuda', dtype=torch.bfloat16,
                                 enabled=device == 'cuda' and next(model.parameters()).dtype == torch.float32):
-                res = model.generate(*streams, max_new_tokens=new_notes, temperature=settings['temperature'],
-                                     top_p=settings['top_p'], dt_bias=settings['dt_bias'], program=None,
-                                     programs=prog, return_programs=True, cond=cond, cuda_graph=cuda_graph,
-                                     program_temperature=settings.get('instrument_temperature'),
-                                     min_new=settings.get('min_new', 0))
+                res = generate(model, *streams, max_new_tokens=new_notes, temperature=settings['temperature'],
+                               top_p=settings['top_p'], dt_bias=settings['dt_bias'], program=None,
+                               programs=prog, return_programs=True, cond=cond, cuda_graph=cuda_graph,
+                               program_temperature=settings.get('instrument_temperature'),
+                               min_new=settings.get('min_new', 0))
             n0 = streams[0].size(1)
             for r, (style, song) in enumerate(part):
                 m = row_metrics(res[0][r, n0:].cpu(), res[3][r, n0:].cpu(), res[4][r, n0:].cpu(),

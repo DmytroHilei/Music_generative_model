@@ -9,10 +9,11 @@ import pretty_midi
 import torch
 
 from musicar.checkpoint import resolve_checkpoint
-from musicar.data_loader import tokenize_midi, load_styles, BOS_PITCH, EOS_PITCH, DRUM_PROGRAM
+from musicar.data_loader import tokenize_midi, load_styles, BOS_PITCH, EOS_PITCH, DRUM_PROGRAM, window_conditions, density_level
 from musicar.jobstatus import JobStatus
 from musicar.midi_io import render_mp3, tokens_to_midi
 from musicar.model import GPT, MusicConfig
+from musicar.sampling import generate
 
 
 def parse_args():
@@ -152,7 +153,7 @@ def main():
     ma = ckpt.get("model_args", {})
     # every architecture field the checkpoint knows; keys it predates fall back to what old checkpoints used
     fields = set(MusicConfig.__dataclass_fields__)
-    legacy = dict(cascade_heads=False, cascade_residual=False, n_embd=256)
+    legacy = dict(n_embd=256)
     config = MusicConfig(**{**legacy, **{k: v for k, v in ma.items() if k in fields}, 'dropout': 0.0})
 
     model = GPT(config)
@@ -279,7 +280,6 @@ def generate_batch(model, config, args, pieces, seed, outs, device, progress=Non
 
     cond = None
     if config.cond_inst or config.n_density:
-        from musicar.model import window_conditions, density_level
         from_prompt = window_conditions(pitch, delta_time, prompt_programs if config.n_programs else None,
                                         config.n_programs or 1, config.n_density or 16)
         inst = torch.zeros(len(outs), config.n_programs or 1, device=device)
@@ -300,8 +300,8 @@ def generate_batch(model, config, args, pieces, seed, outs, device, progress=Non
     print(f"Generating {args.max_new_tokens} notes x {len(outs)} rows on {device} (seed {seed})...")
     t0 = time.time()
     with torch.no_grad():
-        pitch, velocity, duration, delta_time, programs = model.generate(
-            pitch, velocity, duration, delta_time,
+        pitch, velocity, duration, delta_time, programs = generate(
+            model, pitch, velocity, duration, delta_time,
             max_new_tokens=args.max_new_tokens,
             temperature=args.temperature,
             top_k=args.top_k,

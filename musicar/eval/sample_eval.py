@@ -21,7 +21,8 @@ import argparse
 import numpy as np
 import torch
 
-from musicar.model import BOS_PITCH, EOS_PITCH, DRUM_PROGRAM, window_conditions
+from musicar.data_loader import BOS_PITCH, EOS_PITCH, DRUM_PROGRAM, window_conditions
+from musicar.sampling import generate
 
 STORE = 'data/cache/gigamidi_clean_validation'
 
@@ -204,9 +205,9 @@ def _sample_modes(model, cfg, streams, programs, tokens, modes, new_notes, tempe
     for mode, cond in modes.items():
         torch.manual_seed(seed)
         with torch.autocast('cuda', dtype=torch.bfloat16, enabled=device == 'cuda'):
-            res = model.generate(*streams, max_new_tokens=new_notes, temperature=temperature,
-                                 program=None if cfg.n_programs else 0, programs=programs if cfg.n_programs else None,
-                                 return_programs=True, cond=cond, cuda_graph=False)
+            res = generate(model, *streams, max_new_tokens=new_notes, temperature=temperature,
+                           program=None if cfg.n_programs else 0, programs=programs if cfg.n_programs else None,
+                           return_programs=True, cond=cond, cuda_graph=False)
         n0 = streams[0].size(1)
         rows = [row_metrics(res[0][r, n0:].cpu(), res[3][r, n0:].cpu(), res[4][r, n0:].cpu(),
                             set(programs[r].tolist())) for r in range(len(tokens))]

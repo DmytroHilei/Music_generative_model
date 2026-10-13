@@ -31,11 +31,11 @@ import numpy as np
 import pandas as pd
 import torch
 
-from musicar.data_loader import tokenize_midi
+from musicar.data_loader import BOS_PITCH, EOS_PITCH, density_level, tokenize_midi
 from musicar.midi_io import render_mp3, tokens_to_midi
 from musicar.jobstatus import JobStatus
-from musicar.model import BOS_PITCH, EOS_PITCH, density_level
 from musicar.eval.structure_eval import load_model, metrics, pick_style, summarize
+from musicar.sampling import generate
 
 # validation covers that are not Ukrainian-language songs (2026-10-07 v4 val set)
 NON_UA_ARTISTS = {'Мішель Андраде', 'Пошлая Молли', 'Луна', 'Витас', 'Ундервуд', 'Pianoбой', 'Ані Лорак'}
@@ -106,12 +106,12 @@ def continue_songs(model, cfg, args, prompts, style, device, job, base, s, level
             cond = (inst, torch.from_numpy(levels[b:b + B]).to(device))
         torch.manual_seed(seed + b)
         with torch.no_grad():
-            out = model.generate(*x, max_new_tokens=args.max_new, temperature=s['T'], top_p=s['p'],
-                                 dt_bias=s['dt'], style=style,
-                                 min_new=args.min_notes, cuda_graph=False,
-                                 programs=torch.zeros_like(x[0]) if cfg.n_programs else None, cond=cond,
-                                 progress=lambda n, b=b, B=B: job.update(base + (b + B * n / args.max_new)
-                                                                        * args.max_new))
+            out = generate(model, *x, max_new_tokens=args.max_new, temperature=s['T'], top_p=s['p'],
+                           dt_bias=s['dt'], style=style,
+                           min_new=args.min_notes, cuda_graph=False,
+                           programs=torch.zeros_like(x[0]) if cfg.n_programs else None, cond=cond,
+                           progress=lambda n, b=b, B=B: job.update(base + (b + B * n / args.max_new)
+                                                                  * args.max_new))
         n0 = x[0].size(1)
         for r in range(B):
             rows = np.stack([o[r, n0:].float().cpu().numpy().astype(np.int64) for o in out[:4]], 1)

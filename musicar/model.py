@@ -4,7 +4,6 @@
 
 
 import math
-import inspect
 from dataclasses import dataclass
 from functools import partial
 
@@ -13,143 +12,7 @@ import torch
 import torch.utils.checkpoint
 from torch.nn import functional as F
 
-# selective activation checkpointing: ops whose outputs a checkpointed block keeps instead of recomputing
-SAC_OPS = {
-    'attn': ('_scaled_dot_product_flash_attention', '_scaled_dot_product_cudnn_attention',
-             '_scaled_dot_product_efficient_attention'),
-    'mm': ('_scaled_mm', 'mm', 'addmm'),
-}
-
-
-def _sac_context(save):
-    """context_fn for torch.utils.checkpoint: keep the outputs of the SAC_OPS groups in `save` ('attn', 'attn,mm')."""
-    from torch.utils.checkpoint import CheckpointPolicy, create_selective_checkpoint_contexts
-    ops = {getattr(torch.ops.aten, name).default for group in save.split(',') for name in SAC_OPS[group]
-           if hasattr(torch.ops.aten, name)}
-
-    def policy(ctx, op, *args, **kwargs):
-        return CheckpointPolicy.MUST_SAVE if op in ops else CheckpointPolicy.PREFER_RECOMPUTE
-    return create_selective_checkpoint_contexts(policy)
-
-
-def spill_to_cpu(limit_bytes):
-    """Context (eager only): tensors saved for backward move to pinned RAM while the CUDA allocator holds more than
-    limit_bytes, and come back when backward needs them. The check reads the allocator's counter (no sync), so it
-    costs nothing below the limit. Only plain, dense tensors >= 1 MB (bf16) move; their strides are kept. Under
-    torch.compile it saves nothing: the hooks run after the whole compiled forward, i.e. after its memory peak."""
-    def pack(t):
-        if (type(t) is torch.Tensor and t.is_cuda and t.numel() >= 1 << 19 and t.storage_offset() == 0
-                and t.untyped_storage().nbytes() == t.numel() * t.element_size()
-                and torch.cuda.memory_allocated(t.device) > limit_bytes):
-            c = torch.empty_strided(t.size(), t.stride(), dtype=t.dtype, pin_memory=True)
-            c.copy_(t, non_blocking=True)
-            return t.device, c
-        return t
-
-    def unpack(packed):
-        return packed[1].to(packed[0], non_blocking=True) if isinstance(packed, tuple) else packed
-    return torch.autograd.graph.saved_tensors_hooks(pack, unpack)
-
-
-def convert_fp8(blocks, recipe='tensorwise', skip='', cache_weights=False):
-    """torchao float8 training for the Linears in `blocks` (the transformer blocks). recipe: torchao recipe name
-    ('tensorwise' | 'rowwise' | 'rowwise_with_gw_hp'); skip: comma-separated module-name suffixes that stay bf16
-    (e.g. 'attn.c_proj'). cache_weights (tensorwise only): each weight is cast to fp8 once per optimizer step by
-    refresh_fp8_weights() instead of in every forward, recompute and backward of every micro-batch; the caller must
-    call refresh_fp8_weights(model) after building the model and after every optimizer step."""
-    from torchao.float8 import Float8LinearConfig, convert_to_float8_training
-    from torchao.float8.float8_linear import Float8Linear
-    suffixes = tuple(s for s in skip.split(',') if s)
-    convert_to_float8_training(blocks, config=Float8LinearConfig.from_recipe_name(recipe),
-                               module_filter_fn=lambda m, name: not (suffixes and name.endswith(suffixes)))
-    if cache_weights:
-        assert recipe == 'tensorwise', 'fp8 weight caching needs one scale per weight (tensorwise)'
-        for m in blocks.modules():
-            if isinstance(m, Float8Linear):
-                m.__class__ = _cached_float8_linear_class()
-                dtype = m.config.cast_config_weight.target_dtype or torch.float8_e4m3fn
-                m.register_buffer('w8_data', torch.zeros(m.weight.shape, dtype=dtype, device=m.weight.device),
-                                  persistent=False)
-                m.register_buffer('w8_scale', torch.ones((), device=m.weight.device), persistent=False)
-
-
-@torch.no_grad()
-def refresh_fp8_weights(model):
-    """Cast every cached-fp8 Linear's weight to fp8 (in place, so compiled graphs keep their inputs)."""
-    from torchao.float8.float8_scaling_utils import hp_tensor_to_float8_dynamic
-    from torchao.float8.float8_training_tensor import GemmInputRole
-    for m in model.modules():
-        if hasattr(m, 'w8_data'):
-            w8 = hp_tensor_to_float8_dynamic(m.weight, m.w8_data.dtype, m.linear_mm_config,
-                                             gemm_input_role=GemmInputRole.WEIGHT,
-                                             round_scales_to_power_of_2=m.config.round_scales_to_power_of_2)
-            m.w8_data.copy_(w8._data)
-            m.w8_scale.copy_(w8._scale)
-
-
-class _CachedFp8Weight(torch.autograd.Function):
-    """The cached fp8 copy of a weight as the matmul operand; the gradient goes straight to the fp32 weight
-    (torchao's own weight cast has an identity backward too)."""
-
-    @staticmethod
-    def forward(ctx, weight, data, scale, linear_mm_config):
-        from torchao.float8.float8_training_tensor import Float8TrainingTensor, GemmInputRole
-        return Float8TrainingTensor(data, scale, weight.dtype, linear_mm_config, GemmInputRole.WEIGHT)
-
-    @staticmethod
-    def backward(ctx, grad):
-        return grad, None, None, None
-
-
-_CACHED_FP8_LINEAR = None
-# one side stream per device for generate()'s CUDA-graph warm-up and capture: cuBLAS keeps a workspace for every
-# stream it has run on (~32 MB each, never freed), so a new stream per call grew the memory of every evaluation
-_SIDE_STREAMS = {}
-
-
-def _cached_float8_linear_class():
-    """Float8Linear whose forward uses the cached fp8 weight (built on first use: model.py imports without torchao)."""
-    global _CACHED_FP8_LINEAR
-    if _CACHED_FP8_LINEAR is None:
-        from torchao.float8.float8_linear import Float8Linear, matmul_with_hp_or_float8_args
-
-        class CachedFloat8Linear(Float8Linear):
-            def forward(self, input):
-                if torch.is_autocast_enabled():  # same autocast handling as Float8Linear.forward
-                    input = input.to(torch.get_autocast_gpu_dtype())
-                w8 = _CachedFp8Weight.apply(self.weight, self.w8_data, self.w8_scale, self.linear_mm_config)
-                output = matmul_with_hp_or_float8_args.apply(input, w8.t(), self.linear_mm_config, self.config)
-                if self.bias is not None:
-                    output = output + self.bias.to(output.dtype)
-                return output
-        _CACHED_FP8_LINEAR = CachedFloat8Linear
-    return _CACHED_FP8_LINEAR
-
-
-def density_level(notes_per_s, n_density=16):
-    """Notes per second -> level 1..n_density-1 (two per octave from 0.5 to 64 notes/s; 0 = none)."""
-    nps = torch.as_tensor(notes_per_s, dtype=torch.float32)
-    return (1 + (2 * torch.log2(nps.clamp(min=1e-3)) + 2).floor().clamp(0, n_density - 2)).long()
-
-
-def window_conditions(pitch, delta_time, program, n_programs, n_density, drop_p=0.0, dt_seconds=0.02):
-    """Conditioning of whole windows (B, T): instrument multi-hot (B, n_programs) and density level (B,), from the
-    notes themselves (BOS/EOS rows ignored). drop_p: per row, both conditions are replaced by 'none' (zeros / 0)."""
-    real = pitch < BOS_PITCH
-    inst = torch.zeros(pitch.size(0), n_programs, device=pitch.device)
-    if program is not None:
-        inst.scatter_add_(1, program.masked_fill(~real, 0), real.float()).clamp_(max=1.0)
-    else:
-        inst[:, 0] = 1.0  # piano-only data
-    n = real.sum(1).float()
-    secs = (delta_time * real).sum(1).float() * dt_seconds
-    density = density_level(n / secs.clamp(min=0.5), n_density).to(pitch.device) if n_density else \
-        torch.zeros(pitch.size(0), dtype=torch.long, device=pitch.device)
-    if drop_p > 0:
-        keep = torch.rand(pitch.size(0), device=pitch.device) >= drop_p
-        inst = inst * keep[:, None]
-        density = density * keep
-    return inst, density
+from musicar.memory import sac_context
 
 
 class LayerNorm(nn.Module):
@@ -206,7 +69,6 @@ class CausalSelfAttention(nn.Module):
         # output projection
         self.c_proj = nn.Linear(config.n_embd, config.n_embd, bias=config.bias)
         # regularization
-        self.attn_dropout = nn.Dropout(config.dropout)
         self.resid_dropout = nn.Dropout(config.dropout)
         self.n_head = config.n_head
         self.n_embd = config.n_embd
@@ -214,11 +76,6 @@ class CausalSelfAttention(nn.Module):
         # QK-norm: RMSNorm over each head's q and k (before RoPE), keeps attention logits bounded at high LR
         self.q_norm = RMSNorm(config.n_embd // config.n_head) if config.qk_norm else None
         self.k_norm = RMSNorm(config.n_embd // config.n_head) if config.qk_norm else None
-        self.flash = hasattr(torch.nn.functional, 'scaled_dot_product_attention')
-        if not self.flash:
-            print("WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0")
-            self.register_buffer("bias", torch.tril(torch.ones(config.block_size, config.block_size))
-                                        .view(1, 1, config.block_size, config.block_size))
 
     def forward(self, x, cache=None, layer=0, rope=None):
         """cache (inference only): a KVCache with preallocated k/v buffers. x is either a prefill from position 0
@@ -247,25 +104,16 @@ class CausalSelfAttention(nn.Module):
                 cv.index_copy_(2, cache.pos, v.to(cv.dtype))
                 k, v, causal, mask = ck, cv, False, cache.mask  # attend to every filled position
 
-        # causal self-attention; Self-attend: (B, nh, T, hs) x (B, nh, hs, T) -> (B, nh, T, T)
-        if self.flash:
-            # efficient attention using Flash Attention CUDA kernels
-            y = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=mask, dropout_p=self.dropout if self.training else 0, is_causal=causal)
-        else:
-            # manual implementation of attention
-            att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
-            if causal:
-                att = att.masked_fill(self.bias[:,:,:T,:T] == 0, float('-inf'))
-            elif mask is not None:
-                att = att.masked_fill(~mask, float('-inf'))
-            att = F.softmax(att, dim=-1)
-            att = self.attn_dropout(att)
-            y = att @ v # (B, nh, T, T) x (B, nh, T, hs) -> (B, nh, T, hs)
+        # causal self-attention (fused SDPA kernels: flash / cuDNN / memory-efficient)
+        y = F.scaled_dot_product_attention(q, k, v, attn_mask=mask, dropout_p=self.dropout if self.training else 0,
+                                           is_causal=causal)
         y = y.transpose(1, 2).contiguous().view(B, T, C) # re-assemble all head outputs side by side
 
         # output projection
         y = self.resid_dropout(self.c_proj(y))
         return y
+
+
 class MLP(nn.Module):
 
     def __init__(self, config):
@@ -281,6 +129,7 @@ class MLP(nn.Module):
         x = self.c_proj(x)
         x = self.dropout(x)
         return x
+
 
 class SwiGLU(nn.Module):
     """Gated MLP (Shazeer 2020): c_proj(silu(c_gate x) * c_fc x). Hidden 8/3 * n_embd (rounded up to 64) keeps the
@@ -298,45 +147,6 @@ class SwiGLU(nn.Module):
         return self.dropout(self.c_proj(F.silu(self.c_gate(x)) * self.c_fc(x)))
 
 
-class MoEMLP(nn.Module):
-    """
-    Top-k routed mixture of expert FFNs (dropless: every token goes to its k experts, no capacity limit).
-    Experts are stored as stacked weights and run one after another on the tokens routed to them.
-    self.aux holds the load-balancing loss of the last forward (Switch Transformer: E * sum_i f_i * P_i).
-    """
-
-    def __init__(self, config):
-        super().__init__()
-        C, E = config.n_embd, config.moe_experts
-        H = int(4 * C * config.moe_hidden_frac)
-        self.top_k = config.moe_top_k
-        self.router = nn.Linear(C, E, bias=False)
-        self.w1 = nn.Parameter(torch.randn(E, C, H) * 0.02)
-        self.w2 = nn.Parameter(torch.randn(E, H, C) * 0.02 / math.sqrt(2 * config.n_layer))
-        self.dropout = nn.Dropout(config.dropout)
-        self.aux = None
-
-    def forward(self, x):
-        B, T, C = x.shape
-        flat = x.reshape(-1, C)
-        probs = F.softmax(self.router(flat).float(), dim=-1)              # (N, E)
-        gate, idx = probs.topk(self.top_k, dim=-1)                          # (N, k)
-        gate = (gate / gate.sum(-1, keepdim=True)).to(flat.dtype)
-        E = probs.size(-1)
-        # load balancing: fraction of routed slots per expert * mean router prob per expert
-        frac = torch.zeros(E, device=x.device).scatter_add_(0, idx.reshape(-1),
-                                                             torch.ones(idx.numel(), device=x.device))
-        self.aux = E * (frac / idx.numel() * probs.mean(0)).sum()
-        out = torch.zeros_like(flat)
-        for e in range(E):
-            tok, slot = (idx == e).nonzero(as_tuple=True)
-            if tok.numel() == 0:
-                continue
-            h = F.gelu(flat[tok] @ self.w1[e].to(flat.dtype)) @ self.w2[e].to(flat.dtype)
-            out.index_add_(0, tok, h * gate[tok, slot, None])
-        return self.dropout(out.reshape(B, T, C))
-
-
 class Block(nn.Module):
 
     def __init__(self, config):
@@ -344,8 +154,7 @@ class Block(nn.Module):
         self.ln_1 = block_norm(config)
         self.attn = CausalSelfAttention(config)
         self.ln_2 = block_norm(config)
-        self.mlp = (MoEMLP(config) if config.moe_experts else SwiGLU(config) if config.mlp == 'swiglu'
-                    else MLP(config))
+        self.mlp = SwiGLU(config) if config.mlp == 'swiglu' else MLP(config)
 
     def forward(self, x, cache=None, layer=0, rope=None):
         x = x + self.attn(self.ln_1(x), cache, layer, rope)
@@ -368,22 +177,8 @@ class MusicConfig:
     dropout: float = 0.2
     bias: bool = False
     label_smoothing: float = 0.1
-    # True: predict dt -> pitch -> duration -> velocity, each conditioned on the previous ones.
-    # False: 4 independent heads (old checkpoints).
-    cascade_heads: bool = True
-    # True (v2): residual heads, logits = out(LN(z + MLP(LN(z)))) with z = h + cond embeddings; at init this is
-    # exactly the independent linear heads plus conditioning. False (v1): plain MLP heads (ab_cascade checkpoint).
-    cascade_residual: bool = True
-    cond_emb_init_std: float = 0.5  # v2 only: h after ln_f has ~unit scale, 0.02 made the conditioning invisible
-    # asymmetric heads (v2 only): the pitch head gains most from capacity, so it can get more/wider blocks
-    pitch_head_blocks: int = 1
-    pitch_head_mult: int = 1        # hidden width of the pitch head blocks = mult * n_embd
-    # mixture of experts in the transformer FFNs (0 = dense MLP). Expert hidden = 4*n_embd*moe_hidden_frac,
-    # with top_k=2 and frac=0.5 the active FFN compute equals the dense model.
-    moe_experts: int = 0
-    moe_top_k: int = 2
-    moe_hidden_frac: float = 0.5
-    moe_aux_weight: float = 0.01    # Switch-style load-balancing loss
+    # cascade heads (CascadeHeads): h after ln_f has ~unit scale, 0.02 made the conditioning invisible
+    cond_emb_init_std: float = 0.5
     # conditioning: a learned style embedding (genre / artist, index 0 = none) added at every position; 0 = off.
     # pitch_size 130 = special tokens: pitch 128 = BOS (start of piece), 129 = EOS (end of piece)
     n_styles: int = 0
@@ -403,15 +198,6 @@ class MusicConfig:
     norm: str = 'layernorm'     # 'layernorm' | 'rmsnorm' (blocks and ln_f)
     mlp: str = 'gelu'           # 'gelu' (4x) | 'swiglu' (8/3x, same params)
     qk_norm: bool = False
-    # future prediction (training only, dropped at inference): small heads on h_t predict, for each time horizon after
-    # note t's onset ('a-b' seconds), the pitch-class histogram, log note count and mean pitch of the notes sounding
-    # there; loss += future_weight * mean over horizons. 0 = off (no parameters)
-    future_weight: float = 0.0
-    future_horizons: str = '0-2,2-4,4-8'
-
-
-BOS_PITCH, EOS_PITCH = 128, 129
-DRUM_PROGRAM = 128
 
 
 # order in which attributes of the next note are decided by CascadeHeads
@@ -422,93 +208,21 @@ CASCADE_ORDER_PROGRAMS = ('delta_time', 'program', 'pitch', 'duration', 'velocit
 STREAM_ORDER = ('pitch', 'velocity', 'duration', 'delta_time')
 
 
-DT_BINS_PER_SEC = 50  # delta_time bins are 20 ms
-
-
-def future_targets(pitch, dt, valid, real, horizons):
-    """Targets of the future heads from the window's own notes (no extra data).
-    pitch, dt: (B, N) the window's notes 0..T (N = T + 1: the first input note, then the targets); valid: (B, N) pitched
-    real notes (no BOS/EOS, padding or drums); real: (B, N) any real token (not padding). horizons: [(a, b)] in bins.
-    Position t (0..T-1) has seen notes 0..t; its horizon (a, b) holds the notes i > t with onset in [on_t + a, on_t + b).
-    Returns per horizon (hist (B, T, 12) counts, count (B, T), pitch sum (B, T), ok (B, T)); ok = the horizon ends
-    before the window's last real onset (else the window can't tell what is there) and position t is a real token."""
-    B, N = pitch.shape
-    T = N - 1
-    onset = torch.cumsum(dt.clamp(min=0), 1)                                    # (B, N) int bins, non-decreasing
-    t_on = onset[:, :T]
-    pc = F.one_hot(pitch.clamp(0, 127) % 12, 12).float() * valid.unsqueeze(-1)
-    P = F.pad(torch.cumsum(pc, 1), (0, 0, 1, 0))                                # P[i] = sum over notes < i
-    Cn = F.pad(torch.cumsum(valid.float(), 1), (1, 0))
-    R = F.pad(torch.cumsum(pitch.float() * valid, 1), (1, 0))
-    last_on = torch.where(real, onset, torch.zeros_like(onset)).amax(1, keepdim=True)
-    nxt = torch.arange(1, T + 1, device=pitch.device).expand(B, T)
-    out = []
-    for a, b in horizons:
-        lo = torch.maximum(torch.searchsorted(onset, t_on + a), nxt)
-        hi = torch.maximum(torch.searchsorted(onset, t_on + b), lo)
-        hist = P.gather(1, hi.unsqueeze(-1).expand(B, T, 12)) - P.gather(1, lo.unsqueeze(-1).expand(B, T, 12))
-        count = Cn.gather(1, hi) - Cn.gather(1, lo)
-        psum = R.gather(1, hi) - R.gather(1, lo)
-        ok = (t_on + b <= last_on) & real[:, :T]
-        out.append((hist, count, psum, ok))
-    return out
-
-
-class FutureHeads(nn.Module):
-    """LN -> MLP -> per horizon 12 pitch-class logits + log(1 + count) + (mean pitch - 60) / 12."""
-
-    def __init__(self, config):
-        super().__init__()
-        self.horizons = [tuple(round(float(x) * DT_BINS_PER_SEC) for x in h.split('-'))
-                         for h in config.future_horizons.split(',')]
-        C = config.n_embd
-        self.ln = LayerNorm(C, bias=config.bias)
-        self.fc1 = nn.Linear(C, C, bias=config.bias)
-        self.fc2 = nn.Linear(C, 14 * len(self.horizons), bias=config.bias)
-
-    def forward(self, h):
-        B, T, _ = h.shape
-        return self.fc2(F.gelu(self.fc1(self.ln(h)))).view(B, T, len(self.horizons), 14)
-
-    def loss(self, h, pitch, dt, valid, real):
-        """Mean over horizons of pitch-class CE (soft targets) + count MSE + register MSE; also the mean pc CE alone."""
-        pred = self(h).float()
-        total, pc_ce = 0.0, 0.0
-        for k, (hist, count, psum, ok) in enumerate(future_targets(pitch, dt, valid, real, self.horizons)):
-            p = pred[:, :, k]
-            has = ok & (count > 0)
-            n_has, n_ok = has.sum().clamp(min=1), ok.sum().clamp(min=1)
-            ce = -(hist / count.clamp(min=1).unsqueeze(-1) * F.log_softmax(p[..., :12], -1)).sum(-1)
-            ce = (ce * has).sum() / n_has
-            cnt = (((p[..., 12] - torch.log1p(count)) ** 2) * ok).sum() / n_ok
-            reg = (((p[..., 13] - (psum / count.clamp(min=1) - 60) / 12) ** 2) * has).sum() / n_has
-            total = total + (ce + cnt + reg) / len(self.horizons)
-            pc_ce = pc_ce + ce.detach() / len(self.horizons)
-        return total, pc_ce
-
-
 class ResidualHead(nn.Module):
-    """out(LN(z + MLP(LN(z)))): a direct linear path from z (like the independent heads) plus a small MLP
+    """out(LN(z + MLP(LN(z)))): a direct linear path from z (like independent linear heads) plus a small MLP
     that can mix in the conditioning non-linearly. c_proj gets the small residual init in GPT.__init__."""
 
-    def __init__(self, C, vocab, bias, n_blocks=1, mult=1):
+    def __init__(self, C, vocab, bias):
         super().__init__()
-        H = mult * C
         self.ln = LayerNorm(C, bias=bias)
-        self.c_fc = nn.Linear(C, H, bias=bias)
+        self.c_fc = nn.Linear(C, C, bias=bias)
         self.gelu = nn.GELU()
-        self.c_proj = nn.Linear(H, C, bias=bias)
-        # further residual blocks (asymmetric heads); empty for the default single block -> old checkpoints load
-        self.extra = nn.ModuleList(nn.ModuleDict(dict(
-            ln=LayerNorm(C, bias=bias), c_fc=nn.Linear(C, H, bias=bias), c_proj=nn.Linear(H, C, bias=bias),
-        )) for _ in range(n_blocks - 1))
+        self.c_proj = nn.Linear(C, C, bias=bias)
         self.ln_out = LayerNorm(C, bias=bias)
         self.out = nn.Linear(C, vocab, bias=False)
 
     def forward(self, z):
         z = z + self.c_proj(self.gelu(self.c_fc(self.ln(z))))
-        for blk in self.extra:
-            z = z + blk['c_proj'](self.gelu(blk['c_fc'](blk['ln'](z))))
         return self.out(self.ln_out(z))
 
 
@@ -516,7 +230,7 @@ class CascadeHeads(nn.Module):
     """
     Factorizes P(next note | context) with the chain rule instead of 4 independent heads:
         P(dt|h) * P(pitch|h,dt) * P(dur|h,dt,pitch) * P(vel|h,dt,pitch,dur)
-    Each head is a small MLP over h plus the embeddings of the attributes already decided.
+    Each head is a ResidualHead over h plus the embeddings of the attributes already decided.
     Training uses the true values (teacher forcing), generation feeds back the sampled ones.
     """
 
@@ -526,28 +240,11 @@ class CascadeHeads(nn.Module):
                      duration=config.duration_size, delta_time=config.delta_time_size, program=config.n_programs)
         C = config.n_embd
         self.order = CASCADE_ORDER_PROGRAMS if config.n_programs else CASCADE_ORDER
-        assert config.cascade_residual or not config.n_programs, "programs need the v2 (residual) cascade heads"
         # the last attribute is never used as a condition, so it needs no embedding
         self.cond_emb = nn.ModuleDict({
             name: nn.Embedding(sizes[name], C) for name in self.order[:-1]
         })
-        self.residual = config.cascade_residual
-        if self.residual:
-            self.heads = nn.ModuleDict({
-                name: ResidualHead(C, sizes[name], config.bias,
-                                   n_blocks=config.pitch_head_blocks if name == 'pitch' else 1,
-                                   mult=config.pitch_head_mult if name == 'pitch' else 1)
-                for name in self.order
-            })
-            return
-        self.heads = nn.ModuleDict({
-            name: nn.Sequential(
-                LayerNorm(C, bias=config.bias),
-                nn.Linear(C, C, bias=config.bias),
-                nn.GELU(),
-                nn.Linear(C, sizes[name], bias=False),
-            ) for name in CASCADE_ORDER
-        })
+        self.heads = nn.ModuleDict({name: ResidualHead(C, sizes[name], config.bias) for name in self.order})
 
     def forward(self, h, targets):
         # h: (B, T, C), targets: dict name -> (B, T), -1 = ignore
@@ -568,6 +265,7 @@ class CascadeHeads(nn.Module):
             if name in self.cond_emb:
                 cond = cond + self.cond_emb[name](out[name])
         return out
+
 
 class MusicEmbeddings(nn.Module):
     def __init__(self, config):
@@ -624,7 +322,7 @@ class GPT(nn.Module):
         # activation checkpointing (training only, not saved): the first act_ckpt blocks (-1 = all) keep only their
         # input and recompute their forward during backward (~1.33x compute, activations of those blocks ~gone).
         # act_ckpt_save: selective checkpointing, the checkpointed blocks keep the outputs of these op groups
-        # (SAC_OPS: 'attn' = attention output, ~16 MB per block at 4 x 2048 x 1024; 'attn,mm' = also the matmuls)
+        # (musicar.memory.SAC_OPS: 'attn' = attention output, ~16 MB per block at 4 x 2048 x 1024; 'attn,mm' = also the matmuls)
         self.act_ckpt = 0
         self.act_ckpt_save = ''
 
@@ -647,23 +345,14 @@ class GPT(nn.Module):
         if config.n_programs:
             self.transformer['program'] = nn.Embedding(config.n_programs, config.n_embd)
 
-        if config.cascade_heads:
-            self.cascade = CascadeHeads(config)
-        else:
-            self.head_pitch      = nn.Linear(config.n_embd, config.pitch_size,      bias=False)
-            self.head_velocity   = nn.Linear(config.n_embd, config.velocity_size,   bias=False)
-            self.head_duration   = nn.Linear(config.n_embd, config.duration_size,   bias=False)
-            self.head_delta_time = nn.Linear(config.n_embd, config.delta_time_size, bias=False)
-        if config.future_weight:
-            self.future = FutureHeads(config)
+        self.cascade = CascadeHeads(config)
 
         self.apply(self._init_weights)
         for pn, p in self.named_parameters():
             if pn.endswith("c_proj.weight"):
                 torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * config.n_layer))
-        if config.cascade_heads and config.cascade_residual:
-            for emb in self.cascade.cond_emb.values():
-                torch.nn.init.normal_(emb.weight, mean=0.0, std=config.cond_emb_init_std)
+        for emb in self.cascade.cond_emb.values():
+            torch.nn.init.normal_(emb.weight, mean=0.0, std=config.cond_emb_init_std)
         if config.n_styles:
             # zero = no effect at the start of a fine-tune: the model begins exactly where the pretrained one was
             torch.nn.init.zeros_(self.transformer['style'].weight)
@@ -678,39 +367,6 @@ class GPT(nn.Module):
     def head_names(self):
         """The attributes the model predicts, in STREAM_ORDER (+ 'program'): the order of `targets` in forward()."""
         return STREAM_ORDER + (('program',) if self.config.n_programs else ())
-
-    def load_expanded(self, state_dict):
-        """Load a checkpoint into a model that may have grown: extra rows in dim 0 (pitch vocab 128 -> 130) keep
-        their fresh init, keys the checkpoint lacks (style embedding) keep theirs. Returns the grown/new keys.
-        Exception: a new program condition embedding is zeroed, so the old pitch/duration/velocity heads see exactly
-        the conditioning they were trained with (function-preserving growth to multi-instrument), and so is the
-        instrument head's output layer."""
-        own = self.state_dict()
-        # a learned-position checkpoint loaded into a RoPE model: the position table has no place to go
-        dropped = [k for k in state_dict if k.startswith('transformer.wpe.') and k not in own]
-        for k in dropped:
-            del state_dict[k]
-        changed = [k for k in own if k not in state_dict] + [f'{k} (dropped)' for k in dropped]
-        for k in [k for k in own if k not in state_dict]:
-            # the new instrument head's output also starts at zero = a uniform guess (ln 129), not a random one
-            if k.startswith('cascade.cond_emb.program.') or k == 'cascade.heads.program.out.weight':
-                state_dict[k] = torch.zeros_like(own[k])
-        for k, v in state_dict.items():
-            if k == 'transformer.wpe.weight' and own[k].shape[0] > v.shape[0]:
-                # longer context with learned positions: stretch the table (position interpolation), so position p
-                # gets the old embedding at p * old/new, linearly between neighbouring rows
-                state_dict[k] = F.interpolate(v.float().t()[None], size=own[k].shape[0], mode='linear',
-                                              align_corners=True)[0].t().to(v.dtype)
-                changed.append(f'{k} (stretched {v.shape[0]} -> {own[k].shape[0]})')
-            elif k in own and own[k].shape != v.shape:
-                assert own[k].shape[1:] == v.shape[1:] and own[k].shape[0] >= v.shape[0], \
-                    f"{k}: can't grow {tuple(v.shape)} -> {tuple(own[k].shape)}"
-                grown = own[k].clone()
-                grown[:v.shape[0]] = v
-                state_dict[k] = grown
-                changed.append(k)
-        self.load_state_dict(state_dict, strict=False)
-        return changed
 
     def get_num_params(self, non_embedding=True):
         """
@@ -732,8 +388,9 @@ class GPT(nn.Module):
         elif isinstance(module, nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
-    def _encode(self, pitch, velocity, duration, delta_time, style=None, program=None, cache=None, cond=None):
-        """cache=None: plain forward. With a KVCache: T > 1 = prefill from position 0, T == 1 = one step at cache.pos."""
+    def encode(self, pitch, velocity, duration, delta_time, style=None, program=None, cache=None, cond=None):
+        """The trunk: notes -> hidden states after ln_f, (B, T, C).
+        cache=None: plain forward. With a KVCache: T > 1 = prefill from position 0, T == 1 = one step at cache.pos."""
         device = pitch.device
         b, t = pitch.size()
         assert t <= self.config.block_size
@@ -761,7 +418,7 @@ class GPT(nn.Module):
                 x = x + self.transformer['cond_density'](density).unsqueeze(1)
         x = self.transformer.drop(x)
         n_ckpt = len(self.transformer.h) if self.act_ckpt < 0 else self.act_ckpt
-        ckpt_kw = dict(context_fn=partial(_sac_context, self.act_ckpt_save)) if self.act_ckpt_save else {}
+        ckpt_kw = dict(context_fn=partial(sac_context, self.act_ckpt_save)) if self.act_ckpt_save else {}
         for i, block in enumerate(self.transformer.h):
             if i < n_ckpt and self.training and cache is None and torch.is_grad_enabled():
                 x = torch.utils.checkpoint.checkpoint(block, x, None, i, rope, use_reentrant=False,
@@ -770,310 +427,36 @@ class GPT(nn.Module):
                 x = block(x, cache, i, rope)
         return self.transformer.ln_f(x)
 
-    def _head_logits(self, x, targets=None):
-        # x: (B, T, C) -> dict name -> logits. targets (dict) are only needed for cascade heads.
-        if self.config.cascade_heads:
-            return self.cascade(x, targets)
-        return dict(pitch=self.head_pitch(x), velocity=self.head_velocity(x),
-                    duration=self.head_duration(x), delta_time=self.head_delta_time(x))
-
     def forward(self, pitch, velocity, duration, delta_time, style=None, program=None, targets=None, cond=None):
         """
-        With targets: returns (parts, loss). loss = sum of the 4 CEs with label smoothing (what we optimize),
+        Returns (parts, loss). loss = sum of the per-head CEs with label smoothing (what we optimize),
         parts = dict name -> CE without label smoothing (detached, for honest logging / comparing runs).
-        Without targets (independent heads only): returns ((p, v, d, dt) logits of the last position, None).
-        Cascade heads can't give all 4 logits without choosing the earlier attributes, so use generate().
+        targets: one (B, T) tensor per head in head_names order, -1 = ignore.
         style: (B,) style ids when the model has n_styles (0 = none).
         program: (B, T) instrument per input note when the model has n_programs; targets then has a 5th entry, the
         next note's program (see head_names). Duration targets of drum notes are expected as -1 (masked).
+        cond: (instrument multi-hot (B, n_programs), density level (B,)) for models with cond_inst / n_density.
         """
-        x = self._encode(pitch, velocity, duration, delta_time, style=style, program=program, cond=cond)
-
-        if targets is not None:
-            assert len(targets) == len(self.head_names), f"{len(targets)} targets for heads {self.head_names}"
-            tgt = dict(zip(self.head_names, targets))
-            logits = self._head_logits(x, tgt)
-            ls = self.config.label_smoothing
-            loss = 0.0
-            parts = {}
-            for name in self.head_names:
-                lg = logits[name].view(-1, logits[name].size(-1))
-                t = tgt[name].reshape(-1)
-                # mean over the unmasked targets, 0 (not NaN = 0/0) when there are none, e.g. the duration head
-                # of a drums-only window; no data-dependent branch, so no sync / graph break under compile
-                n_valid = (t != -1).sum().clamp(min=1)
-                loss = loss + F.cross_entropy(lg, t, ignore_index=-1, label_smoothing=ls, reduction='sum') / n_valid
-                with torch.no_grad():
-                    parts[name] = F.cross_entropy(lg.float(), t, ignore_index=-1, reduction='sum') / n_valid
-            if self.config.future_weight:
-                # the window's notes 0..T: the first input note, then the targets (-1 = padding)
-                seq = lambda first, t: torch.cat([first[:, :1], t.clamp(min=0)], 1)
-                fp, fdt = seq(pitch, tgt['pitch']), seq(delta_time, tgt['delta_time'])
-                real = torch.cat([torch.ones_like(pitch[:, :1], dtype=torch.bool), tgt['pitch'] >= 0], 1)
-                valid = real & (fp < BOS_PITCH)
-                if self.config.n_programs:
-                    valid = valid & (seq(program, tgt['program']) != DRUM_PROGRAM)
-                fut, fut_pc = self.future.loss(x, fp, fdt, valid, real)
-                loss = loss + self.config.future_weight * fut
-                parts['future'] = fut.detach()
-                parts['future_pc'] = fut_pc
-            if self.config.moe_experts:
-                aux = sum(b.mlp.aux for b in self.transformer.h) / len(self.transformer.h)
-                loss = loss + self.config.moe_aux_weight * aux
-                parts['moe_aux'] = aux.detach()
-            return parts, loss
-
-        else:
-            assert not self.config.cascade_heads, "cascade heads need sequential sampling, use generate()"
-            logits = self._head_logits(x[:, [-1], :])
-            return tuple(logits[name] for name in STREAM_ORDER), None
-
+        x = self.encode(pitch, velocity, duration, delta_time, style=style, program=program, cond=cond)
+        assert len(targets) == len(self.head_names), f"{len(targets)} targets for heads {self.head_names}"
+        tgt = dict(zip(self.head_names, targets))
+        logits = self.cascade(x, tgt)
+        ls = self.config.label_smoothing
+        loss = 0.0
+        parts = {}
+        for name in self.head_names:
+            lg = logits[name].view(-1, logits[name].size(-1))
+            t = tgt[name].reshape(-1)
+            # mean over the unmasked targets, 0 (not NaN = 0/0) when there are none, e.g. the duration head
+            # of a drums-only window; no data-dependent branch, so no sync / graph break under compile
+            n_valid = (t != -1).sum().clamp(min=1)
+            loss = loss + F.cross_entropy(lg, t, ignore_index=-1, label_smoothing=ls, reduction='sum') / n_valid
+            with torch.no_grad():
+                parts[name] = F.cross_entropy(lg.float(), t, ignore_index=-1, reduction='sum') / n_valid
+        return parts, loss
 
     def crop_block_size(self, block_size):
         assert block_size <= self.config.block_size
         self.config.block_size = block_size
         if 'wpe' in self.transformer:
             self.transformer.wpe.weight = nn.Parameter(self.transformer.wpe.weight[:block_size])
-        for block in self.transformer.h:
-            if hasattr(block.attn, 'bias'):
-                block.attn.bias = block.attn.bias[:, :, :block_size, :block_size]
-
-    def configure_optimizers(self, weight_decay, learning_rate, betas, device_type):
-        # start with all of the candidate parameters
-        param_dict = {pn: p for pn, p in self.named_parameters()}
-        # filter out those that do not require grad
-        param_dict = {pn: p for pn, p in param_dict.items() if p.requires_grad}
-        # create optim groups. Any parameters that is 2D will be weight decayed, otherwise no.
-        # i.e. all weight tensors in matmuls + embeddings decay, all biases and layernorms don't.
-        # v2 cascade: condition embeddings must stay at the scale of h, so no weight decay on them
-        def no_decay(n, p):
-            return p.dim() < 2 or (self.config.cascade_residual and 'cond_emb' in n)
-        decay_params = [p for n, p in param_dict.items() if not no_decay(n, p)]
-        nodecay_params = [p for n, p in param_dict.items() if no_decay(n, p)]
-        optim_groups = [
-            {'params': decay_params, 'weight_decay': weight_decay},
-            {'params': nodecay_params, 'weight_decay': 0.0}
-        ]
-        num_decay_params = sum(p.numel() for p in decay_params)
-        num_nodecay_params = sum(p.numel() for p in nodecay_params)
-        print(f"num decayed parameter tensors: {len(decay_params)}, with {num_decay_params:,} parameters")
-        print(f"num non-decayed parameter tensors: {len(nodecay_params)}, with {num_nodecay_params:,} parameters")
-        # Create AdamW optimizer and use the fused version if it is available
-        fused_available = 'fused' in inspect.signature(torch.optim.AdamW).parameters
-        use_fused = fused_available and device_type == 'cuda'
-        extra_args = dict(fused=True) if use_fused else dict()
-        optimizer = torch.optim.AdamW(optim_groups, lr=learning_rate, betas=betas, **extra_args)
-        print(f"using fused AdamW: {use_fused}")
-
-        return optimizer
-    @torch.no_grad()
-    def generate(self, pitch, velocity, duration, delta_time, max_new_tokens, temperature=0.85, top_k=None,
-                 anchor=0, slide=None, progress=None, dt_bias=0.0, target_nps=None, dt_seconds=0.02,
-                 cuda_graph=True, style=None, min_new=0, program=0, top_p=None, cfg_scale=1.0,
-                 eos_t1=False, programs=None, allowed_programs=None, return_programs=False, program_temperature=None,
-                 cond=None):
-        """
-        Batched sampling (B rows, same prompt length) with a preallocated KV cache: each new note costs one position
-        through the model, not a full re-run. On CUDA the one-note transformer step is captured once as a CUDA graph
-        and replayed (cuda_graph=True), which removes the per-kernel launch cost that dominates small-batch decode.
-        Positions are learned up to block_size, so the window can't roll one note at a time with a cache (every
-        cached position would shift). When the cache is full it is refilled from a shorter window, making room
-        for `slide` new notes (default block_size // 4, so the context stays between 3/4 and all of block_size).
-        anchor > 0 (optional, off by default): the first `anchor` notes of the sequence (e.g. the prompt's theme)
-        stay pinned at the start of every refilled window, in front of the most recent notes.
-        progress: optional callback(n_generated) after every note (e.g. a jobstatus.JobStatus update).
-        Density control (no retraining; only the delta_time head is touched, every other choice stays the model's):
-          dt_bias: fixed logit bias b * log(max(bin, 1)) on delta_time; b > 0 favours longer gaps = fewer notes/s.
-          target_nps: notes per second to track (a float, or one per row). A controller nudges each row's bias after
-            every note from the density of its last 64 notes, starting at dt_bias. dt_seconds = seconds per bin.
-        style: (B,) style ids (models with n_styles; 0 = none/unconditional).
-        program: models with n_programs: an int = every new note is played by this instrument (0 = piano) and its
-          head isn't sampled; None = the instrument head is sampled per note (dt -> instrument -> pitch -> ...).
-        programs: (B, T) instruments of the prompt notes (default: all `program`, or 0 when sampling).
-        allowed_programs: with program=None, only these instruments can be sampled (e.g. [0, 33, 128]).
-        return_programs: also return the (B, T) instrument of every note as a fifth tensor.
-        cond: models with cond_inst / n_density: (instrument multi-hot (B, n_programs), density level (B,)), see
-          window_conditions; None = 'none' for both.
-        program_temperature: temperature of the instrument head only (default: temperature). Lower = fewer switches to
-          new instruments; at 0.9 the instrument choice drifted to dozens of rare instruments.
-        top_p: nucleus sampling, keep the smallest set of values whose probability reaches top_p (after top_k).
-        cfg_scale != 1 (needs a style): classifier-free guidance. The batch runs twice, with the style and with
-          style 0 (none, which style dropout trained), and every head samples from uncond + s * (cond - uncond); both
-          halves are fed the same note. Not combined with target_nps.
-        eos_t1: EOS keeps its probability at temperature 1 (and outside top-k/top-p); the other pitches use the
-          tempered distribution, rescaled to the remaining mass. Lower temperatures otherwise starve the rare EOS.
-        Special tokens (pitch vocab 130): BOS is never sampled; EOS (end of piece) not before min_new notes. Rows keep
-        running after their EOS (batch shapes stay fixed); cut them at the first EOS when writing MIDI.
-        Nothing here syncs the GPU with the CPU inside the loop.
-        """
-        L = self.config.block_size
-        slide = slide or L // 4
-        assert 0 <= anchor and anchor + slide < L, "need anchor + slide < block_size"
-        device = pitch.device
-        Bo = pitch.size(0)  # rows asked for; with guidance the model runs 2 * Bo (conditional, then unconditional)
-        guided = cfg_scale != 1.0 and style is not None
-        assert not (guided and target_nps is not None), "guidance with a density target isn't supported"
-        if guided:
-            pitch, velocity, duration, delta_time = (torch.cat([t, t]) for t in (pitch, velocity, duration, delta_time))
-        B, n0 = pitch.shape
-        total = n0 + max_new_tokens
-        # output buffers, filled in place (no growing torch.cat)
-        out = [torch.zeros(B, total, dtype=torch.long, device=device) for _ in range(4)]
-        for o, s in zip(out, (pitch, velocity, duration, delta_time)):
-            o[:, :n0] = s
-
-        # log(bin), with bins 0 and 1 unbiased: longer gaps get likelier, but "same onset" (bin 0 = chord notes)
-        # keeps its odds against the shortest gap, so chords aren't broken up into arpeggios
-        dt_shape = torch.log(torch.arange(self.config.delta_time_size, dtype=torch.float32,
-                                          device=device).clamp(min=1))
-        bias = torch.full((Bo, 1), float(dt_bias), device=device)
-        target = None
-        if target_nps is not None:
-            target = torch.as_tensor(target_nps, dtype=torch.float32, device=device).reshape(-1, 1).expand(B, 1)
-
-        specials = self.config.pitch_size > BOS_PITCH
-        step_i = [0]
-        if style is not None:
-            style = torch.as_tensor(style, dtype=torch.long, device=device).reshape(-1).expand(Bo).contiguous()
-            if guided:
-                style = torch.cat([style, torch.zeros_like(style)])
-        if cond is not None and guided:
-            cond = tuple(torch.cat([c, c]) for c in cond)
-        n_prog = self.config.n_programs
-        sample_programs = bool(n_prog) and program is None
-        fixed_program = torch.full((B, 1), int(program), dtype=torch.long, device=device) \
-            if n_prog and not sample_programs else None
-        prog_out = None
-        if n_prog:  # the instrument of every note, like the 4 note streams
-            prog_out = torch.zeros(B, total, dtype=torch.long, device=device)
-            if programs is not None:
-                prog_out[:, :n0] = torch.cat([programs, programs]) if guided else programs
-            elif fixed_program is not None:
-                prog_out[:, :n0] = fixed_program
-        prog_mask = None
-        if sample_programs and allowed_programs is not None:
-            prog_mask = torch.full((n_prog,), -float('Inf'), device=device)
-            prog_mask[torch.as_tensor(list(allowed_programs), device=device)] = 0.0
-
-        def sample(logits, name=None):  # (B, 1, vocab) → (B, 1)
-            if name == 'program' and not sample_programs:
-                return fixed_program
-            logits = logits[:, -1, :].float()
-            if name == 'program' and prog_mask is not None:
-                logits = logits + prog_mask
-            if guided:
-                logits = logits[Bo:] + cfg_scale * (logits[:Bo] - logits[Bo:])
-            p_eos = None
-            if name == 'pitch' and specials and eos_t1 and step_i[0] >= min_new:
-                p_eos = F.softmax(logits, dim=-1)[:, [EOS_PITCH]]  # the model's own chance of ending here
-            logits = logits / (program_temperature if name == 'program' and program_temperature else temperature)
-            if name == 'pitch' and specials:
-                logits[:, BOS_PITCH] = -float('Inf')
-                if step_i[0] < min_new:
-                    logits[:, EOS_PITCH] = -float('Inf')
-            if name == 'delta_time' and (dt_bias != 0.0 or target is not None):
-                logits = logits + bias * dt_shape
-            if top_k is not None:
-                v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
-                logits[logits < v[:, [-1]]] = -float('Inf')
-            probs = F.softmax(logits, dim=-1)
-            if top_p is not None:
-                sorted_p, order = torch.sort(probs, dim=-1, descending=True)
-                drop = sorted_p.cumsum(-1) - sorted_p > top_p  # mass before this value already reaches top_p
-                probs = probs.scatter(-1, order, sorted_p.masked_fill(drop, 0.0))
-            if p_eos is not None:
-                probs[:, EOS_PITCH] = 0.0
-                probs = probs / probs.sum(-1, keepdim=True).clamp(min=1e-12) * (1 - p_eos)
-                probs[:, EOS_PITCH] = p_eos.squeeze(-1)
-            nxt = torch.multinomial(probs, num_samples=1)
-            return torch.cat([nxt, nxt]) if guided else nxt
-
-        dtype = next(self.parameters()).dtype
-        if device.type == 'cuda' and torch.is_autocast_enabled():
-            dtype = torch.get_autocast_gpu_dtype()  # fp32 master weights under autocast: a bf16 cache is enough
-        C = self.config.n_embd
-        # a sequence that fits the context never refills the cache, so it only needs prompt + new slots (less memory,
-        # and the one-note step attends over fewer slots)
-        cache = KVCache(self.config.n_layer, B, self.config.n_head, min(L, total), C // self.config.n_head, device,
-                        dtype)
-
-        def prefill(n):
-            """Refill the cache from the window ending at note n; returns (last hidden state, cache fill)."""
-            if n <= L:
-                window = [o[:, :n] for o in out]
-            else:
-                recent = L - slide - anchor
-                window = [torch.cat([o[:, :anchor], o[:, n - recent:n]], dim=1) for o in out]
-            w = window[0].size(1)
-            if w == 1:
-                cache.pos.fill_(0)  # a 1-note window goes through the single-step path at slot 0
-            prog = None
-            if prog_out is not None:
-                prog = prog_out[:, :n] if n <= L else torch.cat([prog_out[:, :anchor],
-                                                                 prog_out[:, n - (L - slide - anchor):n]], dim=1)
-            return self._encode(*window, style=style, program=prog, cache=cache, cond=cond)[:, [-1], :], w
-
-        # the one-note step: static inputs -> static output, optionally captured as a CUDA graph
-        step_in = [torch.zeros(B, 1, dtype=torch.long, device=device) for _ in range(4)]
-        step_prog = torch.zeros(B, 1, dtype=torch.long, device=device) if n_prog else None  # the new note's instrument
-        step_style = style  # constant during generation, so the graph can read it directly
-        graph = None
-        if cuda_graph and device.type == 'cuda':
-            if str(device) not in _SIDE_STREAMS:
-                _SIDE_STREAMS[str(device)] = torch.cuda.Stream(device)
-            stream = _SIDE_STREAMS[str(device)]
-            stream.wait_stream(torch.cuda.current_stream())
-            with torch.cuda.stream(stream):  # warm-up outside the graph (allocator, kernel selection)
-                for _ in range(2):
-                    self._encode(*step_in, style=step_style, program=step_prog, cache=cache, cond=cond)
-            torch.cuda.current_stream().wait_stream(stream)
-            graph = torch.cuda.CUDAGraph()
-            with torch.cuda.graph(graph):
-                step_out = self._encode(*step_in, style=step_style, program=step_prog, cache=cache, cond=cond)
-            # the warm-up and capture wrote junk into slot 0; prefill below overwrites every slot it uses
-
-        def step(new, pos, prog=None):
-            for buf, t in zip(step_in, new):
-                buf.copy_(t)
-            if step_prog is not None:
-                step_prog.copy_(prog)
-            cache.pos.fill_(pos)
-            if graph is not None:
-                graph.replay()
-                return step_out
-            return self._encode(*step_in, style=step_style, program=step_prog, cache=cache, cond=cond)
-
-        h, filled = prefill(n0)
-        for i in range(max_new_tokens):
-            if self.config.cascade_heads:
-                nxt = self.cascade.sample(h, sample)
-            else:
-                nxt = {name: sample(lg, name) for name, lg in self._head_logits(h).items()}
-            new = [nxt[name] for name in STREAM_ORDER]
-            n = n0 + i
-            for o, t in zip(out, new):
-                o[:, n:n + 1] = t
-            if prog_out is not None:
-                prog_out[:, n:n + 1] = nxt['program'] if 'program' in nxt else fixed_program
-            n += 1
-            if target is not None:
-                # per-row integral controller on log density, bias kept in [-2, 6]; stays on the GPU
-                w = min(n, 64)
-                secs = out[3][:, n - w:n].sum(dim=1, keepdim=True).float() * dt_seconds
-                nps = torch.where(secs > 0, w / secs.clamp(min=1e-6), torch.full_like(secs, 1e3))
-                bias.add_(0.05 * torch.log(nps.clamp(min=1e-3) / target)).clamp_(-2.0, 6.0)
-            step_i[0] = i + 1
-            if progress is not None:
-                progress(i + 1)
-            if i == max_new_tokens - 1:
-                break
-            if filled < L:
-                h = step(new, filled, None if prog_out is None else prog_out[:, n - 1:n])
-                filled += 1
-            else:
-                h, filled = prefill(n)
-
-        result = tuple(o[:Bo] for o in out)
-        if return_programs:
-            result += (prog_out[:Bo] if prog_out is not None else torch.zeros_like(result[0]),)
-        return result

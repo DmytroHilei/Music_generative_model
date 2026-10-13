@@ -27,6 +27,32 @@ def load_styles(path='data/styles.json'):
     return json.loads(Path(path).read_text())
 
 
+def density_level(notes_per_s, n_density=16):
+    """Notes per second -> level 1..n_density-1 (two per octave from 0.5 to 64 notes/s; 0 = none)."""
+    nps = torch.as_tensor(notes_per_s, dtype=torch.float32)
+    return (1 + (2 * torch.log2(nps.clamp(min=1e-3)) + 2).floor().clamp(0, n_density - 2)).long()
+
+
+def window_conditions(pitch, delta_time, program, n_programs, n_density, drop_p=0.0, dt_seconds=0.02):
+    """Conditioning of whole windows (B, T): instrument multi-hot (B, n_programs) and density level (B,), from the
+    notes themselves (BOS/EOS rows ignored). drop_p: per row, both conditions are replaced by 'none' (zeros / 0)."""
+    real = pitch < BOS_PITCH
+    inst = torch.zeros(pitch.size(0), n_programs, device=pitch.device)
+    if program is not None:
+        inst.scatter_add_(1, program.masked_fill(~real, 0), real.float()).clamp_(max=1.0)
+    else:
+        inst[:, 0] = 1.0  # piano-only data
+    n = real.sum(1).float()
+    secs = (delta_time * real).sum(1).float() * dt_seconds
+    density = density_level(n / secs.clamp(min=0.5), n_density).to(pitch.device) if n_density else \
+        torch.zeros(pitch.size(0), dtype=torch.long, device=pitch.device)
+    if drop_p > 0:
+        keep = torch.rand(pitch.size(0), device=pitch.device) >= drop_p
+        inst = inst * keep[:, None]
+        density = density * keep
+    return inst, density
+
+
 class MaestroDataset(Dataset):
     """
     Dataset of MIDI files listed in one or more CSVs (columns: split, midi_filename).

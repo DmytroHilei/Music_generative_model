@@ -13,11 +13,15 @@ style.
 train.py              training (nanoGPT-style configs: python train.py config/<run>.py --key=value)
 generate.py           sampling: MIDI + MP3, prompts from files or validation sets
 musicar/              core package
-  model.py            the transformer, embeddings, cascade heads, KV-cache generation
-  optim.py            Muon + AdamW
-  data_loader.py      tokenization, memory-mapped token stores, the training dataset
+  model.py            the architecture: transformer, embeddings, cascade heads, KV cache
+  sampling.py         generation: KV-cache decoding, CUDA graph, density / instrument / EOS controls
+  optim.py            AdamW, AdamW8bit, Muon
+  fp8.py              torchao float8 training of the transformer blocks
+  memory.py           selective activation checkpointing, spilling saved tensors to RAM
+  rejected.py         archive of tested-and-rejected architecture options (MoE, future heads, ...)
+  data_loader.py      tokenization, memory-mapped token stores, the training dataset, window conditions
   midi_io.py          tokens -> MIDI, MIDI -> MP3
-  checkpoint.py       checkpoint path resolution
+  checkpoint.py       checkpoint path resolution, loading into a grown model
   configurator.py     command-line / config-file overrides for train.py
   jobstatus.py        progress files for the dashboard
   eval/               evaluations used during training and by the eval/ scripts

@@ -33,14 +33,14 @@ import numpy as np
 import pretty_midi
 import torch
 
-from musicar.data_loader import DRUM_PROGRAM
+from musicar.data_loader import BOS_PITCH, DRUM_PROGRAM, EOS_PITCH, window_conditions
 from musicar.eval.sample_eval import row_metrics
 from musicar.eval.structure_eval import load_model
 from musicar.eval.sample_eval import consistency_metrics
 from musicar.eval.style_eval import (CLIP, SETTINGS, STYLES, TRACK, WEIGHTS, consistency_distance, consistency_scales,
                                      csv_set, row_distance, style_scales, style_set)
 from musicar.midi_io import render_mp3, tokens_to_midi
-from musicar.model import BOS_PITCH, EOS_PITCH, window_conditions
+from musicar.sampling import generate
 
 SOUNDFONT = '/usr/share/sounds/sf2/FluidR3_GM.sf2'
 STORE = 'data/cache/gigamidi_heldout_validation'
@@ -136,11 +136,11 @@ def main():
             target = (real.sum(1) / ((streams[3] * real).sum(1) * 0.02).clamp(min=0.5)).tolist()
         torch.manual_seed(args.seed)
         with torch.no_grad():
-            res = model.generate(*streams, max_new_tokens=args.new_notes, temperature=st['temperature'],
-                                 top_p=st['top_p'], dt_bias=st['dt_bias'], program=None, programs=prog,
-                                 return_programs=True, cond=cond, cuda_graph=False,
-                                 program_temperature=st.get('instrument_temperature'), min_new=min_new,
-                                 target_nps=target)
+            res = generate(model, *streams, max_new_tokens=args.new_notes, temperature=st['temperature'],
+                           top_p=st['top_p'], dt_bias=st['dt_bias'], program=None, programs=prog,
+                           return_programs=True, cond=cond, cuda_graph=False,
+                           program_temperature=st.get('instrument_temperature'), min_new=min_new,
+                           target_nps=target)
         print(f"\n{group}: settings of {style}: T {st['temperature']}, top-p {st['top_p']}, instrument T "
               f"{st.get('instrument_temperature')}, dt bias {st['dt_bias']}, cond {st['cond']}, min new "
               f"{min_new}, density {args.density}, target nps {args.target_nps}", flush=True)

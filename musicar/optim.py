@@ -100,6 +100,24 @@ class CombinedOptimizer:
             opt.load_state_dict(s)
 
 
+def build_adamw(model, weight_decay, learning_rate, betas, device_type):
+    """AdamW (fused on CUDA). Weight decay on the 2D tensors (matmul weights, embeddings); none on biases, norms and
+    the cascade's condition embeddings (they must stay at the scale of h)."""
+    import inspect
+    decay, nodecay = [], []
+    for n, p in model.named_parameters():
+        if not p.requires_grad:
+            continue
+        (decay if p.dim() >= 2 and 'cond_emb' not in n else nodecay).append(p)
+    print(f"num decayed parameter tensors: {len(decay)}, with {sum(p.numel() for p in decay):,} parameters")
+    print(f"num non-decayed parameter tensors: {len(nodecay)}, with {sum(p.numel() for p in nodecay):,} parameters")
+    fused = 'fused' in inspect.signature(torch.optim.AdamW).parameters and device_type == 'cuda'
+    print(f"using fused AdamW: {fused}")
+    return torch.optim.AdamW([{'params': decay, 'weight_decay': weight_decay},
+                              {'params': nodecay, 'weight_decay': 0.0}],
+                             lr=learning_rate, betas=betas, **(dict(fused=True) if fused else {}))
+
+
 def build_muon_optimizer(model, weight_decay, learning_rate, betas, device_type, momentum=0.95, style_lr_mult=1.0,
                          momentum_dtype=None, compile_ns=False):
     """Muon for the 2D matrices inside the transformer blocks, AdamW for embeddings, heads, norms.
@@ -115,7 +133,7 @@ def build_muon_optimizer(model, weight_decay, learning_rate, betas, device_type,
             muon_params.append(p)
         elif n.startswith('transformer.style.'):
             style_params.append(p)
-        elif p.dim() >= 2 and not (model.config.cascade_residual and 'cond_emb' in n):
+        elif p.dim() >= 2 and 'cond_emb' not in n:
             adam_decay.append(p)
         else:
             adam_nodecay.append(p)
@@ -136,8 +154,8 @@ def build_muon_optimizer(model, weight_decay, learning_rate, betas, device_type,
 
 def build_adamw8bit(model, weight_decay, learning_rate, betas, style_lr_mult=1.0):
     """torchao AdamW with 8-bit (block-quantized) moments for every trainable parameter: ~2 bytes of state per
-    parameter instead of 8, so a full fine-tune of the 450M fits in 8 GB. Groups as in GPT.configure_optimizers (no
-    weight decay on 1D tensors and the v2 cascade's cond_emb), plus the style table in its own group (lr x
+    parameter instead of 8, so a full fine-tune of the 450M fits in 8 GB. Groups as in build_adamw (no
+    weight decay on 1D tensors and the cascade's cond_emb), plus the style table in its own group (lr x
     style_lr_mult, no weight decay) as in build_muon_optimizer."""
     from torchao.optim import AdamW8bit
     decay, nodecay, style = [], [], []
@@ -146,7 +164,7 @@ def build_adamw8bit(model, weight_decay, learning_rate, betas, style_lr_mult=1.0
             continue
         if n.startswith('transformer.style.'):
             style.append(p)
-        elif p.dim() >= 2 and not (model.config.cascade_residual and 'cond_emb' in n):
+        elif p.dim() >= 2 and 'cond_emb' not in n:
             decay.append(p)
         else:
             nodecay.append(p)

@@ -34,7 +34,9 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from musicar.model import BOS_PITCH, DRUM_PROGRAM, GPT, MusicConfig, window_conditions
+from musicar.data_loader import BOS_PITCH, DRUM_PROGRAM, window_conditions
+from musicar.model import GPT, MusicConfig
+from musicar.sampling import generate
 from musicar.eval.sample_eval import DIST_WEIGHTS, SD_FLOOR, STORE, distance, row_metrics
 
 KINDS = ('rock_pop', 'orchestral', 'piano_keys', 'electronic', 'acoustic')
@@ -123,9 +125,9 @@ def run_config(model, c, rows, new_notes, seed, batch=16):
             none_i, none_d = torch.zeros_like(inst), torch.zeros_like(dens)
             cond = {'none': (none_i, none_d), 'band': (inst, none_d), 'band_dens': (inst, dens)}[c['cond']]
         torch.manual_seed(seed)
-        res = model.generate(*streams, max_new_tokens=new_notes, temperature=c['temperature'], top_p=c['top_p'],
-                             dt_bias=c['dt_bias'], program=None, programs=prog, return_programs=True, cond=cond,
-                             program_temperature=c['instrument_temperature'])
+        res = generate(model, *streams, max_new_tokens=new_notes, temperature=c['temperature'], top_p=c['top_p'],
+                       dt_bias=c['dt_bias'], program=None, programs=prog, return_programs=True, cond=cond,
+                       program_temperature=c['instrument_temperature'])
         n0 = streams[0].size(1)
         for r, row in enumerate(chunk):
             m = row_metrics(res[0][r, n0:].cpu(), res[3][r, n0:].cpu(), res[4][r, n0:].cpu(), set(row[2].tolist()))

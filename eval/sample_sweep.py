@@ -23,6 +23,7 @@ import torch
 from musicar.checkpoint import resolve_checkpoint
 from musicar.jobstatus import JobStatus
 from musicar.model import GPT, MusicConfig
+from musicar.sampling import generate
 
 DT_SECONDS = 0.02
 
@@ -92,10 +93,10 @@ def main():
             progress = lambda n, base=done, name=name, pi=pi: job.update(
                 base + n, f'prompt {pi + 1}/{len(picks)}: {name}')
             with torch.no_grad():
-                out = model.generate(*x, max_new_tokens=args.new_notes, temperature=c['T'], top_k=c['top_k'],
-                                     anchor=c['anchor'], dt_bias=c['dt_bias'], progress=progress,
-                                     target_nps=prompt_nps if c['density'] == 'prompt' else c['density'],
-                                     dt_seconds=DT_SECONDS)
+                out = generate(model, *x, max_new_tokens=args.new_notes, temperature=c['T'], top_k=c['top_k'],
+                               anchor=c['anchor'], dt_bias=c['dt_bias'], progress=progress,
+                               target_nps=prompt_nps if c['density'] == 'prompt' else c['density'],
+                               dt_seconds=DT_SECONDS)
             done += args.new_notes
             gen = torch.stack([o[0, args.prompt_notes:] for o in out], 1).cpu().numpy()
             rows.setdefault(name, []).append(stats(gen, real[:, 0]))

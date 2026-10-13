@@ -26,7 +26,11 @@ import torch
 from torch.utils.data import DataLoader, Subset
 from tqdm import tqdm
 
-from musicar.model import MusicConfig, GPT, STREAM_ORDER, convert_fp8, refresh_fp8_weights, spill_to_cpu, window_conditions
+from musicar.checkpoint import load_expanded
+from musicar.data_loader import window_conditions
+from musicar.fp8 import convert_fp8, refresh_fp8_weights
+from musicar.memory import spill_to_cpu
+from musicar.model import MusicConfig, GPT, STREAM_ORDER
 from musicar.data_loader import MaestroDataset
 
 # -----------------------------------------------------------------------------
@@ -89,14 +93,6 @@ delta_time_size = 512  # max_delta_bin + 1
 dropout = 0.3
 bias = False
 label_smoothing = 0.1
-cascade_heads = True
-cascade_residual = True
-pitch_head_blocks = 1
-pitch_head_mult = 1
-moe_experts = 0
-moe_top_k = 2
-moe_hidden_frac = 0.5
-moe_aux_weight = 0.01
 n_styles = 0              # set from style_map
 pos_emb = 'learned'       # 'learned' (absolute table, old checkpoints) | 'rope' (rotary; a finetune may switch to it
                           # and then also raise block_size above the checkpoint's). A 'learned' finetune may raise
@@ -114,8 +110,6 @@ act_ckpt_save = ''        # selective checkpointing: op outputs the checkpointed
 muon_bf16 = False         # Muon momentum buffer in bf16 (half the Muon optimizer state)
 pack_short = False        # train only: short files fill their window with more short files (BOS..EOS each), no padding
 min_notes = 64            # with pad_short / pack_short: shorter files are still dropped
-future_weight = 0.0       # > 0: auxiliary future-prediction heads (pitch classes / density / register 0-2-4-8 s ahead)
-future_horizons = '0-2,2-4,4-8'
 n_programs = 0            # multi-instrument: 129 = GM programs + drums (needs a programs.u8 store or reads piano as 0)
 
 # wandb logging
@@ -235,13 +229,10 @@ iter_num = 0
 best_val_loss = float('inf')
 wandb_run_id = None
 arch_keys = ['n_layer', 'n_head', 'n_embd', 'block_size', 'bias', 'pitch_size', 'velocity_size',
-             'duration_size', 'delta_time_size', 'cascade_heads', 'cascade_residual',
-             'pitch_head_blocks', 'pitch_head_mult', 'moe_experts', 'moe_top_k', 'moe_hidden_frac', 'moe_aux_weight',
-             'n_styles', 'n_programs', 'pos_emb', 'rope_base', 'future_weight', 'future_horizons',
+             'duration_size', 'delta_time_size', 'n_styles', 'n_programs', 'pos_emb', 'rope_base',
              'norm', 'mlp', 'qk_norm', 'cond_inst', 'n_density']
 # what checkpoints that predate a key actually used
-legacy_defaults = {'cascade_heads': False, 'cascade_residual': False, 'n_styles': 0, 'n_programs': 0,
-                   'pos_emb': 'learned', 'rope_base': 10000.0, 'future_weight': 0.0, 'future_horizons': '0-2,2-4,4-8',
+legacy_defaults = {'n_styles': 0, 'n_programs': 0, 'pos_emb': 'learned', 'rope_base': 10000.0,
                    'norm': 'layernorm', 'mlp': 'gelu', 'qk_norm': False, 'cond_inst': False, 'n_density': 0}
 model_args = {k: globals()[k] for k in arch_keys}
 checkpoint = None
@@ -259,8 +250,6 @@ if init_from in ('resume', 'finetune'):
             model_args[k] = wanted  # grow: BOS/EOS rows, a style table, the instrument attribute
         if init_from == 'finetune' and k == 'pos_emb' and wanted == 'rope':
             model_args[k] = wanted  # switch to RoPE: the position table is dropped (not function-preserving)
-        if init_from == 'finetune' and k in ('future_weight', 'future_horizons'):
-            model_args[k] = wanted  # a training-time choice: the heads are added or dropped per run
     if init_from == 'finetune' and model_args['pos_emb'] == 'rope':
         model_args['block_size'] = block_size  # nothing in a RoPE model depends on the context length
     elif init_from == 'finetune' and block_size > model_args['block_size']:
@@ -277,7 +266,7 @@ if checkpoint is not None:
         if k.startswith(unwanted_prefix):
             state_dict[k[len(unwanted_prefix):]] = state_dict.pop(k)
     if init_from == 'finetune':
-        grown = model.load_expanded(state_dict)
+        grown = load_expanded(model, state_dict)
         if grown:
             print(f"finetune: grown / new parameters (fresh init): {', '.join(grown)}")
     else:
@@ -341,7 +330,8 @@ elif optimizer_name == 'adamw8bit':
     from musicar.optim import build_adamw8bit
     optimizer = build_adamw8bit(model, weight_decay, learning_rate, (beta1, beta2), style_lr_mult=style_lr_mult)
 else:
-    optimizer = model.configure_optimizers(weight_decay, learning_rate, (beta1, beta2), device_type)
+    from musicar.optim import build_adamw
+    optimizer = build_adamw(model, weight_decay, learning_rate, (beta1, beta2), device_type)
 if init_from == 'resume':
     optimizer.load_state_dict(checkpoint['optimizer'])
 checkpoint = None  # free up memory
@@ -550,7 +540,6 @@ for iter_num in pbar:
         tqdm.write(f"step {iter_num}: train loss {train.get('loss', float('nan')):.4f}, "
                    f"val loss {val['loss']:.4f} | {val_name} CE {val['ce/total']:.3f} ({heads})"
                    + (f" | {val2_name} CE {val2['ce/total']:.3f}" if val2 else "")
-                   + (f" | future pc CE {val['ce/future_pc']:.3f}" if 'ce/future_pc' in val else "")
                    # instrument head last, so status.py's STEP pattern still matches the line
                    + (f" | prog CE {val['ce/program']:.3f}" if 'ce/program' in val else "")
                    + "".join(f" | {name} CE {e['ce/total']:.3f}" for name, e in extra.items()))

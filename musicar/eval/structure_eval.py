@@ -34,11 +34,12 @@ import numpy as np
 import pandas as pd
 import torch
 
-from musicar.data_loader import load_styles, tokenize_midi
+from musicar.data_loader import BOS_PITCH, EOS_PITCH, load_styles, tokenize_midi
 from musicar.checkpoint import resolve_checkpoint
 from musicar.midi_io import tokens_to_midi
 from musicar.jobstatus import JobStatus
-from musicar.model import BOS_PITCH, EOS_PITCH, GPT, MusicConfig
+from musicar.model import GPT, MusicConfig
+from musicar.sampling import generate
 
 DT = 0.02
 MAJOR = np.array([6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88])
@@ -179,9 +180,9 @@ def sample(model, cfg, args, style, device, job, base):
         seed = [torch.full((B, 1), v, dtype=torch.long, device=device) for v in (0, 0, 10, 0)]
     torch.manual_seed(args.seed)
     with torch.no_grad():
-        out = model.generate(*seed, max_new_tokens=args.max_new, temperature=args.temperature,
-                             top_p=args.top_p, cfg_scale=args.cfg, dt_bias=args.dt_bias, eos_t1=args.eos_t1, style=style, min_new=args.min_notes, cuda_graph=False,
-                             progress=lambda n: job.update(base + n * B))
+        out = generate(model, *seed, max_new_tokens=args.max_new, temperature=args.temperature,
+                       top_p=args.top_p, cfg_scale=args.cfg, dt_bias=args.dt_bias, eos_t1=args.eos_t1, style=style, min_new=args.min_notes, cuda_graph=False,
+                       progress=lambda n: job.update(base + n * B))
     pieces = []
     for r in range(B):
         rows = np.stack([o[r, 1:].cpu().numpy() for o in out], 1)
