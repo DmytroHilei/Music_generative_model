@@ -796,9 +796,12 @@ class GPT(nn.Module):
             for name in self.head_names:
                 lg = logits[name].view(-1, logits[name].size(-1))
                 t = tgt[name].reshape(-1)
-                loss = loss + F.cross_entropy(lg, t, ignore_index=-1, label_smoothing=ls)
+                # mean over the unmasked targets, 0 (not NaN = 0/0) when there are none, e.g. the duration head
+                # of a drums-only window; no data-dependent branch, so no sync / graph break under compile
+                n_valid = (t != -1).sum().clamp(min=1)
+                loss = loss + F.cross_entropy(lg, t, ignore_index=-1, label_smoothing=ls, reduction='sum') / n_valid
                 with torch.no_grad():
-                    parts[name] = F.cross_entropy(lg.float(), t, ignore_index=-1)
+                    parts[name] = F.cross_entropy(lg.float(), t, ignore_index=-1, reduction='sum') / n_valid
             if self.config.future_weight:
                 # the window's notes 0..T: the first input note, then the targets (-1 = padding)
                 seq = lambda first, t: torch.cat([first[:, :1], t.clamp(min=0)], 1)
