@@ -200,6 +200,14 @@ def evaluate(model, prompts, new_notes=1000, temperature=0.9, seed=1234, device=
         model.train(was_training)  # also after a failure: training must continue in train mode
 
 
+
+def format_line(step, rows, secs, res):
+    """One log line per evaluation."""
+    return f"samples @{step} ({rows} rows, {secs:.0f} s): " + " | ".join(
+        f"{mode}: instr {m['instruments']:.1f} oob {m['out_of_band']:.0%} nps {m['notes_per_s']:.0f} "
+        f"top {m['top_share']:.0%} runaway {m['runaway']:.0%} takeover {m['takeover']:.0%}"
+        for mode, m in res.items() if m)
+
 def _sample_modes(model, cfg, streams, programs, tokens, modes, new_notes, temperature, seed, device):
     out = {}
     for mode, cond in modes.items():

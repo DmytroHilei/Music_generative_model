@@ -13,7 +13,7 @@ import pandas as pd
 import pretty_midi
 import torch
 import torch.nn.functional as F
-from torch.utils.data import Dataset
+from torch.utils.data import DataLoader, Dataset, Subset
 from tqdm import tqdm
 
 
@@ -550,3 +550,29 @@ def quantize_time(time_sec, time_resolution, max_bin):
 def quantize_velocity(velocity, velocity_bins):
     token = velocity * velocity_bins // 128
     return min(velocity_bins - 1, max(0, token))
+
+
+def collate_windows(batch, extra_names=()):
+    """Dataset items -> ((4 note streams, {name: tensor} of the optional inputs `extra_names`, in item order after the
+    4 streams, e.g. 'program', 'style'), the target streams)."""
+    xs, ys = zip(*batch)
+    x = [torch.stack([x[i] for x in xs]) for i in range(len(xs[0]))]
+    assert len(x) == 4 + len(extra_names), f"{len(x)} input streams, expected 4 + {list(extra_names)}"
+    return (tuple(x[:4]), dict(zip(extra_names, x[4:]))), tuple(torch.stack([y[i] for y in ys]) for i in range(len(ys[0])))
+
+
+def val_loader(sources, batch_size, max_batches, num_workers=0, extra_names=(), block_size=512, **dataset_kw):
+    """Fixed non-overlapping validation windows (eval_stride = block_size), evenly thinned to at most max_batches
+    batches: identical at every evaluation and in every run."""
+    ds = MaestroDataset(sources, split='validation', block_size=block_size, eval_stride=block_size, **dataset_kw)
+    max_windows = max_batches * batch_size
+    if len(ds) > max_windows:
+        step = len(ds) / max_windows
+        ds = Subset(ds, [int(i * step) for i in range(max_windows)])
+    return DataLoader(ds, batch_size=batch_size, shuffle=False, num_workers=num_workers,
+                      collate_fn=partial(collate_windows, extra_names=tuple(extra_names)))
+
+
+def source_name(sources):
+    """'store:data/cache/gigamidi_clean,data/finetune/x.csv' -> 'gigamidi_clean+x'"""
+    return '+'.join(os.path.splitext(os.path.basename(s.removeprefix('store:')))[0] for s in sources.split(',') if s)

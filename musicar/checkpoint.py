@@ -1,9 +1,18 @@
-"""Checkpoint paths and loading."""
+"""Checkpoint paths, model args, loading and saving."""
 
+import os
 from pathlib import Path
 
 import torch
 from torch.nn import functional as F
+
+# the MusicConfig fields a checkpoint stores as model_args
+ARCH_KEYS = ('n_layer', 'n_head', 'n_embd', 'block_size', 'bias', 'pitch_size', 'velocity_size', 'duration_size',
+             'delta_time_size', 'n_styles', 'n_programs', 'pos_emb', 'rope_base', 'norm', 'mlp', 'qk_norm', 'cond_inst',
+             'n_density')
+# what checkpoints that predate a key actually used
+LEGACY_DEFAULTS = {'n_styles': 0, 'n_programs': 0, 'pos_emb': 'learned', 'rope_base': 10000.0, 'norm': 'layernorm',
+                   'mlp': 'gelu', 'qk_norm': False, 'cond_inst': False, 'n_density': 0}
 
 
 def resolve_checkpoint(path):
@@ -48,3 +57,43 @@ def load_expanded(model, state_dict):
             changed.append(k)
     model.load_state_dict(state_dict, strict=False)
     return changed
+
+
+def merge_model_args(saved, wanted, finetune, block_size):
+    """Model args for a resume / finetune: the checkpoint's own (`saved`; LEGACY_DEFAULTS, then `wanted`, for keys it
+    predates). A finetune may change what load_expanded can map: grow pitch_size / n_styles / n_programs, switch to
+    RoPE, and set block_size (RoPE: any; learned positions: larger, the table is stretched)."""
+    args = {}
+    for k in ARCH_KEYS:
+        args[k] = saved.get(k, LEGACY_DEFAULTS.get(k, wanted[k]))
+        if finetune and k in ('pitch_size', 'n_styles', 'n_programs') and wanted[k] > args[k]:
+            args[k] = wanted[k]  # grow: BOS/EOS rows, a style table, the instrument attribute
+        if finetune and k == 'pos_emb' and wanted[k] == 'rope':
+            args[k] = 'rope'  # switch to RoPE: the position table is dropped (not function-preserving)
+    if finetune and args['pos_emb'] == 'rope':
+        args['block_size'] = block_size  # nothing in a RoPE model depends on the context length
+    elif finetune and block_size > args['block_size']:
+        args['block_size'] = block_size  # learned positions: the table is stretched (position interpolation)
+    return args
+
+
+def strip_compile_prefix(state_dict):
+    """Keys saved from a torch.compile'd model start with '_orig_mod.'; drop it (in place)."""
+    for k in list(state_dict):
+        if k.startswith('_orig_mod.'):
+            state_dict[k[len('_orig_mod.'):]] = state_dict.pop(k)
+    return state_dict
+
+
+def bf16_cpu_state(model):
+    """The weights as bf16 on the CPU. A bf16 copy on the GPU (~0.9 GB for the 450M) kept alive by the training
+    script's checkpoint dict caused an OOM in every step after the first best-checkpoint save on the 8 GB laptop
+    (ua_450_multi)."""
+    return {k: v.to('cpu', torch.bfloat16) if v.is_floating_point() else v.cpu() for k, v in model.state_dict().items()}
+
+
+def save_atomic(obj, path):
+    """torch.save to path.tmp, then rename: a crash mid-save keeps the old file."""
+    os.makedirs(os.path.dirname(path) or '.', exist_ok=True)
+    torch.save(obj, path + '.tmp')
+    os.replace(path + '.tmp', path)

@@ -8,6 +8,8 @@ orthogonalized update by 0.2 * sqrt(max(rows, cols)) so its RMS matches AdamW's:
 rate and decoupled weight decay as AdamW, and the existing LR schedule works unchanged.
 """
 
+import math
+
 import torch
 
 
@@ -174,3 +176,59 @@ def build_adamw8bit(model, weight_decay, learning_rate, betas, style_lr_mult=1.0
     print(f"AdamW8bit: {sum(p.numel() for g in groups for p in g['params']):,} params"
           + (f" | style table lr x{style_lr_mult:g}" if style else ""))
     return AdamW8bit(groups, lr=learning_rate, betas=betas)
+
+
+def build_optimizer(name, model, weight_decay, learning_rate, betas, device_type, style_lr_mult=1.0,
+                    muon_momentum=0.95, muon_bf16=False, compile_ns=False):
+    """name: 'adamw' | 'adamw8bit' | 'muon' (Muon for the transformer-block matrices, AdamW for the rest)."""
+    if name == 'muon':
+        return build_muon_optimizer(model, weight_decay, learning_rate, betas, device_type, momentum=muon_momentum,
+                                    style_lr_mult=style_lr_mult, compile_ns=compile_ns,
+                                    momentum_dtype=torch.bfloat16 if muon_bf16 else None)
+    if name == 'adamw8bit':
+        return build_adamw8bit(model, weight_decay, learning_rate, betas, style_lr_mult=style_lr_mult)
+    assert name == 'adamw', f"unknown optimizer {name!r}"
+    return build_adamw(model, weight_decay, learning_rate, betas, device_type)
+
+
+def freeze_params(model, prefixes):
+    """Keep the parameters whose names start with one of the comma-separated prefixes frozen (requires_grad False)."""
+    prefixes = tuple(x.strip() for x in prefixes.split(',') if x.strip())
+    frozen = [(n, p) for n, p in model.named_parameters() if n.startswith(prefixes)]
+    assert frozen, f"freeze={prefixes!r} matches no parameter"
+    for _, p in frozen:
+        p.requires_grad_(False)
+    print(f"frozen: {len(frozen)} tensors, {sum(p.numel() for _, p in frozen):,} "
+          f"params ({', '.join(sorted({n.rsplit('.', 1)[0] for n, _ in frozen}))})")
+
+
+def cooldown_start(lr_decay_iters, cooldown_frac):
+    """First iteration of the WSD cooldown."""
+    return lr_decay_iters - int(cooldown_frac * lr_decay_iters)
+
+
+def lr_at(it, schedule, learning_rate, min_lr, warmup_iters, lr_decay_iters, cooldown_frac):
+    """Linear warmup, then 'cosine' (to min_lr at lr_decay_iters, min_lr after) or 'wsd' (constant, then a 1 - sqrt
+    cooldown to min_lr over the last cooldown_frac of lr_decay_iters; Hägele et al. 2024)."""
+    if it < warmup_iters:
+        return learning_rate * (it + 1) / (warmup_iters + 1)
+    if schedule == 'wsd':
+        start = cooldown_start(lr_decay_iters, cooldown_frac)
+        if it < start:
+            return learning_rate
+        progress = min(1.0, (it - start) / max(1, lr_decay_iters - start))
+        return min_lr + (1 - math.sqrt(progress)) * (learning_rate - min_lr)
+    if it > lr_decay_iters:
+        return min_lr
+    decay_ratio = (it - warmup_iters) / (lr_decay_iters - warmup_iters)
+    coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio))
+    return min_lr + coeff * (learning_rate - min_lr)
+
+
+def set_lr(optimizer, lr):
+    """lr * each group's 'lr_mult'. torchao optimizers keep lr as a tensor (updated in place only)."""
+    for group in optimizer.param_groups:
+        if torch.is_tensor(group['lr']):
+            group['lr'].fill_(lr * group.get('lr_mult', 1.0))
+        else:
+            group['lr'] = lr * group.get('lr_mult', 1.0)

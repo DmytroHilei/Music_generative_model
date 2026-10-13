@@ -3,6 +3,11 @@
 import torch
 
 
+def fp8_supported(device_type):
+    """torchao float8 matmuls need an sm_89+ GPU."""
+    return device_type == 'cuda' and torch.cuda.get_device_capability() >= (8, 9)
+
+
 def convert_fp8(blocks, recipe='tensorwise', skip='', cache_weights=False):
     """torchao float8 training for the Linears in `blocks` (the transformer blocks). recipe: torchao recipe name
     ('tensorwise' | 'rowwise' | 'rowwise_with_gw_hp'); skip: comma-separated module-name suffixes that stay bf16

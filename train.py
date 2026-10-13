@@ -16,22 +16,25 @@ import os
 # fewer fragmentation OOMs: the caching allocator grows segments instead of carving fixed blocks (set before CUDA starts)
 os.environ.setdefault('PYTORCH_CUDA_ALLOC_CONF', 'expandable_segments:True')
 import time
-import math
 import random
 import signal
 import sys
 from contextlib import nullcontext
+from functools import partial
 
 import torch
-from torch.utils.data import DataLoader, Subset
+from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from musicar.checkpoint import load_expanded
-from musicar.data_loader import window_conditions
-from musicar.fp8 import convert_fp8, refresh_fp8_weights
+from musicar.checkpoint import (ARCH_KEYS, bf16_cpu_state, load_expanded, merge_model_args, save_atomic,
+                                strip_compile_prefix)
+from musicar.data_loader import (MaestroDataset, collate_windows, load_styles, source_name, val_loader,
+                                 window_conditions)
+from musicar.eval.val_loss import estimate_val_loss, summed_ce
+from musicar.fp8 import convert_fp8, fp8_supported, refresh_fp8_weights
 from musicar.memory import spill_to_cpu
 from musicar.model import MusicConfig, GPT, STREAM_ORDER
-from musicar.data_loader import MaestroDataset
+from musicar.optim import build_optimizer, cooldown_start, freeze_params, lr_at, set_lr
 
 # -----------------------------------------------------------------------------
 # I/O
@@ -40,7 +43,6 @@ eval_interval = 20
 eval_iters = 200          # max number of val batches per evaluation (fixed windows, same every time)
 style_eval_songs = 0      # > 0: at every evaluation generate from this many fixed songs per style (5 styles) and log
                           # per-style distances to the real continuations (style_eval.py: styles/<mode>/<style>)
-style_eval_graph = True   # CUDA-graph the one-note step of that sampling (much faster; False = eager)
 style_eval_csv = ''       # a multi-track CSV: style_eval_songs of its validation songs instead (style_eval.csv_set)
 style_eval_settings = 'track'  # sampling settings by name (style_eval.SETTINGS): 'track' (base) | 'ua_multi'
 style_eval_interval = 0   # > 0: generate only every this many iterations (and at the end), 0 = at every evaluation
@@ -128,8 +130,7 @@ weight_decay = 1e-1
 beta1 = 0.9
 beta2 = 0.95
 grad_clip = 1.0
-# learning rate decay settings
-decay_lr = True
+# learning rate schedule
 lr_schedule = 'cosine'    # 'cosine' | 'wsd' (warmup, constant, then 1-sqrt cooldown to min_lr over the last cooldown_frac)
 cooldown_frac = 0.2
 warmup_iters = 300
@@ -147,12 +148,10 @@ fp8_cache_weights = False # tensorwise: cast each weight to fp8 once per optimiz
 oom_retries = 2           # CUDA OOM in a step: 1st retry = free the cache and redo it; 2nd = redo it eager with the
                           # activations spilled to pinned RAM above oom_spill_frac of the GPU (slow, but it gets through)
 oom_spill_frac = 0.6
-sdpa_backend = ''         # '' = PyTorch default, or 'flash' | 'cudnn' | 'efficient'
 seed = 1337
 # -----------------------------------------------------------------------------
 config_keys = [k for k, v in globals().items() if not k.startswith('_') and isinstance(v, (int, float, bool, str))]
 exec(open('musicar/configurator.py').read())  # overrides from command line or config file
-from musicar.data_loader import load_styles
 styles = load_styles(style_map) if style_map else None
 if styles:
     n_styles = len(styles)
@@ -160,8 +159,15 @@ if special_tokens:
     pitch_size = max(pitch_size, 130)
 config = {k: globals()[k] for k in config_keys}  # logged to wandb and saved in checkpoints
 sys.stdout.reconfigure(line_buffering=True)  # eval lines reach a redirected log at once, not when an 8 KB buffer fills
-# -----------------------------------------------------------------------------
 
+
+def as_list(value, cast):
+    """The configurator turns '--x=1,2' into a tuple and a single value into a number; '' = None."""
+    items = [cast(v) for v in str(value).strip('()[] ').split(',') if v.strip()]
+    return items or None
+
+
+# -----------------------------------------------------------------------------
 print(f"Device: {device}")
 tokens_per_iter = gradient_accumulation_steps * batch_size * block_size
 print(f"tokens per iteration will be: {tokens_per_iter:,}")
@@ -174,97 +180,50 @@ device_type = 'cuda' if 'cuda' in device else 'cpu'
 ptdtype = {'float32': torch.float32, 'bfloat16': torch.bfloat16, 'float16': torch.float16}[dtype]
 ctx = nullcontext() if device_type == 'cpu' else torch.amp.autocast(device_type=device_type, dtype=ptdtype)
 
-
-def collate_fn(batch):
-    # X = (4 note streams, dict of the optional model inputs), Y = 4 streams (+ program)
-    xs, ys = zip(*batch)
-    x = [torch.stack([x[i] for x in xs]) for i in range(len(xs[0]))]
-    extra_names = (['program'] if n_programs else []) + (['style'] if styles else [])
-    assert len(x) == 4 + len(extra_names), f"{len(x)} input streams, expected 4 + {extra_names}"
-    return (tuple(x[:4]), dict(zip(extra_names, x[4:]))), tuple(torch.stack([y[i] for y in ys]) for i in range(len(ys[0])))
-
-
+# -----------------------------------------------------------------------------
+# data
+extra_names = (['program'] if n_programs else []) + (['style'] if styles else [])  # optional inputs, in item order
+data_kw = dict(root_dir=root_dir, cache_dir=cache_dir, special_tokens=special_tokens, styles=styles,
+               programs=n_programs > 0, pad_short=pad_short, min_notes=min_notes)
 # train: random windows (uniform over all note positions of all files), with augmentation
-train_dataset = MaestroDataset(csv_path, root_dir=root_dir, split='train', block_size=block_size,
-                               augment=True, cache_dir=cache_dir, special_tokens=special_tokens,
-                               styles=styles, style_dropout=style_dropout, boundary_frac=boundary_frac,
-                               aug_tempo=aug_tempo, aug_velocity=aug_velocity, programs=n_programs > 0,
-                               pad_short=pad_short, pack_short=pack_short, min_notes=min_notes,
-                               aug_stores=[int(a) for a in str(aug_stores).strip('()[] ').split(',') if a.strip()] if aug_stores else None,
-                               source_weights=[float(w) for w in str(source_weights).strip('()[] ').split(',') if w.strip()] if source_weights else None)
-
-
-def make_val_loader(sources):
-    # fixed non-overlapping windows, evenly thinned to at most eval_iters batches -> identical every eval / run
-    ds = MaestroDataset(sources, root_dir=root_dir, split='validation', block_size=block_size,
-                        cache_dir=cache_dir, eval_stride=block_size, special_tokens=special_tokens, styles=styles,
-                        programs=n_programs > 0, pad_short=pad_short, min_notes=min_notes)
-    max_val_windows = eval_iters * batch_size
-    if len(ds) > max_val_windows:
-        step = len(ds) / max_val_windows
-        ds = Subset(ds, [int(i * step) for i in range(max_val_windows)])
-    return DataLoader(ds, batch_size=batch_size, shuffle=False, collate_fn=collate_fn, num_workers=num_workers)
-
-
-def source_name(sources):
-    """'store:data/cache/gigamidi_clean,data/finetune/x.csv' -> 'gigamidi_clean+x'"""
-    return '+'.join(os.path.splitext(os.path.basename(s.removeprefix('store:')))[0] for s in sources.split(',') if s)
-
-
+train_dataset = MaestroDataset(csv_path, split='train', block_size=block_size, augment=True, **data_kw,
+                               style_dropout=style_dropout, boundary_frac=boundary_frac, aug_tempo=aug_tempo,
+                               aug_velocity=aug_velocity, pack_short=pack_short,
+                               aug_stores=as_list(aug_stores, int), source_weights=as_list(source_weights, float))
+train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=num_workers, drop_last=True,
+                          collate_fn=partial(collate_windows, extra_names=tuple(extra_names)),
+                          persistent_workers=num_workers > 0)
+make_val_loader = partial(val_loader, batch_size=batch_size, max_batches=eval_iters, num_workers=num_workers,
+                          extra_names=extra_names, block_size=block_size, **data_kw)
 val_name = val_name or source_name(val_csv_path or csv_path)
 val2_name = val2_name or (source_name(val2_csv_path) if val2_csv_path else '')
-val_loader = make_val_loader(val_csv_path or csv_path)
+val_loader_main = make_val_loader(val_csv_path or csv_path)
 val2_loader = make_val_loader(val2_csv_path) if val2_csv_path else None
 extra_loaders = {name: make_val_loader(src) for name, src in (e.split('=', 1) for e in val_extra.split(';') if e)}
 print(f"Validation: {val_name} (main, picks the best checkpoint)" + (f", {val2_name}" if val2_name else "")
       + "".join(f", {name}" for name in extra_loaders))
-val_dataset = val_loader.dataset
-
-train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, collate_fn=collate_fn,
-                          num_workers=num_workers, drop_last=True, persistent_workers=num_workers > 0)
 
 # -----------------------------------------------------------------------------
 # model
 iter_num = 0
 best_val_loss = float('inf')
 wandb_run_id = None
-arch_keys = ['n_layer', 'n_head', 'n_embd', 'block_size', 'bias', 'pitch_size', 'velocity_size',
-             'duration_size', 'delta_time_size', 'n_styles', 'n_programs', 'pos_emb', 'rope_base',
-             'norm', 'mlp', 'qk_norm', 'cond_inst', 'n_density']
-# what checkpoints that predate a key actually used
-legacy_defaults = {'n_styles': 0, 'n_programs': 0, 'pos_emb': 'learned', 'rope_base': 10000.0,
-                   'norm': 'layernorm', 'mlp': 'gelu', 'qk_norm': False, 'cond_inst': False, 'n_density': 0}
-model_args = {k: globals()[k] for k in arch_keys}
+model_args = {k: globals()[k] for k in ARCH_KEYS}
 checkpoint = None
-
 if init_from in ('resume', 'finetune'):
     ckpt_path = os.path.join(out_dir, 'ckpt.pt') if init_from == 'resume' else init_ckpt
     print(f"{init_from}: loading {ckpt_path}")
     # to CPU: the weights are copied into the model below, and a GPU copy would stay alive through `state_dict`
     # (~0.9 GB for the 450M bf16 base, the margin between fitting and OOM at micro 1 on the 8 GB laptop)
     checkpoint = torch.load(ckpt_path, map_location='cpu')
-    for k in arch_keys:
-        wanted = model_args[k]
-        model_args[k] = checkpoint['model_args'].get(k, legacy_defaults.get(k, model_args[k]))
-        if init_from == 'finetune' and k in ('pitch_size', 'n_styles', 'n_programs') and wanted > model_args[k]:
-            model_args[k] = wanted  # grow: BOS/EOS rows, a style table, the instrument attribute
-        if init_from == 'finetune' and k == 'pos_emb' and wanted == 'rope':
-            model_args[k] = wanted  # switch to RoPE: the position table is dropped (not function-preserving)
-    if init_from == 'finetune' and model_args['pos_emb'] == 'rope':
-        model_args['block_size'] = block_size  # nothing in a RoPE model depends on the context length
-    elif init_from == 'finetune' and block_size > model_args['block_size']:
-        model_args['block_size'] = block_size  # learned positions: the table is stretched (position interpolation)
+    model_args = merge_model_args(checkpoint['model_args'], model_args, init_from == 'finetune', block_size)
 else:
     print("Initializing a new model from scratch")
 
 model = GPT(MusicConfig(**model_args, dropout=dropout, label_smoothing=label_smoothing))
 
 if checkpoint is not None:
-    state_dict = checkpoint['model']
-    unwanted_prefix = '_orig_mod.'
-    for k in list(state_dict):
-        if k.startswith(unwanted_prefix):
-            state_dict[k[len(unwanted_prefix):]] = state_dict.pop(k)
+    state_dict = strip_compile_prefix(checkpoint['model'])
     if init_from == 'finetune':
         grown = load_expanded(model, state_dict)
         if grown:
@@ -297,7 +256,7 @@ model.act_ckpt = act_ckpt
 model.act_ckpt_save = act_ckpt_save
 
 # before the optimizer is built: fp8 conversion swaps the Linear modules
-if fp8 and not (device_type == 'cuda' and torch.cuda.get_device_capability() >= (8, 9)):
+if fp8 and not fp8_supported(device_type):
     print("fp8 needs an sm_89+ GPU, falling back to bf16")
     fp8 = False
 if fp8:
@@ -306,32 +265,12 @@ if fp8:
     refresh_fp8_weights(model)  # no-op without fp8_cache_weights
     if not compile:
         print("WARNING: fp8 without compile is about 2x SLOWER (unfused scaling kernels)")
-if sdpa_backend:
-    from torch.nn.attention import SDPBackend, sdpa_kernel
-    backend = {'flash': SDPBackend.FLASH_ATTENTION, 'cudnn': SDPBackend.CUDNN_ATTENTION,
-               'efficient': SDPBackend.EFFICIENT_ATTENTION}[sdpa_backend]
-    sdpa_kernel(backend).__enter__()  # for the whole process
 scaler = torch.amp.GradScaler(device_type, enabled=(dtype == 'float16'))
 if freeze:
-    prefixes = tuple(x.strip() for x in freeze.split(',') if x.strip())
-    frozen = [n for n, p in model.named_parameters() if n.startswith(prefixes)]
-    assert frozen, f"freeze={freeze!r} matches no parameter"
-    for n, p in model.named_parameters():
-        if n.startswith(prefixes):
-            p.requires_grad_(False)
-    print(f"frozen: {len(frozen)} tensors, {sum(p.numel() for n, p in model.named_parameters() if n in frozen):,} "
-          f"params ({', '.join(sorted({n.rsplit('.', 1)[0] for n in frozen}))})")
-if optimizer_name == 'muon':
-    from musicar.optim import build_muon_optimizer
-    optimizer = build_muon_optimizer(model, weight_decay, learning_rate, (beta1, beta2), device_type,
-                                     momentum=muon_momentum, style_lr_mult=style_lr_mult,
-                                     momentum_dtype=torch.bfloat16 if muon_bf16 else None, compile_ns=compile)
-elif optimizer_name == 'adamw8bit':
-    from musicar.optim import build_adamw8bit
-    optimizer = build_adamw8bit(model, weight_decay, learning_rate, (beta1, beta2), style_lr_mult=style_lr_mult)
-else:
-    from musicar.optim import build_adamw
-    optimizer = build_adamw(model, weight_decay, learning_rate, (beta1, beta2), device_type)
+    freeze_params(model, freeze)
+optimizer = build_optimizer(optimizer_name, model, weight_decay, learning_rate, (beta1, beta2), device_type,
+                            style_lr_mult=style_lr_mult, muon_momentum=muon_momentum, muon_bf16=muon_bf16,
+                            compile_ns=compile)
 if init_from == 'resume':
     optimizer.load_state_dict(checkpoint['optimizer'])
 checkpoint = None  # free up memory
@@ -346,73 +285,25 @@ def to_device(batch):
     return tuple(t.to(device, non_blocking=True) for t in batch)
 
 
-def to_device_x(X):
-    streams, extra = X
-    return to_device(streams), {k: v.to(device, non_blocking=True) for k, v in extra.items()}
-
-
-def add_conditions(X, drop_p):
-    """Window conditioning (cond_inst / n_density models), computed from the window's own notes."""
-    if not (cond_inst or n_density):
-        return X
-    streams, extra = X
-    cond = window_conditions(streams[0], streams[3], extra.get('program'), n_programs, n_density, drop_p=drop_p)
-    return streams, {**extra, 'cond': cond}
+def prepare(X, Y, cond_drop_p):
+    """A batch on the device; cond_inst / n_density models also get the window conditions of its own notes,
+    replaced by 'none' with probability cond_drop_p per window."""
+    streams, extra = to_device(X[0]), {k: v.to(device, non_blocking=True) for k, v in X[1].items()}
+    if cond_inst or n_density:
+        extra['cond'] = window_conditions(streams[0], streams[3], extra.get('program'), n_programs, n_density,
+                                          drop_p=cond_drop_p)
+    return (streams, extra), to_device(Y)
 
 
 def infinite_batches(loader):
     while True:
         for X, Y in loader:
-            yield add_conditions(to_device_x(X), cond_dropout), to_device(Y)
+            yield prepare(X, Y, cond_dropout)
 
 
-def summed_ce(metrics):
-    # ce/total = the 4 note attributes (comparable with the piano runs); ce/total_all also counts the instrument head
-    metrics['ce/total'] = sum(metrics[f'ce/{name}'] for name in STREAM_ORDER)
-    if 'ce/program' in metrics:
-        metrics['ce/total_all'] = metrics['ce/total'] + metrics['ce/program']
-
-
-@torch.no_grad()
-def estimate_val_loss(loader, conditioned=True):
-    """Returns dict: 'loss' (optimized loss, with label smoothing) and 'ce/<head>' (true CE, nats).
-    conditioned=False (conditioning models): every window gets 'none', i.e. the unconditional model."""
-    model.eval()
-    sums, n = {}, 0
-    for X, Y in loader:
-        (streams, extra), Y = add_conditions(to_device_x(X), 0.0 if conditioned else 1.0), to_device(Y)
-        with ctx:
-            parts, loss = model(*streams, **extra, targets=Y)
-        sums['loss'] = sums.get('loss', 0.0) + loss.item()
-        for name, v in parts.items():
-            sums[f'ce/{name}'] = sums.get(f'ce/{name}', 0.0) + v.item()
-        n += 1
-    model.train()
-    out = {k: v / n for k, v in sums.items()}
-    summed_ce(out)
-    return out
-
-
-cooldown_start = lr_decay_iters - int(cooldown_frac * lr_decay_iters)  # wsd only
-
-
-def get_lr(it):
-    # 1) linear warmup
-    if it < warmup_iters:
-        return learning_rate * (it + 1) / (warmup_iters + 1)
-    if lr_schedule == 'wsd':
-        # Hägele et al. 2024: constant LR, then a (1 - sqrt) cooldown; matches or beats cosine at equal compute
-        if it < cooldown_start:
-            return learning_rate
-        progress = min(1.0, (it - cooldown_start) / max(1, lr_decay_iters - cooldown_start))
-        return min_lr + (1 - math.sqrt(progress)) * (learning_rate - min_lr)
-    # 2) after decay, min learning rate
-    if it > lr_decay_iters:
-        return min_lr
-    # 3) cosine decay down to min learning rate
-    decay_ratio = (it - warmup_iters) / (lr_decay_iters - warmup_iters)
-    coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio))
-    return min_lr + coeff * (learning_rate - min_lr)
+def val_loss(loader, conditioned=True):
+    """conditioned=False (conditioning models): every window gets 'none', i.e. the unconditional model."""
+    return estimate_val_loss(model, (prepare(X, Y, 0.0 if conditioned else 1.0) for X, Y in loader), ctx)
 
 
 if wandb_log:
@@ -428,38 +319,46 @@ if wandb_log:
 else:
     wandb_run_id = None
 
-
-# the configurator turns --save_iters=25,50 into a tuple, a single value into an int
-save_iter_set = {int(x) for x in str(save_iters).strip('()').split(',') if x.strip()}
+save_iter_set = set(as_list(save_iters, int) or ())
+cooldown_iter = cooldown_start(lr_decay_iters, cooldown_frac)  # wsd only
 
 
 def save_resumable(it, name='ckpt.pt'):
-    """Full state to out_dir/<name>; `it` = the next iteration to run. tmp + rename, so a crash mid-save keeps the old file."""
-    os.makedirs(out_dir, exist_ok=True)
+    """Full state to out_dir/<name>; `it` = the next iteration to run."""
     path = os.path.join(out_dir, name)
-    torch.save({'model_args': model_args, 'iter_num': it, 'best_val_loss': best_val_loss, 'config': config,
-                'model': raw_model.state_dict(), 'optimizer': optimizer.state_dict(),
-                'wandb_run_id': wandb_run_id}, path + '.tmp')
-    os.replace(path + '.tmp', path)
+    save_atomic({'model_args': model_args, 'iter_num': it, 'best_val_loss': best_val_loss, 'config': config,
+                 'model': raw_model.state_dict(), 'optimizer': optimizer.state_dict(),
+                 'wandb_run_id': wandb_run_id}, path)
     tqdm.write(f"saved resumable checkpoint at iter {it} to {path}")
 
-def bf16_cpu_state():
-    """The weights as bf16 on the CPU. A bf16 copy on the GPU (~0.9 GB for the 450M) kept alive by the module-level
-    `ckpt` dict caused an OOM in every step after the first best-checkpoint save on the 8 GB laptop (ua_450_multi)."""
-    return {k: v.to('cpu', torch.bfloat16) if v.is_floating_point() else v.cpu()
-            for k, v in raw_model.state_dict().items()}
+
+def save_best(it):
+    """The best-val checkpoint: bf16 weights (model_bf16.pt) or the full state (ckpt.pt; best.pt when ckpt.pt is the
+    periodic resume state, so it isn't rolled back to an older iteration)."""
+    os.makedirs(out_dir, exist_ok=True)
+    ckpt = {'model_args': model_args, 'iter_num': it, 'best_val_loss': best_val_loss, 'config': config,
+            'wandb_run_id': wandb_run_id}
+    if checkpoint_format == 'bf16':
+        ckpt['model'] = bf16_cpu_state(raw_model)
+        name = 'model_bf16.pt'
+    else:
+        ckpt['model'] = raw_model.state_dict()
+        ckpt['optimizer'] = optimizer.state_dict()
+        name = 'best.pt' if ckpt_interval_min > 0 else 'ckpt.pt'
+    torch.save(ckpt, os.path.join(out_dir, name))
+    tqdm.write(f"saved checkpoint to {os.path.join(out_dir, name)}")
 
 
 n_params = sum(p.numel() for p in raw_model.parameters())
 n_train_notes = train_dataset.num_notes()
 print(f"Model parameters : {n_params:,} ({n_params / 1e6:.2f}M)")
 print(f"Train files      : {train_dataset.n_files:,}  ({n_train_notes:,} notes)")
-print(f"Val windows      : {len(val_dataset):,}  ({len(val_loader):,} batches)")
+print(f"Val windows      : {len(val_loader_main.dataset):,}  ({len(val_loader_main):,} batches)")
 print(f"Tokens per iter  : {tokens_per_iter:,}")
 print(f"Planned epochs   : {tokens_per_iter * (max_iters - iter_num) / n_train_notes:.1f} (notes seen / unique notes)")
 
 # -----------------------------------------------------------------------------
-# training loop
+# generation checks at evaluation time
 if sample_eval_rows and n_programs:
     from musicar.eval import sample_eval
     sample_prompts = sample_eval.fixed_prompts(sample_eval_rows)
@@ -468,6 +367,45 @@ if style_eval_songs and n_programs:
     style_songs = style_eval.csv_set(style_eval_csv, style_eval_songs) if style_eval_csv else \
         style_eval.style_set(style_eval_songs)
     print('Style eval: ' + ', '.join(f'{s} {len(v)}' for s, v in style_songs.items()) + ' songs')
+
+
+def run_style_eval(it):
+    """Per-style distances of generated continuations ({} when off or failed: a failure never stops the run)."""
+    if not (style_eval_songs and n_programs and device_type == 'cuda' and (
+            not style_eval_interval or it % style_eval_interval == 0 or it == max_iters - 1)):
+        return {}
+    t_s = time.time()
+    try:
+        res = style_eval.evaluate(raw_model, style_songs, settings=style_eval.SETTINGS[style_eval_settings],
+                                  chunk=style_eval_chunk)
+        tqdm.write(style_eval.format_line(it, sum(len(v) for v in style_songs.values()), time.time() - t_s, res))
+    except Exception as e:
+        res = {}
+        tqdm.write(f"styles @{it}: FAILED ({type(e).__name__}: {str(e)[:200]}), training continues")
+    # give training back the generation's memory (cuBLAS stream workspaces, freed cache blocks)
+    torch._C._cuda_clearCublasWorkspaces()
+    torch.cuda.empty_cache()
+    return res
+
+
+def run_sample_eval(it):
+    """Sample metrics on fixed multi-instrument prompts ({} when off or failed)."""
+    if not (sample_eval_rows and n_programs and device_type == 'cuda'):
+        return {}
+    t_s = time.time()
+    try:  # a failure here (e.g. OOM) must never stop the run: log it and train on
+        res = sample_eval.evaluate(raw_model, sample_prompts, sample_eval_notes)
+    except Exception as e:
+        optimizer.zero_grad(set_to_none=True)
+        torch.cuda.empty_cache()
+        tqdm.write(f"samples @{it}: FAILED ({type(e).__name__}: {str(e)[:200]}), training continues")
+        return {}
+    tqdm.write(sample_eval.format_line(it, sample_eval_rows, time.time() - t_s, res))
+    return res
+
+
+# -----------------------------------------------------------------------------
+# training loop
 batches = infinite_batches(train_loader)
 X, Y = next(batches)
 train_sums, train_n = {}, 0  # running train metrics since the last eval (with dropout + augmentation)
@@ -481,6 +419,21 @@ def request_stop(signum, frame):
     stop_signal.append(signum)
 
 
+def accumulate(X, Y, net):
+    """Forward + backward over gradient_accumulation_steps micro-batches; returns the next batch and the metrics."""
+    sums = {}
+    for micro_step in range(gradient_accumulation_steps):
+        with ctx:
+            parts, loss = net(*X[0], **X[1], targets=Y)
+        # kept as GPU tensors to avoid a CPU sync per micro step
+        sums['loss'] = sums.get('loss', 0.0) + loss.detach() / gradient_accumulation_steps
+        for name, v in parts.items():
+            sums[f'ce/{name}'] = sums.get(f'ce/{name}', 0.0) + v / gradient_accumulation_steps
+        X, Y = next(batches)
+        scaler.scale(loss / gradient_accumulation_steps).backward()
+    return X, Y, sums
+
+
 if ckpt_interval_min > 0:
     signal.signal(signal.SIGTERM, request_stop)
     signal.signal(signal.SIGINT, request_stop)
@@ -489,50 +442,17 @@ last_resumable = time.time()
 
 pbar = tqdm(range(iter_num, max_iters), desc="Training", initial=iter_num, total=max_iters)
 for iter_num in pbar:
-    lr = get_lr(iter_num) if decay_lr else learning_rate
-    for param_group in optimizer.param_groups:
-        if torch.is_tensor(param_group['lr']):  # torchao optimizers keep lr as a tensor (in place only)
-            param_group['lr'].fill_(lr * param_group.get('lr_mult', 1.0))
-        else:
-            param_group['lr'] = lr * param_group.get('lr_mult', 1.0)
+    lr = lr_at(iter_num, lr_schedule, learning_rate, min_lr, warmup_iters, lr_decay_iters, cooldown_frac)
+    set_lr(optimizer, lr)
 
     if iter_num % eval_interval == 0 or iter_num == max_iters - 1:
-        val = estimate_val_loss(val_loader)
-        val2 = estimate_val_loss(val2_loader) if val2_loader else {}
-        extra = {name: estimate_val_loss(loader) for name, loader in extra_loaders.items()}
+        val = val_loss(val_loader_main)
+        val2 = val_loss(val2_loader) if val2_loader else {}
+        extra = {name: val_loss(loader) for name, loader in extra_loaders.items()}
         if cond_inst or n_density:  # the main val set again with no conditions: the model's unconditional quality
-            extra['nocond'] = estimate_val_loss(val_loader, conditioned=False)
-        style_res = {}  # (not 'styles': that global is the style-conditioning list the data loader reads)
-        if style_eval_songs and n_programs and device_type == 'cuda' and (
-                not style_eval_interval or iter_num % style_eval_interval == 0 or iter_num == max_iters - 1):
-            t_s = time.time()
-            try:  # never stops the run (like the sample eval below)
-                style_res = style_eval.evaluate(raw_model, style_songs, cuda_graph=style_eval_graph,
-                                                settings=style_eval.SETTINGS[style_eval_settings],
-                                                chunk=style_eval_chunk)
-                tqdm.write(style_eval.format_line(iter_num, sum(len(v) for v in style_songs.values()),
-                                                  time.time() - t_s, style_res))
-            except Exception as e:
-                style_res = {}
-                torch.cuda.empty_cache()
-                tqdm.write(f"styles @{iter_num}: FAILED ({type(e).__name__}: {str(e)[:200]}), training continues")
-        if style_res:  # give training back the generation's memory (cuBLAS stream workspaces, freed cache blocks)
-            torch._C._cuda_clearCublasWorkspaces()
-            torch.cuda.empty_cache()
-        samples = {}
-        if sample_eval_rows and n_programs and device_type == 'cuda':
-            t_s = time.time()
-            try:  # a failure here (e.g. OOM) must never stop the run: log it and train on
-                samples = sample_eval.evaluate(raw_model, sample_prompts, sample_eval_notes)
-            except Exception as e:
-                samples = {}
-                optimizer.zero_grad(set_to_none=True)
-                torch.cuda.empty_cache()
-                tqdm.write(f"samples @{iter_num}: FAILED ({type(e).__name__}: {str(e)[:200]}), training continues")
-            tqdm.write(f"samples @{iter_num} ({sample_eval_rows} rows, {time.time() - t_s:.0f} s): " + " | ".join(
-                f"{mode}: instr {m['instruments']:.1f} oob {m['out_of_band']:.0%} nps {m['notes_per_s']:.0f} "
-                f"top {m['top_share']:.0%} runaway {m['runaway']:.0%} takeover {m['takeover']:.0%}"
-                for mode, m in samples.items() if m)) if samples else None
+            extra['nocond'] = val_loss(val_loader_main, conditioned=False)
+        style_res = run_style_eval(iter_num)
+        samples = run_sample_eval(iter_num)
         train = {k: (v / train_n).item() for k, v in train_sums.items()} if train_n else {}
         if train:
             summed_ce(train)
@@ -556,48 +476,21 @@ for iter_num in pbar:
         if val['loss'] < best_val_loss or always_save_checkpoint:
             best_val_loss = val['loss']
             if iter_num > 0:
-                os.makedirs(out_dir, exist_ok=True)
-                ckpt = {'model_args': model_args, 'iter_num': iter_num, 'best_val_loss': best_val_loss,
-                        'config': config, 'wandb_run_id': wandb_run_id}
-                if checkpoint_format == 'bf16':
-                    ckpt['model'] = bf16_cpu_state()
-                    name = 'model_bf16.pt'
-                else:
-                    ckpt['model'] = raw_model.state_dict()
-                    ckpt['optimizer'] = optimizer.state_dict()
-                    name = 'ckpt.pt'
-                if name == 'ckpt.pt' and ckpt_interval_min > 0:
-                    name = 'best.pt'  # ckpt.pt is the periodic resume state, don't roll it back to an older iter
-                torch.save(ckpt, os.path.join(out_dir, name))
-                del ckpt
-                tqdm.write(f"saved checkpoint to {os.path.join(out_dir, name)}")
+                save_best(iter_num)
     if iter_num in save_iter_set:
         os.makedirs(out_dir, exist_ok=True)
         torch.save({'model_args': model_args, 'iter_num': iter_num, 'config': config,
-                    'model': bf16_cpu_state()},
+                    'model': bf16_cpu_state(raw_model)},
                    os.path.join(out_dir, f'model_bf16_it{iter_num}.pt'))
         tqdm.write(f"saved weights of iter {iter_num} to {out_dir}/model_bf16_it{iter_num}.pt")
     if iter_num == 0 and eval_only:
         break
-    if save_pre_cooldown and lr_schedule == 'wsd' and decay_lr and iter_num == cooldown_start and iter_num > 0:
+    if save_pre_cooldown and lr_schedule == 'wsd' and iter_num == cooldown_iter and iter_num > 0:
         # the weights + optimizer after the last constant-LR step; continue from it with init_from='resume' after
         # copying it to <new out_dir>/ckpt.pt (data, max_iters and lr_decay_iters come from the new config)
         save_resumable(iter_num, 'pre_cooldown.pt')
 
-    # forward backward update, with gradient accumulation
-    def accumulate(X, Y, net):
-        sums = {}
-        for micro_step in range(gradient_accumulation_steps):
-            with ctx:
-                parts, loss = net(*X[0], **X[1], targets=Y)
-            # kept as GPU tensors to avoid a CPU sync per micro step
-            sums['loss'] = sums.get('loss', 0.0) + loss.detach() / gradient_accumulation_steps
-            for name, v in parts.items():
-                sums[f'ce/{name}'] = sums.get(f'ce/{name}', 0.0) + v / gradient_accumulation_steps
-            X, Y = next(batches)
-            scaler.scale(loss / gradient_accumulation_steps).backward()
-        return X, Y, sums
-
+    # forward backward update, with gradient accumulation; a CUDA OOM retries the step (see oom_retries)
     for attempt in range(oom_retries + 1):
         spill = attempt >= 2 and device_type == 'cuda'
         oom = False
