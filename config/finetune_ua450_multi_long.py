@@ -10,3 +10,11 @@ max_iters = 2250
 lr_decay_iters = 2250
 save_iters = '750,1350,2249'       # = 1,500 / 2,100 / 3,000 it in all
 save_pre_cooldown = True           # out_dir/pre_cooldown.pt at it 1,800 (2,550 in all), to extend again
+
+# generation check during the run (style_eval.csv_set): 24 evenly spaced multi v1 val songs, 128-note prompt + 1,000
+# notes with the listening pick (style_eval.UA_MULTI = c8), distance to each song's real continuation (styles/band/*)
+style_eval_songs = 24
+style_eval_csv = 'data/finetune/ukrainian_multi_v1.csv'
+style_eval_settings = 'ua_multi'
+style_eval_interval = 250
+style_eval_chunk = 8

@@ -37,6 +37,10 @@ eval_iters = 200          # max number of val batches per evaluation (fixed wind
 style_eval_songs = 0      # > 0: at every evaluation generate from this many fixed songs per style (5 styles) and log
                           # per-style distances to the real continuations (style_eval.py: styles/<mode>/<style>)
 style_eval_graph = True   # CUDA-graph the one-note step of that sampling (much faster; False = eager)
+style_eval_csv = ''       # a multi-track CSV: style_eval_songs of its validation songs instead (style_eval.csv_set)
+style_eval_settings = 'track'  # sampling settings by name (style_eval.SETTINGS): 'track' (base) | 'ua_multi'
+style_eval_interval = 0   # > 0: generate only every this many iterations (and at the end), 0 = at every evaluation
+style_eval_chunk = 20     # songs generated at once (KV cache ~0.26 GB per song for the 450M at 2,048 notes)
 sample_eval_rows = 0      # > 0: at every evaluation also generate from this many fixed multi-instrument prompts and
 sample_eval_notes = 1000  # log sample metrics (sample_eval.py: instruments, out-of-band, density, takeover, ...)
 eval_only = False
@@ -471,7 +475,8 @@ if sample_eval_rows and n_programs:
     sample_prompts = sample_eval.fixed_prompts(sample_eval_rows)
 if style_eval_songs and n_programs:
     from musicar.eval import style_eval
-    style_songs = style_eval.style_set(style_eval_songs)
+    style_songs = style_eval.csv_set(style_eval_csv, style_eval_songs) if style_eval_csv else \
+        style_eval.style_set(style_eval_songs)
     print('Style eval: ' + ', '.join(f'{s} {len(v)}' for s, v in style_songs.items()) + ' songs')
 batches = infinite_batches(train_loader)
 X, Y = next(batches)
@@ -508,10 +513,13 @@ for iter_num in pbar:
         if cond_inst or n_density:  # the main val set again with no conditions: the model's unconditional quality
             extra['nocond'] = estimate_val_loss(val_loader, conditioned=False)
         style_res = {}  # (not 'styles': that global is the style-conditioning list the data loader reads)
-        if style_eval_songs and n_programs and device_type == 'cuda':
+        if style_eval_songs and n_programs and device_type == 'cuda' and (
+                not style_eval_interval or iter_num % style_eval_interval == 0 or iter_num == max_iters - 1):
             t_s = time.time()
             try:  # never stops the run (like the sample eval below)
-                style_res = style_eval.evaluate(raw_model, style_songs, cuda_graph=style_eval_graph)
+                style_res = style_eval.evaluate(raw_model, style_songs, cuda_graph=style_eval_graph,
+                                                settings=style_eval.SETTINGS[style_eval_settings],
+                                                chunk=style_eval_chunk)
                 tqdm.write(style_eval.format_line(iter_num, sum(len(v) for v in style_songs.values()),
                                                   time.time() - t_s, style_res))
             except Exception as e:

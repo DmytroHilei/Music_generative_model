@@ -19,6 +19,9 @@ t = log for notes_per_s and instruments (ratios, not differences: 300 vs 20 note
 s_style,k = the spread of t(metric k) over the real continuations of THAT style only (rock density is never compared
 with folk density), floored; every term capped at 3 spreads so one runaway sample can't swamp a style.
 style score = mean d_row over the style's songs; overall = mean over styles (each style counts the same).
+
+csv_set: the same for validation songs of a multi-track CSV (one group, spreads over its songs), e.g. the Ukrainian
+set during a fine-tune (train.py style_eval_csv). Settings: TRACK (base model) or UA_MULTI (SETTINGS by name).
 """
 
 import argparse
@@ -40,6 +43,10 @@ FLOOR = {'takeover': 0.22, 'runaway': 0.22, 'top_share': 0.05, 'out_of_band': 0.
 CLIP = 3.0
 # the fixed tracking setting (the best of the 60-song stage of the 2026-10-04 search: top-p 0.9 was in every good one)
 TRACK = dict(temperature=0.9, top_p=0.9, dt_bias=0.1)
+# the Ukrainian multi-track fine-tune (2026-10-13 grid on ua_450_multi, c8; the user's pick after listening): the
+# instrument set of the prompt, denser than TRACK (dt 0.1 made the fine-tune ~0.6x the real notes/s), no early end
+UA_MULTI = dict(temperature=1.0, top_p=0.9, dt_bias=-0.1, cond='band', min_new=1000)
+SETTINGS = {'track': TRACK, 'ua_multi': UA_MULTI}
 
 
 def family(program):
@@ -105,6 +112,46 @@ def style_set(per_style=16, prompt_notes=128, new_notes=1000, store=STORE, candi
     return {s: v[skip:] for s, v in out.items()}
 
 
+def csv_set(csv, n_songs=24, prompt_notes=128, new_notes=1000, match=''):
+    """{csv name: [songs]} in style_set's format (+ store, name): n_songs validation songs of a multi-track CSV, evenly
+    spaced over the ones long enough; match = comma-separated parts of 'artist - title' (any case) instead."""
+    import re
+    from pathlib import Path
+    import pandas as pd
+    from musicar.data_loader import MaestroDataset
+    ds = MaestroDataset(csv, root_dir='.', split='validation', block_size=prompt_notes + new_notes,
+                        programs=True, eval_stride=prompt_notes + new_notes)
+    store = ds.store_dirs[0]
+    df = pd.read_csv(csv)
+    df = df[df['split'] == 'validation'].reset_index(drop=True)
+    df = df[[Path(p).exists() for p in df['midi_filename']]].reset_index(drop=True)  # = the store's file order
+    off = np.load(f'{store}/offsets.npy')
+    assert len(off) - 1 == len(df), f'{store}: {len(off) - 1} files vs {len(df)} CSV rows'
+    tokens = np.memmap(f'{store}/tokens.u16', dtype=np.uint16, mode='r', shape=(int(off[-1]), 4))
+    programs = np.memmap(f'{store}/programs.u8', dtype=np.uint8, mode='r', shape=(int(off[-1]),))
+    long_enough = [i for i in range(len(df)) if off[i + 1] - off[i] >= prompt_notes + new_notes]
+    picked = [long_enough[int(k)] for k in np.linspace(0, len(long_enough) - 1, min(n_songs, len(long_enough)))]
+    if match:
+        full = (df['artist'] + ' - ' + df['title']).str.lower()
+        picked = []
+        for pat in [m.strip().lower() for m in match.split(',') if m.strip()]:
+            hits = [i for i in range(len(df)) if pat in full[i]]
+            found = ', '.join(full[i] + ('' if i in long_enough else ' (too short)') for i in hits)
+            print(f"--match '{pat}': {found or 'no song'}")
+            picked += [i for i in hits if i in long_enough and i not in picked]
+    songs = []
+    for i in picked:
+        a = off[i]
+        t = np.asarray(tokens[a:a + prompt_notes + new_notes], dtype=np.int64)
+        p = np.asarray(programs[a:a + prompt_notes + new_notes], dtype=np.int64)
+        real = row_metrics(torch.from_numpy(t[prompt_notes:, 0]), torch.from_numpy(t[prompt_notes:, 3]),
+                           torch.from_numpy(p[prompt_notes:]), set(p[:prompt_notes].tolist()))
+        name = re.sub(r'[^\w-]+', '_', f"{df['artist'][i]} - {df['title'][i]}").strip('_')[:60]
+        songs.append(dict(prompt=t[:prompt_notes], prompt_prog=p[:prompt_notes], real=real, file=i, store=str(store),
+                          name=name))
+    return {Path(csv).stem: songs}
+
+
 def tf(k, v):
     return math.log(max(v, 1e-3)) if k in LOG else v
 
@@ -122,8 +169,10 @@ def row_distance(m, real, scale):
 @torch.no_grad()
 def evaluate(model, sset, new_notes=1000, seed=1234, chunk=20, cuda_graph=True, device='cuda', settings=TRACK,
              modes=None):
-    """{mode: {'all': mean over styles, <style>: mean row distance, 'nps': .., 'top': .., ...}} for modes 'none' and
-    (cond_inst models) 'band'. The model is put back into its previous train/eval mode even after an error."""
+    """{mode: {'all': mean over groups, <group>: mean row distance, 'notes_per_s': .., ...}} for modes 'none' and
+    (cond_inst models) 'band', or only settings['cond'] when the settings name one. sset = style_set's styles or
+    csv_set's group. settings['min_new']: no end-of-piece before that many notes. The model is put back into its
+    previous train/eval mode even after an error."""
     was_training = model.training
     model.eval()
     try:
@@ -134,12 +183,13 @@ def evaluate(model, sset, new_notes=1000, seed=1234, chunk=20, cuda_graph=True, 
 
 def _evaluate(model, sset, new_notes, seed, chunk, cuda_graph, device, settings, modes=None):
     cfg = model.config
-    rows = [(s, song) for s in STYLES for song in sset[s]]
-    scales = {s: style_scales(sset[s]) for s in STYLES if sset[s]}
-    modes = modes or (['none'] + (['band'] if cfg.cond_inst else []))
+    groups = [s for s in sset if sset[s]]
+    rows = [(s, song) for s in groups for song in sset[s]]
+    scales = {s: style_scales(sset[s]) for s in groups}
+    modes = modes or ([settings['cond']] if 'cond' in settings else ['none'] + (['band'] if cfg.cond_inst else []))
     out = {}
     for mode in modes:
-        per_style, metrics = {s: [] for s in STYLES}, []
+        per_style, metrics = {s: [] for s in groups}, []
         for c in range(0, len(rows), chunk):
             part = rows[c:c + chunk]
             tok = torch.stack([torch.from_numpy(song['prompt']) for _, song in part]).to(device)
@@ -160,7 +210,8 @@ def _evaluate(model, sset, new_notes, seed, chunk, cuda_graph, device, settings,
                 res = model.generate(*streams, max_new_tokens=new_notes, temperature=settings['temperature'],
                                      top_p=settings['top_p'], dt_bias=settings['dt_bias'], program=None,
                                      programs=prog, return_programs=True, cond=cond, cuda_graph=cuda_graph,
-                                     program_temperature=settings.get('instrument_temperature'))
+                                     program_temperature=settings.get('instrument_temperature'),
+                                     min_new=settings.get('min_new', 0))
             n0 = streams[0].size(1)
             for r, (style, song) in enumerate(part):
                 m = row_metrics(res[0][r, n0:].cpu(), res[3][r, n0:].cpu(), res[4][r, n0:].cpu(),
@@ -171,18 +222,22 @@ def _evaluate(model, sset, new_notes, seed, chunk, cuda_graph, device, settings,
                 per_style[style].append(row_distance(m, song['real'], scales[style]))
                 metrics.append(m)
         res_mode = {s: float(np.mean(v)) for s, v in per_style.items() if v}
-        res_mode['all'] = float(np.mean([res_mode[s] for s in STYLES if s in res_mode]))
-        for k in ('notes_per_s', 'top_share', 'takeover', 'runaway', 'out_of_band', 'instruments'):
+        res_mode['all'] = float(np.mean([res_mode[s] for s in groups if s in res_mode]))
+        for k in ('notes_per_s', 'top_share', 'takeover', 'runaway', 'out_of_band', 'instruments', 'pc_entropy'):
             res_mode[k] = float(np.mean([m[k] for m in metrics])) if metrics else float('nan')
         out[mode] = res_mode
     return out
+
+
+METRICS = {'all', 'notes_per_s', 'top_share', 'takeover', 'runaway', 'out_of_band', 'instruments', 'pc_entropy'}
 
 
 def format_line(step, rows, secs, res):
     """One log line; cloud/status_tables.py parses it."""
     parts = []
     for mode, r in res.items():
-        parts.append(f"{mode}: P {r['all']:.2f} [" + ' '.join(f"{s} {r[s]:.2f}" for s in STYLES if s in r) +
+        groups = [s for s in r if s not in METRICS]
+        parts.append(f"{mode}: P {r['all']:.2f} [" + ' '.join(f"{s} {r[s]:.2f}" for s in groups) +
                      f"] nps {r['notes_per_s']:.0f} top {r['top_share']:.0%} takeover {r['takeover']:.0%}")
     return f"styles @{step} ({rows} rows, {secs:.0f} s): " + ' | '.join(parts)
 
