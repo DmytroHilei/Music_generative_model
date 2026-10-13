@@ -3,7 +3,7 @@ Convert a folder of MP3s to MIDI using piano_transcription_inference,
 then write a CSV compatible with NoteWindowDataset for fine-tuning.
 
 Usage:
-    python data/mp3_to_midi.py --input Skryabin --output Skryabin/midi
+    python legacy/mp3_to_midi.py --input Skryabin --output Skryabin/midi
 
 Install deps first:
     pip install piano_transcription_inference demucs

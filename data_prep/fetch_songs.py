@@ -1,5 +1,5 @@
 """
-Find and download studio songs of the artists in data/artists.txt from YouTube (audio only, mp3).
+Find and download studio songs of the artists in data/artists/songs.txt from YouTube (audio only, mp3).
 
 For each artist: YouTube search -> keep videos whose title looks like a song by that artist (not live / concert /
 interview / full album / cover), 1.5-8 min long -> dedupe by normalized song title -> download.
@@ -7,15 +7,15 @@ Results: <output>/<artist>/<title> [<id>].mp3 and <output>/songs.csv (artist, ti
 
 Private research use only: don't redistribute the audio.
 
-    .venv-audio/bin/python data/fetch_songs.py --per-artist 25 --dry-run     # only list what would be downloaded
-    .venv-audio/bin/python data/fetch_songs.py --per-artist 25
+    .venv-audio/bin/python data_prep/fetch_songs.py --per-artist 25 --dry-run     # only list what would be downloaded
+    .venv-audio/bin/python data_prep/fetch_songs.py --per-artist 25
 Then:
-    .venv-audio/bin/python data/audio_to_piano.py --input data/audio/<artist> --output data/finetune/<artist>
+    .venv-audio/bin/python data_prep/audio_to_piano.py --input data/audio/<artist> --output data/finetune/<artist>
 
 --mode covers: solo piano covers / tutorials of the same artists instead (real human arrangements, transcribed with
-data/transcribe_covers.py rather than reduced): the title must name the artist and a piano word, other instruments and
-vocal covers are skipped, and a song may come from up to --per-song different videos (different pianists).
-    .venv-audio/bin/python data/fetch_songs.py --mode covers --per-artist 60 --dry-run
+data_prep/transcribe_covers.py rather than reduced): the title must name the artist and a piano word, other instruments
+and vocal covers are skipped, and a song may come from up to --per-song different videos (different pianists).
+    .venv-audio/bin/python data_prep/fetch_songs.py --mode covers --per-artist 60 --dry-run
 
 --source soundcloud searches SoundCloud instead (same filters; a track whose title lacks the artist counts when the
 uploader is the artist). Songs already in songs.csv count towards --per-artist, so a second source only tops an
@@ -78,7 +78,7 @@ QUERY_TEMPLATES = {
 
 def parse_args():
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-    parser.add_argument('--artists', default='data/artists.txt')
+    parser.add_argument('--artists', default='data/artists/songs.txt')
     parser.add_argument('--output', default='data/audio')
     parser.add_argument('--per-artist', type=int, default=25, help='max songs per artist')
     parser.add_argument('--search-size', type=int, default=80, help='search results to scan per query')

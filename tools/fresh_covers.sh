@@ -1,6 +1,6 @@
 #!/bin/bash
 # New piano covers of validation-split songs -> covers val v5 (+VAL_SONGS songs) and a fresh covers test
-# (data/prepare_fresh_covers.py). Steps, in order:
+# (data_prep/prepare_fresh_covers.py). Steps, in order:
 #   tools/fresh_covers.sh fetch        # YouTube search + download, ~2 h (network only), log logs/fetch_fresh.log
 #   tools/fresh_covers.sh transcribe   # piano transcription on the GPU, ~27 s/song, log logs/transcribe_fresh.log
 #   tools/fresh_covers.sh split        # -> ukrainian_covers_v5.csv + ukrainian_covers_fresh_test.csv, prints the songs
@@ -12,18 +12,19 @@ OUT=data/covers_fresh
 F=data/finetune/fresh
 case "$1" in
 fetch)
-    [ -f $F/candidates.csv ] || .venv/bin/python data/prepare_fresh_covers.py candidates
-    .venv-audio/bin/python data/fetch_songs.py --mode covers --only-known-songs --ukrainian-only \
+    [ -f $F/candidates.csv ] || .venv/bin/python data_prep/prepare_fresh_covers.py candidates
+    .venv-audio/bin/python data_prep/fetch_songs.py --mode covers --only-known-songs --ukrainian-only \
         --songs-csv $F/candidates.csv --artists $F/artists.txt --output $OUT \
         --per-song 1 --per-artist 1000 --song-search-size 8 --search-sleep 15 --sleep 20 \
         --max-skips 3 --max-fails 5 --max-minutes "${MAX_MINUTES:-150}" \
         ${COOKIES:+--cookies-from-browser "$COOKIES"} 2>&1 | tee -a logs/fetch_fresh.log
     ;;
 transcribe)
-    .venv-audio/bin/python data/transcribe_covers.py --input $OUT --output $OUT 2>&1 | tee -a logs/transcribe_fresh.log
+    .venv-audio/bin/python data_prep/transcribe_covers.py --input $OUT --output $OUT 2>&1 \
+        | tee -a logs/transcribe_fresh.log
     ;;
 split)
-    .venv/bin/python data/prepare_fresh_covers.py split --val-songs "${VAL_SONGS:-8}"
+    .venv/bin/python data_prep/prepare_fresh_covers.py split --val-songs "${VAL_SONGS:-8}"
     ;;
 score)
     [ -n "$2" ] || { echo "usage: $0 score <P3 finalist checkpoint>"; exit 1; }

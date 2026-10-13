@@ -1,13 +1,14 @@
 """
-Solo piano covers (mp3 from data/fetch_songs.py --mode covers) -> MIDI with the Kong et al. piano transcription model
-(piano_transcription_inference, high-resolution onsets/offsets + pedal; checkpoint in ~/piano_transcription_inference_data).
+Solo piano covers (mp3 from data_prep/fetch_songs.py --mode covers) -> MIDI with the Kong et al. piano transcription
+model (piano_transcription_inference, high-resolution onsets/offsets + pedal; checkpoint in
+~/piano_transcription_inference_data).
 
-Unlike data/audio_to_piano.py there is no source separation or reduction: the audio already is a human piano
+Unlike data_prep/audio_to_piano.py there is no source separation or reduction: the audio already is a human piano
 arrangement, so the MIDI is used as is. Note lengths are key releases (pedal kept as CC64 only), the same convention
 as the MAESTRO tokens. Output mirrors the reductions: <output>/<artist>/midi/<audio stem>.mid, plus a stats line per
 file in <output>/transcribed.csv (notes, seconds, notes/s, pitch range) for filtering.
 
-    .venv-audio/bin/python data/transcribe_covers.py --input data/covers --output data/covers
+    .venv-audio/bin/python data_prep/transcribe_covers.py --input data/covers --output data/covers
 """
 
 import argparse

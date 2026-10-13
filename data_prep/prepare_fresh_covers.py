@@ -9,12 +9,12 @@ only when the artist's titles in the reduction/cover CSVs have Ukrainian-only le
 Russian-only ones. Some Russian titles still pass: split prints the chosen songs, and lines 'artist|title' in
 data/finetune/fresh/exclude.txt drop songs.
 
-    python data/prepare_fresh_covers.py candidates   # -> data/finetune/fresh/{candidates.csv, artists.txt}
-    .venv-audio/bin/python data/fetch_songs.py --mode covers --only-known-songs --ukrainian-only --per-song 1 \\
+    python data_prep/prepare_fresh_covers.py candidates   # -> data/finetune/fresh/{candidates.csv, artists.txt}
+    .venv-audio/bin/python data_prep/fetch_songs.py --mode covers --only-known-songs --ukrainian-only --per-song 1 \\
         --per-artist 1000 --songs-csv data/finetune/fresh/candidates.csv --artists data/finetune/fresh/artists.txt \\
         --output data/covers_fresh ...
-    .venv-audio/bin/python data/transcribe_covers.py --input data/covers_fresh --output data/covers_fresh
-    python data/prepare_fresh_covers.py split --val-songs 8
+    .venv-audio/bin/python data_prep/transcribe_covers.py --input data/covers_fresh --output data/covers_fresh
+    python data_prep/prepare_fresh_covers.py split --val-songs 8
         # -> data/finetune/ukrainian_covers_v5.csv (v4 + val-songs new val covers)
         #    data/finetune/ukrainian_covers_fresh_test.csv (the other new covers, split=validation)
 

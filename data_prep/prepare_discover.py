@@ -2,8 +2,8 @@
 Tokenize Discover MIDI straight from its .tar.gz into token stores, deduplicating against GigaMIDI and within itself
 in the same pass.
 
-    python data/prepare_discover.py --tar /data/discover/Discover-MIDI-Dataset-CC-BY-NC-SA.tar.gz --name discover
-    python data/prepare_discover.py --tar <partial .incomplete> --name discover_probe --allow-truncated  # probe
+    python data_prep/prepare_discover.py --tar /data/discover/Discover-MIDI-Dataset-CC-BY-NC-SA.tar.gz --name discover
+    python data_prep/prepare_discover.py --tar <partial .incomplete> --name discover_probe --allow-truncated  # probe
 
 Discover (projectlosangeles/Discover-MIDI-Dataset, CC-BY-NC-SA) is ./MIDIs/<x>/<y>/<md5>.mid with the md5 of the file
 bytes as its name, the same naming as GigaMIDI. Every file goes through three duplicate checks, the first copy wins:

@@ -1,7 +1,7 @@
 """
 Candidate Ukrainian artists for the piano-cover search, from Ukrainian Wikipedia categories, ranked by page views.
 
-    python data/artist_candidates.py --out data/artist_candidates.tsv
+    python data_prep/artist_candidates.py --out data/artists/candidates.tsv
 
 Sources (Wikipedia API, the intended route for automated access; ~1 request/s, retries, no personal data):
   categories: Українські рок-гурти, Українські попспівачки, Українські попспіваки, Українські рок-співаки
@@ -9,7 +9,7 @@ Sources (Wikipedia API, the intended route for automated access; ~1 request/s, r
   Russian-language acts ('російськомовн' in a category) for review instead of dropping them
   page views (Wikimedia REST API, last 12 months) to rank by how much people look the artist up
 Output (TSV): name, views_12m, source category, status (keep / excluded: <reason> / flag: <reason>),
-already_used (in data/artists.txt or data/artists_covers_extra.txt). Review it before fetching anything.
+already_used (in data/artists/songs.txt or data/artists/covers_extra.txt). Review it before fetching anything.
 """
 
 import argparse
@@ -146,9 +146,9 @@ def clean_name(title):
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument('--out', default='data/artist_candidates.tsv')
+    p.add_argument('--out', default='data/artists/candidates.tsv')
     p.add_argument('--top', type=int, default=300, help='artists written to --list (by views)')
-    p.add_argument('--list', default='data/artists_covers_next.txt', help='fetch_songs.py artist file to write')
+    p.add_argument('--list', default='data/artists/covers_next.txt', help='fetch_songs.py artist file to write')
     args = p.parse_args()
     cached = {}  # views from an earlier run (the slow part)
     if Path(args.out).exists():
@@ -156,7 +156,7 @@ def main():
             cached = {r['wiki_title']: int(r['views_12m']) for r in csv.DictReader(f, delimiter='\t')
                       if int(r['views_12m']) > 0}
     used = set()
-    for f in ('data/artists.txt', 'data/artists_covers_extra.txt'):
+    for f in ('data/artists/songs.txt', 'data/artists/covers_extra.txt'):
         for line in Path(f).read_text(encoding='utf-8').splitlines():
             if line.strip() and not line.startswith('#'):
                 used |= {a.strip().lower() for a in line.split('|')}
@@ -191,7 +191,8 @@ def main():
     names = stage_names([r['wiki_title'] for r in top])
     with open(args.list, 'w', encoding='utf-8') as f:
         f.write('# Piano-cover search, round 2 (2026-10-04): top Ukrainian pop-rock/rock/punk-rock + pop/estrada\n'
-                '# artists by uk.wikipedia views (data/artist_candidates.py), not in artists.txt / artists_covers_extra.txt.\n'
+                '# artists by uk.wikipedia views (data_prep/artist_candidates.py), not in data/artists/songs.txt /\n'
+                '# covers_extra.txt.\n'
                 '# Search name first (stage name from Wikidata), aliases after |. Review before fetching.\n')
         for r in top:
             alias = names.get(r['wiki_title']) or [r['name']]

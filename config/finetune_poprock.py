@@ -1,4 +1,4 @@
-# Stage B1: continued training of big-107M on Aria pop+rock (data/subset_aria.py) with BOS/EOS and style
+# Stage B1: continued training of big-107M on Aria pop+rock (data_prep/subset_aria.py) with BOS/EOS and style
 # conditioning (genre), 20% replay of all Aria. Grows the checkpoint: pitch vocab 128 -> 130, new style table (zero init).
 # Then stage B2 (config/finetune_ua_B.py) fine-tunes this on the Ukrainian reductions with artist styles.
 init_from = 'finetune'

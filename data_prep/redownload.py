@@ -8,8 +8,8 @@ deleted by the worker afterwards). songs.csv is never written. Waits while the d
 after --max-fails failed downloads in a row (a block, not a broken link). Without network (DNS down, e.g. after a
 suspend) it waits until the host resolves again and retries the song; that doesn't count as a failure.
 
-    .venv-audio/bin/python data/redownload.py --songs-csv /data/songs_round2/songs.csv --output /data/songs_round2 \
-        --source soundcloud
+    .venv-audio/bin/python data_prep/redownload.py --songs-csv /data/songs_round2/songs.csv \
+        --output /data/songs_round2 --source soundcloud
 """
 
 import argparse

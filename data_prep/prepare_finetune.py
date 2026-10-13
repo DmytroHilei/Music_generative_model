@@ -1,7 +1,7 @@
 """
 Builds the fine-tune CSV from the piano reductions in data/finetune/<artist>/midi/ (skryabin_test excluded).
 
-    python data/prepare_finetune.py            # -> data/finetune/ukrainian.csv
+    python data_prep/prepare_finetune.py            # -> data/finetune/ukrainian.csv
 
 - Song title: from data/audio/songs.csv via the YouTube id in the file name ("... [id].mid"), else from the file
   name (skryabin_local: "skryabin-kolorova-(meloua.com).mid"). Titles are transliterated (Cyrillic -> Latin) and
@@ -10,10 +10,10 @@ Builds the fine-tune CSV from the piano reductions in data/finetune/<artist>/mid
 - Split by song title (crc32 hash, --val-percent), so no song is in both train and validation.
 Columns: split, midi_filename (absolute), artist, title.
 
---source covers: the transcribed piano covers in data/covers/<artist>/midi/ (data/transcribe_covers.py), titles from
-data/covers/songs.csv. Several covers of one song (different pianists) are all kept; the split uses the same title hash,
+--source covers: the transcribed piano covers in data/covers/<artist>/midi/ (data_prep/transcribe_covers.py), titles
+from data/covers/songs.csv. Several covers of one song (different pianists) are all kept; the split uses the same title hash,
 so a song is validation for both sources or for neither.
-    python data/prepare_finetune.py --source covers --style cover --out data/finetune/ukrainian_covers.csv
+    python data_prep/prepare_finetune.py --source covers --style cover --out data/finetune/ukrainian_covers.csv
 
 --round2: also the round-2 folders (/data/finetune_round2 with titles from /data/songs_round2/songs.csv, or
 /data/covers_round2). Their ids can be SoundCloud's (numeric); a song filed under two artists (a duet) is kept once.
@@ -22,7 +22,7 @@ so a song is validation for both sources or for neither.
 drums, bass, guitar, vocals, piano, other as separate tracks). Same titles, dedupe and split hash as the reductions,
 so a song is validation in both or in neither. Writes a 'programs' column: the loader then keeps every track with
 its GM program (models with n_programs).
-    python data/prepare_finetune.py --source multi --round2 --out data/finetune/ukrainian_multi_v1.csv
+    python data_prep/prepare_finetune.py --source multi --round2 --out data/finetune/ukrainian_multi_v1.csv
 """
 
 import argparse

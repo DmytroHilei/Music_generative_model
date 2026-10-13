@@ -26,7 +26,8 @@ musicar/              core package
   jobstatus.py        progress files for the dashboard
   eval/               evaluations used during training and by the eval/ scripts
 config/               run configs
-data/                 dataset preparation, song download, audio -> piano reduction
+data/                 datasets, token stores and their metadata (see data/README.md)
+data_prep/            dataset preparation: downloads, tokenization into stores, audio -> MIDI
 eval/                 analysis scripts: seeded comparisons, sampling sweeps, settings search
 tools/                status dashboard, throughput benchmark, fine-tune sweep, bf16 export
 cloud/                rented-GPU pipeline (setup, preflight, launch, checkpoint sync)

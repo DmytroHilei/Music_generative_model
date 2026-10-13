@@ -6,12 +6,12 @@ Steps:
      instructions to get the MIDI zip file (the repo uses a form/request system).
   2. Run this script pointing at the downloaded zip:
 
-     python data/prepare_giantmidi.py --zip /path/to/midis.zip --output data/giantmidi
+     python data_prep/prepare_giantmidi.py --zip /path/to/midis.zip --output data/giantmidi
 
   3. Combine with MAESTRO:
 
-     python data/prepare_giantmidi.py --zip /path/to/midis.zip --output data/giantmidi \\
-         --combine data/maestro-v3.0.0.csv
+     python data_prep/prepare_giantmidi.py --zip /path/to/midis.zip --output data/giantmidi \\
+         --combine data/maestro-v3.0.0/maestro-v3.0.0.csv
 
   4. Update train.py:
        csv_path = 'data/combined.csv'
@@ -32,7 +32,7 @@ def parse_args():
     parser.add_argument("--output", type=str, default="data/giantmidi",
                         help="Directory to extract MIDI files into")
     parser.add_argument("--combine", type=str, default=None,
-                        help="Path to an existing CSV (e.g. data/maestro-v3.0.0.csv) "
+                        help="Path to an existing CSV (e.g. data/maestro-v3.0.0/maestro-v3.0.0.csv) "
                              "to merge with — writes data/combined.csv")
     parser.add_argument("--val-split", type=float, default=0.1,
                         help="Fraction of GiantMIDI files held out for validation")
@@ -69,7 +69,7 @@ def build_csv(midi_dir: Path, val_split: float, seed: int) -> list[dict]:
     for composer, files in by_composer.items():
         split = "validation" if composer in val_composers else "train"
         for p in files:
-            rows.append({"split": split, "midi_filename": str(p.resolve())})
+            rows.append({"split": split, "midi_filename": str(p)})  # relative to the repo root (root_dir='.')
     return rows
 
 
@@ -115,11 +115,9 @@ def main():
 
     if args.combine:
         maestro_rows = read_csv(args.combine)
-        maestro_root = Path(args.combine).parent.resolve()
+        maestro_root = Path(args.combine).parent  # MAESTRO's CSV lists paths relative to its own folder
         for row in maestro_rows:
-            p = Path(row["midi_filename"])
-            if not p.is_absolute():
-                row["midi_filename"] = str(maestro_root / p)
+            row["midi_filename"] = str(maestro_root / row["midi_filename"])
 
         combined = maestro_rows + giantmidi_rows
         random.shuffle(combined)

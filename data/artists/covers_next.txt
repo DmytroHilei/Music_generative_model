@@ -1,5 +1,5 @@
 # Piano-cover search, round 2 (2026-10-04): top Ukrainian pop-rock/rock/punk-rock + pop/estrada
-# artists by uk.wikipedia views (data/artist_candidates.py), not in artists.txt / artists_covers_extra.txt.
+# artists by uk.wikipedia views (data_prep/artist_candidates.py), not in artists.txt / artists_covers_extra.txt.
 # Search name first (stage name from Wikidata), aliases after |. Review before fetching.
 Олена Омаргалієва|Olena Omargaliyeva|Olena Kostyantynivna Omargaliyeva
 Лесик Сам|Lesyk

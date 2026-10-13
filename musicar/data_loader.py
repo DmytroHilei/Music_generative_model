@@ -103,7 +103,8 @@ class NoteWindowDataset(Dataset):
     ):
         """
         csv_path:    one or more sources separated by ',': a CSV (paths inside relative to root_dir or absolute),
-                     or 'store:<prefix>' = a prebuilt token store <prefix>_<split>/ (e.g. from data/prepare_aria.py).
+                     or 'store:<prefix>' = a prebuilt token store <prefix>_<split>/ (e.g. from
+                     data_prep/prepare_aria.py).
                      A CSV with a 'programs' column is multi-track: all tracks incl. drums are kept with their
                      programs (tokenize_tracks, as GigaMIDI), which needs programs=True; otherwise piano (tokenize_midi)
         eval_stride: if set, the dataset is deterministic (no randomness, no augmentation): use it for validation
@@ -131,7 +132,7 @@ class NoteWindowDataset(Dataset):
                      Attention is not masked at the joins: BOS marks a new piece. Files are sampled per note, short
                      and long alike. The window's style is its first file's. Validation (eval_stride) still pads
         programs:    multi-instrument: also return the instrument stream (x and y), from the store's programs.u8
-                     (data/prepare_gigamidi.py); stores without one are piano = program 0. Drum notes are never
+                     (data_prep/prepare_gigamidi.py); stores without one are piano = program 0. Drum notes are never
                      transposed and their duration is set to 0 in x and masked (-1) in y. False = piano-only: stores
                      with programs.u8 are refused, since their drum notes would be read as pitched notes
         """
@@ -315,7 +316,7 @@ class NoteWindowDataset(Dataset):
             self._tokens, self._programs = [], []
             for store in self.store_dirs:
                 has_programs = (store / "programs.u8").exists()
-                # multi-instrument stores (data/prepare_gigamidi.py) keep drums in the stream: not for the piano model
+                # multi-instrument stores (data_prep/prepare_gigamidi.py) keep drums: not for the piano model
                 assert self.programs or not has_programs, f"{store} has instrument programs: pass programs=True"
                 n = int(np.load(store / "offsets.npy")[-1])
                 self._tokens.append(np.memmap(store / "tokens.u16", dtype=np.uint16, mode="r", shape=(n, 4)))
@@ -489,7 +490,7 @@ def tokenize_midi(midi, velocity_bins=32, time_resolution=0.02, max_duration_bin
 def tokenize_tracks(midi, velocity_bins=32, time_resolution=0.02, max_duration_bin=511, max_delta_bin=511):
     """MIDI (path, bytes or file-like) -> ((n, 4) uint16 tokens, (n,) uint8 programs), all tracks incl. drums
     (program DRUM_PROGRAM), sorted by (onset, program, pitch); None if empty or broken. The multi-instrument stores
-    (data/prepare_gigamidi.py, prepare_discover.py) and multi-track CSVs are tokenized with it."""
+    (data_prep/prepare_gigamidi.py, prepare_discover.py) and multi-track CSVs are tokenized with it."""
     midi = _read_midi(midi)
     if midi is None:
         return None

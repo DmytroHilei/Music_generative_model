@@ -1,10 +1,10 @@
 """
 Write a copy of a GigaMIDI evaluation store without the files whose notes also occur in its train split.
 
-    python data/dedupe_val.py                     # data/cache/gigamidi_validation -> data/cache/gigamidi_clean_validation
-    python data/dedupe_val.py --split test --kind exact
+    python data_prep/dedupe_val.py          # data/cache/gigamidi_validation -> data/cache/gigamidi_clean_validation
+    python data_prep/dedupe_val.py --split test --kind exact
 
-Uses the per-file hashes that data/prepare_discover.py caches in data/gigamidi/<giga>_hashes.npz (built from the
+Uses the per-file hashes that data_prep/prepare_discover.py caches in data/gigamidi/<giga>_hashes.npz (built from the
 stores on its first run). --kind loose (default) drops a file when its sorted (onset, pitch) pairs match any train
 file (same notes, any instrument/velocity/duration), which includes every exact match. --split test also drops the
 files that occur in validation (checkpoints are picked on validation). Duplicates inside the evaluation split itself

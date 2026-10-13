@@ -1,8 +1,8 @@
 """
 Tokenize Aria-MIDI straight from the .tar.gz into token stores, without extracting 371k files to disk.
 
-    python data/prepare_aria.py --tar data/aria/aria-midi-v1-deduped-ext.tar.gz --name aria
-    python data/prepare_aria.py --tar ... --name aria_poprock --genres pop,rock     # fine-tune stage subset
+    python data_prep/prepare_aria.py --tar data/aria/aria-midi-v1-deduped-ext.tar.gz --name aria
+    python data_prep/prepare_aria.py --tar ... --name aria_poprock --genres pop,rock     # fine-tune stage subset
 
 Writes data/cache/<name>_train/ and data/cache/<name>_validation/ (same format NoteWindowDataset builds:
 tokens.u16 + offsets.npy + meta.json) and data/aria/<name>.csv with one row per MIDI segment:

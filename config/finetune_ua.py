@@ -1,5 +1,5 @@
 # Stage A: plain fine-tune of big-107M on the Ukrainian piano reductions (song-level split, deduped:
-# data/prepare_finetune.py), 20% replay of Aria so it doesn't forget. ~10 passes over the 452 train songs.
+# data_prep/prepare_finetune.py), 20% replay of Aria so it doesn't forget. ~10 passes over the 452 train songs.
 # Architecture comes from the checkpoint. Best checkpoint by Ukrainian val loss (early stopping).
 init_from = 'finetune'
 init_ckpt = 'checkpoints/big_107M/model_bf16.pt'

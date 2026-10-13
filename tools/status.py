@@ -234,12 +234,13 @@ DISC_BAR = re.compile(r'discover:\s+(\d+)%\|[^|]*\|\s*(\d+)/(\d+) \[([\d:]+)<([\
 
 
 def gigamidi_row(t):
-    """data/prepare_gigamidi.py: splits finished (from the progress file) and the one being tokenized (from its log)."""
+    """data_prep/prepare_gigamidi.py: splits finished (from the progress file) and the one being tokenized (from its
+    log)."""
     progress_path = ROOT / 'data/gigamidi/gigamidi_progress.json'
     if not progress_path.exists():
         return
     done = [split for split, st in json.loads(progress_path.read_text()).items() if st.get('done')]
-    is_running = running('data/prepare_gigamidi.py')
+    is_running = running('data_prep/prepare_gigamidi.py')
     text = tail_text(LOGS / 'prepare_gigamidi.log') or ''
     bars = GIGA_BAR.findall(text)
     stopped = 'STOP:' in text[-2000:]
@@ -260,12 +261,13 @@ def gigamidi_row(t):
 
 
 def discover_row(t):
-    """Discover MIDI: download (logs/download_discover.log) then data/prepare_discover.py (logs/prepare_discover.log)."""
+    """Discover MIDI: download (logs/download_discover.log) then data_prep/prepare_discover.py
+    (logs/prepare_discover.log)."""
     text = tail_text(LOGS / 'prepare_discover.log')
     if text is None:
         return
     tar = Path('/data/discover/Discover-MIDI-Dataset-CC-BY-NC-SA.tar.gz')
-    is_running = running('data/prepare_discover.py')
+    is_running = running('data_prep/prepare_discover.py')
     bars = DISC_BAR.findall(text)
     if 'prepare done' in text:
         done = re.findall(r'^(train|validation): ([\d,]+) files, ([\d,]+) notes', text, re.M)
@@ -323,7 +325,7 @@ def hf_upload_row(t):
 
 def query_templates():
     """fetch_songs.QUERY_TEMPLATES, read from the source (status.py's venv has no yt_dlp to import it with)."""
-    tree = ast.parse((ROOT / 'data/fetch_songs.py').read_text(encoding='utf-8'))
+    tree = ast.parse((ROOT / 'data_prep/fetch_songs.py').read_text(encoding='utf-8'))
     for node in tree.body:
         if isinstance(node, ast.Assign) and getattr(node.targets[0], 'id', '') == 'QUERY_TEMPLATES':
             return ast.literal_eval(node.value)
@@ -360,7 +362,7 @@ def fetch_info(output_dir, log_path):
     """A round-2 fetch_songs.py run writing to output_dir: its settings (from the command line), the current run's
     progress (the log part after the last '=====' line), the songs downloaded so far (songs.csv) and an ETA."""
     log = (tail_text(log_path, 30_000_000) or '')
-    procs = [l.split(None, 1) for l in subprocess.run(['pgrep', '-af', 'data/fetch_songs.py'], capture_output=True,
+    procs = [l.split(None, 1) for l in subprocess.run(['pgrep', '-af', 'data_prep/fetch_songs.py'], capture_output=True,
                                                       text=True).stdout.splitlines()
              if f'--output {output_dir}' in l and 'pgrep' not in l]
     info = {'running': bool(procs), 'pid': procs[0][0] if procs else None, 'paused': False, 'log': log}
@@ -430,7 +432,7 @@ def fetch_lines(info):
 
 
 def round2_artists():
-    return [l for l in (ROOT / 'data/artists_covers_next.txt').read_text(encoding='utf-8').splitlines()
+    return [l for l in (ROOT / 'data/artists/covers_next.txt').read_text(encoding='utf-8').splitlines()
             if l.strip() and not l.startswith('#')]
 
 
@@ -443,7 +445,7 @@ def run_state(info, busy, pending):
 
 
 def covers_round2_row(t):
-    """Piano covers of data/artists_covers_next.txt: download (fetch_covers2.log, appended re-runs), transcribed by
+    """Piano covers of data/artists/covers_next.txt: download (fetch_covers2.log, appended re-runs), transcribed by
     logs/run_gpu_worker_round2.sh."""
     if not (LOGS / 'fetch_covers2.log').exists():
         return
@@ -463,7 +465,7 @@ def covers_round2_row(t):
 
 
 def songs_round2_rows(t):
-    """Original songs of data/artists_covers_next.txt: download (fetch_songs2.log, appended re-runs) and piano
+    """Original songs of data/artists/covers_next.txt: download (fetch_songs2.log, appended re-runs) and piano
     reduction by logs/run_gpu_worker_round2.sh."""
     if not (LOGS / 'fetch_songs2.log').exists():
         return
@@ -519,7 +521,8 @@ def unreduced_mp3s(songs, red):
 
 
 def redownload_rows(t):
-    """data/redownload.py streams (lost mp3s fetched again by URL): one row per log, its run after the last '=====' line."""
+    """data_prep/redownload.py streams (lost mp3s fetched again by URL): one row per log, its run after the last
+    '=====' line."""
     for name, log_name in (('SoundCloud', 'redownload_sc.log'), ('YouTube', 'redownload_yt.log')):
         log = tail_text(LOGS / log_name, 30_000_000)
         sep = list(re.finditer(r'^===== (\d{4}-\d\d-\d\d \d\d:\d\d:\d\d): re-download of (\S+) \((\w+)\) =====$',
@@ -535,7 +538,7 @@ def redownload_rows(t):
         at = int(steps[-1]) if steps else 0
         failed = run.count('    FAILED')
         finished = 'RE-DOWNLOAD DONE' in run
-        alive = running(f'data/redownload.py .*--source {sep[-1].group(3)}')
+        alive = running(f'data_prep/redownload.py .*--source {sep[-1].group(3)}')
         completed = max(0, at - failed - (1 if alive and not finished else 0))
         detail = f'{name} · {which} · {failed} failed'
         if alive:
@@ -545,7 +548,7 @@ def redownload_rows(t):
                 per_song = (time.time() - start) / (at - 1)
                 detail += f' · {per_song:.0f} s/song, {eta_text((total - at + 1) * per_song)}'
             if which == 'round 2' and sep[-1].group(3) == 'youtube' and \
-                    running('data/redownload.py --songs-csv data/audio/songs.csv'):  # the YouTube chain's 2nd run
+                    running('data_prep/redownload.py --songs-csv data/audio/songs.csv'):  # the YouTube chain's 2nd run
                 detail += ' · then round 1 (queued)'
         elif 'ABORTED' in run:
             detail += ' · ABORTED (downloads blocked?)'
@@ -594,11 +597,11 @@ def pipeline_table():
     if songs_csv.exists():
         with open(songs_csv, newline='', encoding='utf-8') as f:
             per_artist = Counter(row['artist'] for row in csv.DictReader(f))
-    artists = [line.split('|')[0].strip() for line in open(ROOT / 'data/artists.txt', encoding='utf-8')
+    artists = [line.split('|')[0].strip() for line in open(ROOT / 'data/artists/songs.txt', encoding='utf-8')
                if line.strip() and not line.startswith('#')]
     # round 1 only (data/audio): the round-2 downloads write to /data/... and have their own rows
-    round1 = [l.split(None, 1) for l in subprocess.run(['pgrep', '-af', 'data/fetch_songs.py'], capture_output=True,
-                                                         text=True).stdout.splitlines()
+    round1 = [l.split(None, 1) for l in subprocess.run(['pgrep', '-af', 'data_prep/fetch_songs.py'],
+                                                         capture_output=True, text=True).stdout.splitlines()
               if '--output /data/' not in l and 'pgrep' not in l]
     fetch_running = bool(round1)
     # the fetch log prints "<artist>: N songs" when it starts an artist, so the artists before the last one are done
@@ -618,7 +621,7 @@ def pipeline_table():
     else:
         done_artists = sum(1 for a in artists if per_artist.get(a, 0) > 0)
         missing = [a for a in artists if not per_artist.get(a, 0)]
-        detail = f"{done_artists}/{len(artists)} artists of data/artists.txt (YouTube)" + \
+        detail = f"{done_artists}/{len(artists)} artists of data/artists/songs.txt (YouTube)" + \
             (f"; none for: {', '.join(missing[:4])}" if missing else '')
     dl_state = running_text(round1[0][0]) if fetch_running else Text('done', style='green')
     # this run's new downloads: "[get ]" lines in its log minus the failed ones

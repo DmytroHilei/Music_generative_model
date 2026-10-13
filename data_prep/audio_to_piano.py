@@ -20,8 +20,9 @@ ghost notes). Instead:
        leakage, e.g. a "piano" stem in a guitar song).
 
 Run with the audio env (not the training env):
-    .venv-audio/bin/python data/audio_to_piano.py --input Skryabin --output data/finetune/skryabin --limit 3
-    .venv-audio/bin/python data/audio_to_piano.py --input-root /data/songs_round2 --output-root /data/finetune_round2
+    .venv-audio/bin/python data_prep/audio_to_piano.py --input Skryabin --output data/finetune/skryabin --limit 3
+    .venv-audio/bin/python data_prep/audio_to_piano.py --input-root /data/songs_round2 \
+        --output-root /data/finetune_round2
         (every artist folder <input-root>/<artist> -> <output-root>/<artist> in one pipeline: the models load once and
         the GPU doesn't wait for the CPU workers to drain between artists)
 """

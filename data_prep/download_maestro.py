@@ -1,3 +1,10 @@
+"""
+Download and extract the MAESTRO piano MIDI dataset (Hawthorne et al. 2019) into data/<version>/
+(year folders + maestro-<version>.csv/.json; the CSV's midi_filename is relative to that folder).
+
+    python data_prep/download_maestro.py --midi-only            # -> data/maestro-v3.0.0/
+"""
+
 import argparse
 import zipfile
 from pathlib import Path

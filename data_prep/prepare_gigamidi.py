@@ -1,8 +1,9 @@
 """
 Tokenize GigaMIDI straight from its downloaded archive into token stores, without extracting anything to disk.
 
-    python data/prepare_gigamidi.py --zip ~/Downloads/Final_GigaMIDI_V2.0_Final.zip --name gigamidi
-    python data/prepare_gigamidi.py --zip ... --name gigamidi_probe --max-files 20000 --splits validation  # size probe
+    python data_prep/prepare_gigamidi.py --zip ~/Downloads/Final_GigaMIDI_V2.0_Final.zip --name gigamidi
+    python data_prep/prepare_gigamidi.py --zip ... --name gigamidi_probe --max-files 20000 \
+        --splits validation                                                     # size probe
 
 The archive (HF repo file Final_GigaMIDI_V2.0_Final.zip, content V1.1) holds three deflated inner zips
 (training-80% / validation-10% / test-10%). Validation and test have drums-only/, no-drums/, all-instruments-with-drums/

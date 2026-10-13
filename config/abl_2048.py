@@ -2,7 +2,7 @@
 # Base: ladder-L shape (12L x 512, ~42M) from scratch on the multi-instrument mix at 2048 with RoPE, Muon 1e-3 WSD.
 # 1,500 it x 65,536 = 98M notes. Arms: block variants (norm / mlp / qk_norm), a higher LR, and an iso-FLOP triple
 # (M / L / 16L x 640 at the L arm's compute, FLOPs per note = 6N + 6 L d T) for the size question.
-# Val = GigaMIDI validation without the 54k files whose notes also occur in train (data/dedupe_val.py, 2026-10-03).
+# Val = GigaMIDI validation without the 54k files whose notes also occur in train (data_prep/dedupe_val.py, 2026-10-03).
 csv_path = 'store:data/cache/gigamidi,store:data/cache/aria'
 source_weights = '0.7,0.3'
 val_csv_path = 'store:data/cache/gigamidi_clean'

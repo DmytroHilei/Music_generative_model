@@ -1,7 +1,7 @@
 """
 Cuts a genre subset out of the tokenized Aria store (the source archive isn't needed):
 
-    python data/subset_aria.py --genres pop,rock --name aria_poprock
+    python data_prep/subset_aria.py --genres pop,rock --name aria_poprock
 
 -> data/cache/<name>_{train,validation} (tokens.u16, offsets.npy, meta.json) and data/aria/<name>.csv (the matching
 rows of aria.csv, same order as the store, so style labels line up).
