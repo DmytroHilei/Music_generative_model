@@ -10,9 +10,10 @@ best settings from the settings sweep) or the validation songs of a multi-track 
 Songs: --per-style per style from style_eval.style_set on --store, default the held-out 10 % of the clean GigaMIDI
 test split (tools/split_store.py; the other 90 % is fine-tune replay, and the val store is not on the laptop). With
 --csv: --songs validation songs of that CSV (evenly spaced over the ones long enough), with the settings of
---csv-style. Prompt = the first 128 notes with their instruments, then --new-notes notes; the instrument of every new
-note is sampled. Settings per style from --settings (eval/style_search.py's best_settings.json): temperature, top-p,
-instrument temperature, delta-time bias, conditioning 'band' (the prompt's instrument set) or 'none'.
+--csv-style; --match picks songs by name instead. Prompt = the first 128 notes with their instruments, then
+--new-notes notes; the instrument of every new note is sampled. Settings per style from --settings
+(eval/style_search.py's best_settings.json): temperature, top-p, instrument temperature, delta-time bias,
+conditioning 'band' (the prompt's instrument set) or 'none'.
 
 Score per sample = style_eval's row distance to its own song's real next --new-notes notes (instruments, out-of-band
 share, notes/s, top-instrument share, takeover, runaway; spreads from the real continuations of the same group),
@@ -60,7 +61,7 @@ def store_arrays(store):
             np.memmap(f'{store}/programs.u8', dtype=np.uint8, mode='r', shape=(n,)))
 
 
-def csv_songs(csv, n_songs, prompt_notes, new_notes):
+def csv_songs(csv, n_songs, prompt_notes, new_notes, match=''):
     """Validation songs of a multi-track CSV, in style_set's format (+ store, name)."""
     ds = MaestroDataset(csv, root_dir='.', split='validation', block_size=prompt_notes + new_notes,
                         programs=True, eval_stride=prompt_notes + new_notes)
@@ -72,6 +73,14 @@ def csv_songs(csv, n_songs, prompt_notes, new_notes):
     assert len(off) - 1 == len(df), f'{store}: {len(off) - 1} files vs {len(df)} CSV rows'
     long_enough = [i for i in range(len(df)) if off[i + 1] - off[i] >= prompt_notes + new_notes]
     picked = [long_enough[int(k)] for k in np.linspace(0, len(long_enough) - 1, min(n_songs, len(long_enough)))]
+    if match:
+        full = (df['artist'] + ' - ' + df['title']).str.lower()
+        picked = []
+        for pat in [m.strip().lower() for m in match.split(',') if m.strip()]:
+            hits = [i for i in range(len(df)) if pat in full[i]]
+            found = ', '.join(full[i] + ('' if i in long_enough else ' (too short)') for i in hits)
+            print(f"--match '{pat}': {found or 'no song'}")
+            picked += [i for i in hits if i in long_enough and i not in picked]
     songs = []
     for i in picked:
         a = off[i]
@@ -95,6 +104,8 @@ def main():
     ap.add_argument('--skip', type=int, default=0, help='leave out the first songs of each style')
     ap.add_argument('--csv', default='', help='multi-track CSV: continue its validation songs instead of the styles')
     ap.add_argument('--songs', type=int, default=12, help='with --csv: number of songs')
+    ap.add_argument('--match', default='', help="with --csv: comma-separated parts of 'artist - title' (any case) "
+                                                "to continue these songs instead of --songs")
     ap.add_argument('--csv-style', default='rock_pop', help="with --csv: whose settings to use ('rock_pop' = band songs)")
     ap.add_argument('--new-notes', type=int, default=1000)
     ap.add_argument('--seed', type=int, default=1)
@@ -104,7 +115,8 @@ def main():
 
     best = json.loads(Path(args.settings).read_text()) if Path(args.settings).exists() else {}
     if args.csv:
-        groups = {Path(args.csv).stem: (args.csv_style, csv_songs(args.csv, args.songs, 128, args.new_notes))}
+        groups = {Path(args.csv).stem: (args.csv_style,
+                                        csv_songs(args.csv, args.songs, 128, args.new_notes, args.match))}
     else:
         sset = style_set(per_style=args.per_style, new_notes=args.new_notes, store=args.store, skip=args.skip)
         groups = {s.strip(): (s.strip(), [dict(song, store=args.store, name=str(song['file'])) for song in sset[s.strip()]])
