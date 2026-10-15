@@ -124,25 +124,35 @@ def style_set(per_style=16, prompt_notes=128, new_notes=1000, store=STORE, candi
     return {s: v[skip:] for s, v in out.items()}
 
 
-def csv_set(csv, n_songs=24, prompt_notes=128, new_notes=1000, match=''):
-    """{csv name: [songs]} in style_set's format (+ store, name): n_songs validation songs of a multi-track CSV, evenly
-    spaced over the ones long enough; match = comma-separated parts of 'artist - title' (any case) instead."""
-    import re
+def csv_store(csv, split='validation', block_size=1128):
+    """The token store of a multi-track CSV's split: (rows of that split whose MIDI exists = the store's file order,
+    store dir, offsets, tokens (N, 4) memmap, programs (N,) memmap)."""
     from pathlib import Path
     import pandas as pd
     from musicar.data_loader import NoteWindowDataset
-    ds = NoteWindowDataset(csv, root_dir='.', split='validation', block_size=prompt_notes + new_notes,
-                        programs=True, eval_stride=prompt_notes + new_notes)
+    ds = NoteWindowDataset(csv, root_dir='.', split=split, block_size=block_size, programs=True,
+                           eval_stride=block_size)
     store = ds.store_dirs[0]
     df = pd.read_csv(csv)
-    df = df[df['split'] == 'validation'].reset_index(drop=True)
-    df = df[[Path(p).exists() for p in df['midi_filename']]].reset_index(drop=True)  # = the store's file order
+    df = df[df['split'] == split].reset_index(drop=True)
+    df = df[[Path(p).exists() for p in df['midi_filename']]].reset_index(drop=True)
     off = np.load(f'{store}/offsets.npy')
     assert len(off) - 1 == len(df), f'{store}: {len(off) - 1} files vs {len(df)} CSV rows'
     tokens = np.memmap(f'{store}/tokens.u16', dtype=np.uint16, mode='r', shape=(int(off[-1]), 4))
     programs = np.memmap(f'{store}/programs.u8', dtype=np.uint8, mode='r', shape=(int(off[-1]),))
+    return df, store, off, tokens, programs
+
+
+def csv_set(csv, n_songs=24, prompt_notes=128, new_notes=1000, match=''):
+    """{csv name: [songs]} in style_set's format (+ store, name, artist): n_songs validation songs of a multi-track CSV
+    (0 = all), evenly spaced over the ones long enough; match = comma-separated parts of 'artist - title' (any case)
+    instead."""
+    import re
+    from pathlib import Path
+    df, store, off, tokens, programs = csv_store(csv, 'validation', prompt_notes + new_notes)
     long_enough = [i for i in range(len(df)) if off[i + 1] - off[i] >= prompt_notes + new_notes]
-    picked = [long_enough[int(k)] for k in np.linspace(0, len(long_enough) - 1, min(n_songs, len(long_enough)))]
+    n = min(n_songs or len(long_enough), len(long_enough))
+    picked = [long_enough[int(k)] for k in np.linspace(0, len(long_enough) - 1, n)]
     if match:
         full = (df['artist'] + ' - ' + df['title']).str.lower()
         picked = []
@@ -162,7 +172,7 @@ def csv_set(csv, n_songs=24, prompt_notes=128, new_notes=1000, match=''):
                                      torch.from_numpy(p[prompt_notes:]), p[:prompt_notes].tolist())
         name = re.sub(r'[^\w-]+', '_', f"{df['artist'][i]} - {df['title'][i]}").strip('_')[:60]
         songs.append(dict(prompt=t[:prompt_notes], prompt_prog=p[:prompt_notes], real=real, real_c=real_c, file=i,
-                          store=str(store), name=name))
+                          store=str(store), name=name, artist=df['artist'][i]))
     return {Path(csv).stem: songs}
 
 
@@ -207,23 +217,25 @@ def score_row(res, r, n0, song, scale, c_scale):
 
 @torch.no_grad()
 def evaluate(model, sset, new_notes=1000, seed=1234, chunk=20, cuda_graph=True, device='cuda', settings=TRACK,
-             modes=None):
+             modes=None, rows_out=None):
     """{mode: {'all': mean over groups, <group>: mean row distance, 'notes_per_s': .., ...}} for modes 'none' and
     (cond_inst models) 'band', or only settings['cond'] when the settings name one. sset = style_set's styles or
     csv_set's group. settings['min_new']: no end-of-piece before that many notes. The model is put back into its
-    previous train/eval mode even after an error."""
+    previous train/eval mode even after an error. rows_out: a dict, filled with {mode: [(group, song index, distance,
+    notes/s or None, consistency distance or None)]} in row order."""
     was_training = model.training
     model.eval()
     try:
-        return _evaluate(model, sset, new_notes, seed, chunk, cuda_graph, device, settings, modes)
+        return _evaluate(model, sset, new_notes, seed, chunk, cuda_graph, device, settings, modes, rows_out)
     finally:
         model.train(was_training)
 
 
-def _evaluate(model, sset, new_notes, seed, chunk, cuda_graph, device, settings, modes=None):
+def _evaluate(model, sset, new_notes, seed, chunk, cuda_graph, device, settings, modes=None, rows_out=None):
     cfg = model.config
     groups = [s for s in sset if sset[s]]
     rows = [(s, song) for s in groups for song in sset[s]]
+    index = [k for s in groups for k in range(len(sset[s]))]
     scales = {s: style_scales(sset[s]) for s in groups}
     c_scales = {s: consistency_scales(sset[s]) for s in groups}
     modes = modes or ([settings['cond']] if 'cond' in settings else ['none'] + (['band'] if cfg.cond_inst else []))
@@ -231,8 +243,10 @@ def _evaluate(model, sset, new_notes, seed, chunk, cuda_graph, device, settings,
     for mode in modes:
         per_style, metrics = {s: [] for s in groups}, []
         per_style_c, c_metrics = {s: [] for s in groups}, []
+        if rows_out is not None:
+            rows_out[mode] = []
         for c in range(0, len(rows), chunk):
-            part = rows[c:c + chunk]
+            part, start = rows[c:c + chunk], c
             tok = torch.stack([torch.from_numpy(song['prompt']) for _, song in part]).to(device)
             prog = torch.stack([torch.from_numpy(song['prompt_prog']) for _, song in part]).to(device)
             streams, prog, cond = prompt_inputs(model, tok, prog, band=mode == 'band')
@@ -248,6 +262,8 @@ def _evaluate(model, sset, new_notes, seed, chunk, cuda_graph, device, settings,
             for r, (style, song) in enumerate(part):
                 m, d, c, dc = score_row(res, r, n0, song, scales[style], c_scales[style])
                 per_style[style].append(d)
+                if rows_out is not None:
+                    rows_out[mode].append((style, index[start + r], d, m['notes_per_s'] if m else None, dc))
                 if m is not None:
                     metrics.append(m)
                 if dc is not None:
