@@ -14,9 +14,9 @@ scripts run).
 | `aria/` | Aria-MIDI metadata per store (`<name>.csv`: file_id, segment, split, genre, ...) | `data_prep/prepare_aria.py`, `subset_aria.py` |
 | `gigamidi/` | GigaMIDI file list, note hashes and dedupe stats | `data_prep/prepare_gigamidi.py`, `dedupe_val.py` |
 | `discover/` | Discover MIDI file list and progress | `data_prep/prepare_discover.py` |
-| `midicaps/` | MidiCaps: `train.json` (168k captions + features, keyed by Lakh md5 = GigaMIDI file name), `midicaps.tar.gz` (Lakh MIDI, not unpacked). CC-BY-SA 4.0 | download from Hugging Face `amaai-lab/MidiCaps` |
+| `midicaps/` | MidiCaps: `train.json` (168k captions + features, keyed by Lakh md5 = GigaMIDI file name), the Lakh MIDI tarball was deleted 2026-10-15 (all but 31 files are GigaMIDI files). CC-BY-SA 4.0 | download from Hugging Face `amaai-lab/MidiCaps` |
 | `xmidi/` | XMIDI: `XMIDI.zip` (108k `XMIDI_<emotion>_<genre>_<id>.midi`, not unpacked). No license stated: research use, don't redistribute | Google Drive link in `github.com/xmusic-project/XMIDI_Dataset` |
-| `labels/` | Per store: `<store>.jsonl`, one line per file with a MidiCaps caption / XMIDI labels (`file` = index in the store, `md5`) | `data_prep/build_labels.py` |
+| `labels/` | Per store: `<store>.jsonl`, one line per file with a MidiCaps caption / XMIDI labels (`file` = index in the store, `md5`); `<store>.features.npz`, per-file features of every file (key, tempo, density, register, dynamics, instruments) | `data_prep/build_labels.py`, `data_prep/song_features.py` |
 | `audio/` | Downloaded studio songs, `<artist>/*.mp3` + `songs.csv` | `data_prep/fetch_songs.py`, `redownload.py` |
 | `covers/`, `covers_fresh/` | Solo piano covers (mp3) and their transcriptions, `<artist>/midi/` | `data_prep/fetch_songs.py --mode covers`, `transcribe_covers.py` |
 | `finetune/` | Piano reductions / multi-track MIDI per artist and the fine-tune CSVs (`ukrainian_*.csv`); `exclude.txt` tracked | `data_prep/audio_to_piano.py`, `prepare_finetune.py`, `prepare_fresh_covers.py` |

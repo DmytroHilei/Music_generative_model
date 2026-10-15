@@ -27,7 +27,7 @@ ourselves for the rest of the pretraining data.
 | 0 | Check disk space, check the local LLM | 0.5 day | — | ✅ 2026-10-15 |
 | 1.1 | Download MidiCaps (captions) and XMIDI (emotion + genre labels), check licenses | 0.5 day | ~5 min | ✅ 2026-10-15 |
 | 1.2 | Match the labels to songs already in our token stores (by file checksum) | 0.5 day | minutes | ✅ 2026-10-15 (local stores; full stores on the 5090) |
-| 1.3 | Compute simple per-song features (key, tempo, density, register, instruments) | 0.5 day | 1-2 h | ☐ |
+| 1.3 | Compute simple per-song features (key, tempo, density, register, instruments) | 0.5 day | minutes | ✅ 2026-10-15 (local stores; ~1.5M songs take a few minutes on the laptop CPU) |
 | 1.4 | **Probe**: does our model's internal representation know genre / emotion / artist? | 0.5 day | minutes | ✅ 2026-10-15 passed: +11-18 points over plain statistics |
 | 1.5 | Embed all songs (on the rented 5090), label the rest with classifiers trained on the good labels, keep only confident labels | 0.5 day | ~2-3 h on the 5090 (~€1) | ☐ |
 | 1.6 | Caption builder: templates + Qwen paraphrases, one caption per training window | 1-1.5 days | ~1 h | ☐ |
