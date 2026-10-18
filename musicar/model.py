@@ -198,6 +198,17 @@ class MusicConfig:
     norm: str = 'layernorm'     # 'layernorm' | 'rmsnorm' (blocks and ln_f)
     mlp: str = 'gelu'           # 'gelu' (4x) | 'swiglu' (8/3x, same params)
     qk_norm: bool = False
+    # text control (context/claude/text_control.md, T1): a frozen text encoder's caption vector (text_dim wide, 0 =
+    # off) -> Linear (zero init) -> added at every position like the style; the zero vector = no caption
+    text_dim: int = 0
+    # text_center: captions enter centered on the stored mean caption vector (buffer text_mean, set from training
+    # captions) and rescaled to norm sqrt(text_dim), so text_proj sees what tells captions apart, not 'a caption is
+    # present' (P1: 39% of LaBSE caption energy sat in the common direction); the zero vector stays 'no caption'
+    text_center: bool = False
+    # T2 'prefix' (text_control.md): text_prefix > 0 = the caption's token states (B, L, text_dim; zero rows =
+    # padding, all zero = no caption) -> TextPrefix -> text_prefix vectors in front of the notes (no loss on them),
+    # instead of the T1 vector
+    text_prefix: int = 0
 
 
 # order in which attributes of the next note are decided by CascadeHeads
@@ -296,6 +307,34 @@ class MusicEmbeddings(nn.Module):
         return x
 
 
+class TextPrefix(nn.Module):
+    """T2: caption token states (B, L, D) -> (B, K, n_embd). K learned queries attend once over the tokens (padding
+    = zero rows, masked), then a 2-layer MLP; the output passes a small-init gate (per channel, 0.01). Captions without
+    tokens (all zero) get K learned null vectors instead (init like an embedding), the 'no caption' of dropout and
+    guidance. Neither starts at exactly zero: all-zero prefix rows gave NaN gradients in the trunk (2026-10-18)."""
+
+    def __init__(self, text_dim, n_embd, k, n_head=12, hidden=2048):
+        super().__init__()
+        self.queries = nn.Parameter(torch.randn(k, text_dim) * 0.02)
+        self.kv_norm = nn.LayerNorm(text_dim)
+        self.attn = nn.MultiheadAttention(text_dim, n_head, batch_first=True)
+        self.mlp = nn.Sequential(nn.LayerNorm(text_dim), nn.Linear(text_dim, hidden), nn.GELU(),
+                                 nn.Linear(hidden, n_embd))
+        self.gate = nn.Parameter(torch.zeros(n_embd))
+        self.null = nn.Parameter(torch.zeros(k, n_embd))
+
+    def forward(self, states):
+        b = states.size(0)
+        tok = states.abs().sum(-1) > 0                      # (B, L) real tokens
+        has = tok.any(1)                                    # (B,) rows with a caption
+        tok = tok | ~has[:, None]                           # caption-less rows attend to padding (output discarded)
+        q = self.queries.to(states.dtype).expand(b, -1, -1)
+        kv = self.kv_norm(states)
+        z, _ = self.attn(q, kv, kv, key_padding_mask=~tok, need_weights=False)
+        p = self.mlp(z + q) * self.gate
+        return torch.where(has[:, None, None], p, self.null.to(p.dtype).expand(b, -1, -1))
+
+
 class KVCache:
     """Preallocated keys/values for all layers (inference). pos = position of the next single-note step (a device
     tensor, so a captured CUDA graph reads it at replay time); mask = which cache slots that step may attend to."""
@@ -344,6 +383,15 @@ class GPT(nn.Module):
             self.transformer['cond_density'] = nn.Embedding(config.n_density, config.n_embd)
         if config.n_programs:
             self.transformer['program'] = nn.Embedding(config.n_programs, config.n_embd)
+        if config.text_prefix:
+            assert config.text_dim and not config.text_center, 'text_prefix needs text_dim (and replaces T1)'
+            assert config.pos_emb == 'rope', 'text_prefix shifts the notes by K positions: RoPE only'
+            self.transformer['text_prefix'] = TextPrefix(config.text_dim, config.n_embd, config.text_prefix,
+                                                         n_head=config.n_head)
+        elif config.text_dim:
+            self.transformer['text_proj'] = nn.Linear(config.text_dim, config.n_embd, bias=False)
+            if config.text_center:
+                self.register_buffer('text_mean', torch.zeros(config.text_dim))
 
         self.cascade = CascadeHeads(config)
 
@@ -359,9 +407,12 @@ class GPT(nn.Module):
         if config.n_programs:
             # zero: a piano model grown to programs starts with exactly its old input embedding
             torch.nn.init.zeros_(self.transformer['program'].weight)
-        for name in ('cond_inst', 'cond_density'):
+        for name in ('cond_inst', 'cond_density', 'text_proj'):
             if name in self.transformer:
                 torch.nn.init.zeros_(self.transformer[name].weight)  # starts as the unconditioned model
+        if config.text_prefix:  # _init_weights re-drew its Linears; small gate, embedding-like null prefix
+            torch.nn.init.constant_(self.transformer['text_prefix'].gate, 0.01)
+            torch.nn.init.normal_(self.transformer['text_prefix'].null, std=0.02)
 
     @property
     def head_names(self):
@@ -388,13 +439,20 @@ class GPT(nn.Module):
         elif isinstance(module, nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
-    def encode(self, pitch, velocity, duration, delta_time, style=None, program=None, cache=None, cond=None):
+    def encode(self, pitch, velocity, duration, delta_time, style=None, program=None, cache=None, cond=None,
+               text=None, step=None):
         """The trunk: notes -> hidden states after ln_f, (B, T, C).
-        cache=None: plain forward. With a KVCache: T > 1 = prefill from position 0, T == 1 = one step at cache.pos."""
+        cache=None: plain forward. With a KVCache: T > 1 = prefill from position 0, T == 1 = one step at cache.pos.
+        text: (B, text_dim) caption vectors for models with text_dim (zeros / None = no caption); text_prefix models:
+        (B, L, text_dim) token states (None = no caption), whose prefix goes in front of the notes (positions 0..K-1,
+        the notes from K; only the notes' states are returned) in every call but a one-note step.
+        step: whether a T == 1 call with a cache is a one-note step (default) or a prefill (text_prefix models)."""
         device = pitch.device
         b, t = pitch.size()
         assert t <= self.config.block_size
-        if cache is not None and t == 1:
+        step = cache is not None and t == 1 if step is None else step
+        k_pre = 0 if step else self.config.text_prefix
+        if step:
             seq_pos = cache.pos
             cache.mask.copy_((cache.slots <= cache.pos).view(1, 1, 1, -1))
         else:
@@ -416,6 +474,18 @@ class GPT(nn.Module):
                 x = x + self.transformer['cond_inst'](inst.to(x.dtype)).unsqueeze(1)
             if self.config.n_density:
                 x = x + self.transformer['cond_density'](density).unsqueeze(1)
+        if text is not None and self.config.text_dim and not self.config.text_prefix:
+            if self.config.text_center:
+                has = text.abs().sum(-1, keepdim=True) > 0
+                centered = F.normalize(text.float() - self.text_mean.float(), dim=-1) * math.sqrt(text.size(-1))
+                text = torch.where(has, centered, torch.zeros_like(centered))
+            x = x + self.transformer['text_proj'](text.to(x.dtype)).unsqueeze(1)
+        if k_pre:
+            if text is None:
+                text = torch.zeros(b, 1, self.config.text_dim, device=device)
+            x = torch.cat([self.transformer['text_prefix'](text.to(x.dtype)).to(x.dtype), x], dim=1)
+            rope = rope_tables(torch.arange(k_pre + t, device=device), self.config.n_embd // self.config.n_head,
+                               self.config.rope_base)
         x = self.transformer.drop(x)
         n_ckpt = len(self.transformer.h) if self.act_ckpt < 0 else self.act_ckpt
         ckpt_kw = dict(context_fn=partial(sac_context, self.act_ckpt_save)) if self.act_ckpt_save else {}
@@ -425,9 +495,10 @@ class GPT(nn.Module):
                                                       respect_saved_tensors_hooks=True, **ckpt_kw)
             else:
                 x = block(x, cache, i, rope)
-        return self.transformer.ln_f(x)
+        return self.transformer.ln_f(x[:, k_pre:] if k_pre else x)
 
-    def forward(self, pitch, velocity, duration, delta_time, style=None, program=None, targets=None, cond=None):
+    def forward(self, pitch, velocity, duration, delta_time, style=None, program=None, targets=None, cond=None,
+                text=None):
         """
         Returns (parts, loss). loss = sum of the per-head CEs with label smoothing (what we optimize),
         parts = dict name -> CE without label smoothing (detached, for honest logging / comparing runs).
@@ -436,8 +507,9 @@ class GPT(nn.Module):
         program: (B, T) instrument per input note when the model has n_programs; targets then has a 5th entry, the
         next note's program (see head_names). Duration targets of drum notes are expected as -1 (masked).
         cond: (instrument multi-hot (B, n_programs), density level (B,)) for models with cond_inst / n_density.
+        text: (B, text_dim) caption vectors for models with text_dim.
         """
-        x = self.encode(pitch, velocity, duration, delta_time, style=style, program=program, cond=cond)
+        x = self.encode(pitch, velocity, duration, delta_time, style=style, program=program, cond=cond, text=text)
         assert len(targets) == len(self.head_names), f"{len(targets)} targets for heads {self.head_names}"
         tgt = dict(zip(self.head_names, targets))
         logits = self.cascade(x, tgt)

@@ -9,10 +9,11 @@ from torch.nn import functional as F
 # the MusicConfig fields a checkpoint stores as model_args
 ARCH_KEYS = ('n_layer', 'n_head', 'n_embd', 'block_size', 'bias', 'pitch_size', 'velocity_size', 'duration_size',
              'delta_time_size', 'n_styles', 'n_programs', 'pos_emb', 'rope_base', 'norm', 'mlp', 'qk_norm', 'cond_inst',
-             'n_density')
+             'n_density', 'text_dim', 'text_center', 'text_prefix')
 # what checkpoints that predate a key actually used
 LEGACY_DEFAULTS = {'n_styles': 0, 'n_programs': 0, 'pos_emb': 'learned', 'rope_base': 10000.0, 'norm': 'layernorm',
-                   'mlp': 'gelu', 'qk_norm': False, 'cond_inst': False, 'n_density': 0}
+                   'mlp': 'gelu', 'qk_norm': False, 'cond_inst': False, 'n_density': 0,
+                   'text_dim': 0, 'text_center': False, 'text_prefix': 0}
 
 
 def resolve_checkpoint(path):
@@ -61,13 +62,20 @@ def load_expanded(model, state_dict):
 
 def merge_model_args(saved, wanted, finetune, block_size):
     """Model args for a resume / finetune: the checkpoint's own (`saved`; LEGACY_DEFAULTS, then `wanted`, for keys it
-    predates). A finetune may change what load_expanded can map: grow pitch_size / n_styles / n_programs, switch to
-    RoPE, and set block_size (RoPE: any; learned positions: larger, the table is stretched)."""
+    predates). A finetune may change what load_expanded can map: grow pitch_size / n_styles / n_programs, add the
+    text input (text_dim 0 -> the encoder's width), its centering (text_center) or the T2 prefix (text_prefix), switch to RoPE, and set block_size (RoPE: any; learned positions:
+    larger, the table is stretched)."""
     args = {}
     for k in ARCH_KEYS:
         args[k] = saved.get(k, LEGACY_DEFAULTS.get(k, wanted[k]))
         if finetune and k in ('pitch_size', 'n_styles', 'n_programs') and wanted[k] > args[k]:
             args[k] = wanted[k]  # grow: BOS/EOS rows, a style table, the instrument attribute
+        if finetune and k == 'text_dim' and args[k] == 0:
+            args[k] = wanted[k]  # add the text input (zero-init text_proj: starts as the old model)
+        if finetune and k == 'text_center' and wanted[k]:
+            args[k] = True  # text_mean is then set from the training captions (train.py)
+        if finetune and k == 'text_prefix' and args[k] == 0:
+            args[k] = wanted[k]  # add the T2 prefix adapter
         if finetune and k == 'pos_emb' and wanted[k] == 'rope':
             args[k] = 'rope'  # switch to RoPE: the position table is dropped (not function-preserving)
     if finetune and args['pos_emb'] == 'rope':

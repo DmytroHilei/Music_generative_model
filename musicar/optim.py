@@ -102,26 +102,38 @@ class CombinedOptimizer:
             opt.load_state_dict(s)
 
 
-def build_adamw(model, weight_decay, learning_rate, betas, device_type):
+TEXT_PREFIX = ('transformer.text_proj.', 'transformer.text_prefix.')  # T1 vector, T2 prefix adapter
+
+
+def text_group(model, text_lr_mult):
+    """The text adapter (text_proj or text_prefix) in its own AdamW group: lr x text_lr_mult, no weight decay (like the style table);
+    [] when the model has none or it is frozen."""
+    params = [p for n, p in model.named_parameters() if n.startswith(TEXT_PREFIX) and p.requires_grad]
+    if params:
+        print(f"text adapter: {sum(p.numel() for p in params):,} params, lr x{text_lr_mult:g}")
+    return [{'params': params, 'weight_decay': 0.0, 'lr_mult': text_lr_mult}] if params else []
+
+
+def build_adamw(model, weight_decay, learning_rate, betas, device_type, text_lr_mult=1.0):
     """AdamW (fused on CUDA). Weight decay on the 2D tensors (matmul weights, embeddings); none on biases, norms and
     the cascade's condition embeddings (they must stay at the scale of h)."""
     import inspect
     decay, nodecay = [], []
     for n, p in model.named_parameters():
-        if not p.requires_grad:
+        if not p.requires_grad or n.startswith(TEXT_PREFIX):
             continue
         (decay if p.dim() >= 2 and 'cond_emb' not in n else nodecay).append(p)
     print(f"num decayed parameter tensors: {len(decay)}, with {sum(p.numel() for p in decay):,} parameters")
     print(f"num non-decayed parameter tensors: {len(nodecay)}, with {sum(p.numel() for p in nodecay):,} parameters")
     fused = 'fused' in inspect.signature(torch.optim.AdamW).parameters and device_type == 'cuda'
     print(f"using fused AdamW: {fused}")
-    return torch.optim.AdamW([{'params': decay, 'weight_decay': weight_decay},
-                              {'params': nodecay, 'weight_decay': 0.0}],
+    groups = [{'params': decay, 'weight_decay': weight_decay}, {'params': nodecay, 'weight_decay': 0.0}]
+    return torch.optim.AdamW([g for g in groups if g['params']] + text_group(model, text_lr_mult),
                              lr=learning_rate, betas=betas, **(dict(fused=True) if fused else {}))
 
 
 def build_muon_optimizer(model, weight_decay, learning_rate, betas, device_type, momentum=0.95, style_lr_mult=1.0,
-                         momentum_dtype=None, compile_ns=False):
+                         momentum_dtype=None, compile_ns=False, text_lr_mult=1.0):
     """Muon for the 2D matrices inside the transformer blocks, AdamW for embeddings, heads, norms.
     The style table (if any) gets its own AdamW group: lr x style_lr_mult (the train loop applies each group's
     'lr_mult'), no weight decay, so a zero-initialized conditioning vector can move far in a short fine-tune."""
@@ -129,7 +141,7 @@ def build_muon_optimizer(model, weight_decay, learning_rate, betas, device_type,
     muon_params, adam_decay, adam_nodecay, style_params = [], [], [], []
     muon_ids = {id(p) for p in model.transformer.h.parameters() if p.dim() == 2}
     for n, p in model.named_parameters():
-        if not p.requires_grad:
+        if not p.requires_grad or n.startswith(TEXT_PREFIX):
             continue
         if id(p) in muon_ids:
             muon_params.append(p)
@@ -144,7 +156,7 @@ def build_muon_optimizer(model, weight_decay, learning_rate, betas, device_type,
               {'params': adam_nodecay, 'weight_decay': 0.0}]
     if style_params:
         groups.append({'params': style_params, 'weight_decay': 0.0, 'lr_mult': style_lr_mult})
-    adamw = torch.optim.AdamW(groups,
+    adamw = torch.optim.AdamW(groups + text_group(model, text_lr_mult),
                               lr=learning_rate, betas=betas, **(dict(fused=True) if fused else {}))
     muon = Muon(muon_params, lr=learning_rate, momentum=momentum, weight_decay=weight_decay,
                 momentum_dtype=momentum_dtype, compile_ns=compile_ns)
@@ -154,7 +166,7 @@ def build_muon_optimizer(model, weight_decay, learning_rate, betas, device_type,
     return CombinedOptimizer(muon, adamw)
 
 
-def build_adamw8bit(model, weight_decay, learning_rate, betas, style_lr_mult=1.0):
+def build_adamw8bit(model, weight_decay, learning_rate, betas, style_lr_mult=1.0, text_lr_mult=1.0):
     """torchao AdamW with 8-bit (block-quantized) moments for every trainable parameter: ~2 bytes of state per
     parameter instead of 8, so a full fine-tune of the 450M fits in 8 GB. Groups as in build_adamw (no
     weight decay on 1D tensors and the cascade's cond_emb), plus the style table in its own group (lr x
@@ -162,7 +174,7 @@ def build_adamw8bit(model, weight_decay, learning_rate, betas, style_lr_mult=1.0
     from torchao.optim import AdamW8bit
     decay, nodecay, style = [], [], []
     for n, p in model.named_parameters():
-        if not p.requires_grad:
+        if not p.requires_grad or n.startswith(TEXT_PREFIX):
             continue
         if n.startswith('transformer.style.'):
             style.append(p)
@@ -173,33 +185,39 @@ def build_adamw8bit(model, weight_decay, learning_rate, betas, style_lr_mult=1.0
     groups = [{'params': decay, 'weight_decay': weight_decay}, {'params': nodecay, 'weight_decay': 0.0}]
     if style:
         groups.append({'params': style, 'weight_decay': 0.0, 'lr_mult': style_lr_mult})
+    groups = [g for g in groups if g['params']] + text_group(model, text_lr_mult)
     print(f"AdamW8bit: {sum(p.numel() for g in groups for p in g['params']):,} params"
           + (f" | style table lr x{style_lr_mult:g}" if style else ""))
     return AdamW8bit(groups, lr=learning_rate, betas=betas)
 
 
 def build_optimizer(name, model, weight_decay, learning_rate, betas, device_type, style_lr_mult=1.0,
-                    muon_momentum=0.95, muon_bf16=False, compile_ns=False):
+                    muon_momentum=0.95, muon_bf16=False, compile_ns=False, text_lr_mult=1.0):
     """name: 'adamw' | 'adamw8bit' | 'muon' (Muon for the transformer-block matrices, AdamW for the rest)."""
     if name == 'muon':
         return build_muon_optimizer(model, weight_decay, learning_rate, betas, device_type, momentum=muon_momentum,
                                     style_lr_mult=style_lr_mult, compile_ns=compile_ns,
-                                    momentum_dtype=torch.bfloat16 if muon_bf16 else None)
+                                    momentum_dtype=torch.bfloat16 if muon_bf16 else None, text_lr_mult=text_lr_mult)
     if name == 'adamw8bit':
-        return build_adamw8bit(model, weight_decay, learning_rate, betas, style_lr_mult=style_lr_mult)
+        return build_adamw8bit(model, weight_decay, learning_rate, betas, style_lr_mult=style_lr_mult,
+                               text_lr_mult=text_lr_mult)
     assert name == 'adamw', f"unknown optimizer {name!r}"
-    return build_adamw(model, weight_decay, learning_rate, betas, device_type)
+    return build_adamw(model, weight_decay, learning_rate, betas, device_type, text_lr_mult=text_lr_mult)
 
 
-def freeze_params(model, prefixes):
-    """Keep the parameters whose names start with one of the comma-separated prefixes frozen (requires_grad False)."""
+def freeze_params(model, prefixes, except_prefixes=''):
+    """Keep the parameters whose names start with one of the comma-separated prefixes frozen (requires_grad False);
+    '*' = all of them. except_prefixes: comma-separated prefixes that stay trainable anyway."""
     prefixes = tuple(x.strip() for x in prefixes.split(',') if x.strip())
-    frozen = [(n, p) for n, p in model.named_parameters() if n.startswith(prefixes)]
+    keep = tuple(x.strip() for x in except_prefixes.split(',') if x.strip())
+    frozen = [(n, p) for n, p in model.named_parameters()
+              if (prefixes == ('*',) or n.startswith(prefixes)) and not (keep and n.startswith(keep))]
     assert frozen, f"freeze={prefixes!r} matches no parameter"
     for _, p in frozen:
         p.requires_grad_(False)
-    print(f"frozen: {len(frozen)} tensors, {sum(p.numel() for _, p in frozen):,} "
-          f"params ({', '.join(sorted({n.rsplit('.', 1)[0] for n, _ in frozen}))})")
+    names = 'all but ' + ', '.join(keep) if prefixes == ('*',) else ', '.join(sorted({n.rsplit('.', 1)[0]
+                                                                                      for n, _ in frozen}))
+    print(f"frozen: {len(frozen)} tensors, {sum(p.numel() for _, p in frozen):,} params ({names})")
 
 
 def cooldown_start(lr_decay_iters, cooldown_frac):

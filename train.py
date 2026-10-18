@@ -112,6 +112,18 @@ muon_bf16 = False         # Muon momentum buffer in bf16 (half the Muon optimize
 pack_short = False        # train only: short files fill their window with more short files (BOS..EOS each), no padding
 min_notes = 64            # with pad_short / pack_short: shorter files are still dropped
 n_programs = 0            # multi-instrument: 129 = GM programs + drums (needs a programs.u8 store or reads piano as 0)
+# text control (context/claude/text_control.md): a caption per window from the label tables in `captions`, encoded by
+# the frozen `text_encoder`, added at every position through the model's zero-init text_proj (text_dim = its width)
+text_encoder = ''         # e.g. 'sentence-transformers/LaBSE'; '' = off
+captions = ''             # labels dir, e.g. 'data/labels' (musicar/captions.py); store sources may end in '#labeled'
+caption_dropout = 0.15    # training: share of windows with no caption (keeps the unconditional model, enables guidance)
+caption_uk = 0.3          # share of Ukrainian captions (templates + fixed MidiCaps translations), train and val
+text_lr_mult = 1.0        # LR multiplier of the text adapter (own AdamW group, no weight decay)
+freeze_trunk = False      # train only the text adapter (everything else frozen) ...
+freeze_trunk_keep = 'transformer.text_proj'  # ... and these comma-separated name prefixes (e.g. new BOS/EOS rows' tables)
+text_center = False       # center captions on the mean training caption vector (MusicConfig.text_center)
+text_prefix = 0           # T2: K prefix vectors from the caption's token states instead of the T1 vector
+text_dim = 0              # set from the encoder
 
 # wandb logging
 wandb_log = True
@@ -152,6 +164,10 @@ seed = 1337
 config_keys = [k for k, v in globals().items() if not k.startswith('_') and isinstance(v, (int, float, bool, str))]
 exec(open('musicar/configurator.py').read())  # overrides from command line or config file
 styles = load_styles(style_map) if style_map else None
+assert bool(text_encoder) == bool(captions), "text control needs both text_encoder and captions"
+if text_encoder:
+    from musicar.text import TEXT_DIM
+    text_dim = TEXT_DIM
 if styles:
     n_styles = len(styles)
 if special_tokens:
@@ -181,13 +197,14 @@ ctx = nullcontext() if device_type == 'cpu' else torch.amp.autocast(device_type=
 
 # -----------------------------------------------------------------------------
 # data
-extra_names = (['program'] if n_programs else []) + (['style'] if styles else [])  # optional inputs, in item order
+extra_names = (['program'] if n_programs else []) + (['style'] if styles else []) + (['text'] if captions else [])
 data_kw = dict(root_dir=root_dir, cache_dir=cache_dir, special_tokens=special_tokens, styles=styles,
-               programs=n_programs > 0, pad_short=pad_short, min_notes=min_notes)
+               programs=n_programs > 0, pad_short=pad_short, min_notes=min_notes, captions=captions or None,
+               caption_uk=caption_uk)
 # train: random windows (uniform over all note positions of all files), with augmentation
 train_dataset = NoteWindowDataset(csv_path, split='train', block_size=block_size, augment=True, **data_kw,
                                style_dropout=style_dropout, boundary_frac=boundary_frac, aug_tempo=aug_tempo,
-                               pack_short=pack_short,
+                               pack_short=pack_short, caption_dropout=caption_dropout,
                                aug_stores=as_list(aug_stores, int), source_weights=as_list(source_weights, float))
 train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=num_workers, drop_last=True,
                           collate_fn=partial(collate_windows, extra_names=tuple(extra_names)),
@@ -197,6 +214,9 @@ make_val_loader = partial(val_loader, batch_size=batch_size, max_batches=eval_it
 val_name = val_name or source_name(val_csv_path or csv_path)
 val2_name = val2_name or (source_name(val2_csv_path) if val2_csv_path else '')
 val_loader_main = make_val_loader(val_csv_path or csv_path)
+# text control: the main val set again with another file's caption and with none -> val/text_gain (> 0 = captions used)
+text_loaders = {mode: make_val_loader(val_csv_path or csv_path, caption_mode=mode)
+                for mode in ('shuffled', 'none')} if captions else {}
 val2_loader = make_val_loader(val2_csv_path) if val2_csv_path else None
 extra_loaders = {name: make_val_loader(src) for name, src in (e.split('=', 1) for e in val_extra.split(';') if e)}
 print(f"Validation: {val_name} (main, picks the best checkpoint)" + (f", {val2_name}" if val2_name else "")
@@ -267,9 +287,20 @@ if fp8:
 scaler = torch.amp.GradScaler(device_type, enabled=(dtype == 'float16'))
 if freeze:
     freeze_params(model, freeze)
+if freeze_trunk:
+    freeze_params(model, '*', except_prefixes=freeze_trunk_keep)
 optimizer = build_optimizer(optimizer_name, model, weight_decay, learning_rate, (beta1, beta2), device_type,
                             style_lr_mult=style_lr_mult, muon_momentum=muon_momentum, muon_bf16=muon_bf16,
-                            compile_ns=compile)
+                            compile_ns=compile, text_lr_mult=text_lr_mult)
+encoder = None
+if text_encoder:
+    from musicar.text import TextEncoder
+    encoder = TextEncoder(text_encoder, device=device, dtype=ptdtype if device_type == 'cuda' else torch.float32)
+    print(f"text encoder: {text_encoder} (frozen), captions from {captions}")
+    if model.config.text_center and not model.text_mean.any():
+        from musicar.text import caption_mean
+        model.text_mean.copy_(caption_mean(encoder, train_dataset))
+        print(f"text_mean set from training captions (|mean| {model.text_mean.norm():.3f})")
 if init_from == 'resume':
     optimizer.load_state_dict(checkpoint['optimizer'])
 checkpoint = None  # free up memory
@@ -287,7 +318,9 @@ def to_device(batch):
 def prepare(X, Y, cond_drop_p):
     """A batch on the device; cond_inst / n_density models also get the window conditions of its own notes,
     replaced by 'none' with probability cond_drop_p per window."""
-    streams, extra = to_device(X[0]), {k: v.to(device, non_blocking=True) for k, v in X[1].items()}
+    streams = to_device(X[0])
+    extra = {k: encoder.encode(v, tokens=raw_model.config.text_prefix > 0) if k == 'text'
+             else v.to(device, non_blocking=True) for k, v in X[1].items()}
     if cond_inst or n_density:
         extra['cond'] = window_conditions(streams[0], streams[3], extra.get('program'), n_programs, n_density,
                                           drop_p=cond_drop_p)
@@ -455,6 +488,11 @@ for iter_num in pbar:
         extra = {name: val_loss(loader) for name, loader in extra_loaders.items()}
         if cond_inst or n_density:  # the main val set again with no conditions: the model's unconditional quality
             extra['nocond'] = val_loss(val_loader_main, conditioned=False)
+        for mode, loader in text_loaders.items():
+            extra[f'text_{mode}'] = val_loss(loader)
+        if text_loaders:  # CE(other file's caption) - CE(own caption); and CE(no caption) - CE(own caption)
+            val['text_gain'] = extra['text_shuffled']['ce/total'] - val['ce/total']
+            val['text_gain_none'] = extra['text_none']['ce/total'] - val['ce/total']
         samples = run_sample_eval(iter_num)
         train = {k: (v / train_n).item() for k, v in train_sums.items()} if train_n else {}
         if train:
@@ -465,6 +503,8 @@ for iter_num in pbar:
                    + (f" | {val2_name} CE {val2['ce/total']:.3f}" if val2 else "")
                    # instrument head last, so status.py's STEP pattern still matches the line
                    + (f" | prog CE {val['ce/program']:.3f}" if 'ce/program' in val else "")
+                   + (f" | text gain {val['text_gain']:+.4f} (vs none {val['text_gain_none']:+.4f})"
+                      if 'text_gain' in val else "")
                    + "".join(f" | {name} CE {e['ce/total']:.3f}" for name, e in extra.items()))
         if wandb_log:
             wandb.log({"iter": iter_num, "lr": lr,
