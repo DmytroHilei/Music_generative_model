@@ -100,6 +100,10 @@ class NoteWindowDataset(Dataset):
         pad_short=False,
         pack_short=False,
         min_notes=64,
+        captions=None,
+        caption_dropout=0.0,
+        caption_mode='true',
+        caption_uk=0.3,
     ):
         """
         csv_path:    one or more sources separated by ',': a CSV (paths inside relative to root_dir or absolute),
@@ -135,10 +139,20 @@ class NoteWindowDataset(Dataset):
                      (data_prep/prepare_gigamidi.py); stores without one are piano = program 0. Drum notes are never
                      transposed and their duration is set to 0 in x and masked (-1) in y. False = piano-only: stores
                      with programs.u8 are refused, since their drum notes would be read as pitched notes
+        captions:    text control: a labels dir (data/labels): each window also returns a caption string of its file
+                     (musicar.captions.StoreCaptions of the store; '' for stores without labels), last in x.
+                     caption_dropout (training): share of windows whose caption is ''. caption_mode (validation):
+                     'true' = the file's own caption, 'shuffled' = another file's, 'none' = '' (for val/text_gain);
+                     validation captions are fixed per file. caption_uk: share of Ukrainian captions.
+                     A store source may end in '#labeled' / '#unlabeled':
+                     only its files with / without MidiCaps or XMIDI labels (tier 1 vs the rest)
         """
         sources = [s.strip() for s in str(csv_path).split(',') if s.strip()]
         self.csv_paths = [Path(s) for s in sources if not s.startswith('store:')]
-        prebuilt = [Path(f"{s[len('store:'):]}_{split}") for s in sources if s.startswith('store:')]
+        store_sources = [s[len('store:'):].partition('#') for s in sources if s.startswith('store:')]
+        prebuilt = [Path(f"{prefix}_{split}") for prefix, _, _ in store_sources]
+        store_tiers = [None] * len(self.csv_paths) + [tier or None for _, _, tier in store_sources]
+        assert all(t in (None, 'labeled', 'unlabeled') for t in store_tiers), store_tiers
         self.root_dir = Path(root_dir)
         self.split = split
         self.block_size = block_size
@@ -176,14 +190,28 @@ class NoteWindowDataset(Dataset):
             file_styles.append(self._store_styles(store, meta['n_files']))
         self._tokens = None  # memmaps, opened lazily in each DataLoader worker
         self._programs = None
+        self.caption_dropout = caption_dropout
+        self.caption_mode = caption_mode
+        self.captioners = None
+        if captions or any(store_tiers):
+            from musicar.captions import StoreCaptions
+            self.captioners = [StoreCaptions(store.name, captions or 'data/labels', uk_share=caption_uk)
+                               for store in self.store_dirs]
+        self.with_captions = bool(captions)
 
-        store_ids, starts, lengths, styles_kept = [], [], [], []
+        store_ids, starts, lengths, styles_kept, file_ids = [], [], [], [], []
         for i, store in enumerate(self.store_dirs):
             offsets = np.load(store / "offsets.npy")
             n = np.diff(offsets) + 2 * self.pad  # virtual length incl. BOS/EOS
             keep = n > self.block_size  # need block_size + 1 notes because targets are shifted by one
             if self.pad_short or self.pack_short:
                 keep = n >= self.min_notes + 2 * self.pad
+            if store_tiers[i]:
+                labeled = np.zeros(len(n), bool)
+                labeled[[f for f in self.captioners[i].labels if self.captioners[i].labeled(f)]] = True
+                keep &= labeled if store_tiers[i] == 'labeled' else ~labeled
+                print(f"{store.name}#{store_tiers[i]}: {int(keep.sum()):,} files")
+            file_ids.append(np.flatnonzero(keep))
             store_ids.append(np.full(int(keep.sum()), i, dtype=np.int32))
             starts.append(offsets[:-1][keep])
             lengths.append(n[keep])
@@ -192,6 +220,7 @@ class NoteWindowDataset(Dataset):
                 assert len(ids) == len(n), f"{store}: {len(ids)} style entries for {len(n)} files"
                 styles_kept.append(ids[keep])
         self.store_ids, self.starts, self.lengths = map(np.concatenate, (store_ids, starts, lengths))
+        self.file_ids = np.concatenate(file_ids)  # each kept file's index in its own store (label tables)
         self.file_style = np.concatenate(styles_kept) if self.style_ids is not None else None
         if len(self.lengths) == 0:
             raise ValueError("No MIDI sequences longer than block_size. Reduce block_size or check the data.")
@@ -424,7 +453,22 @@ class NoteWindowDataset(Dataset):
             if self.augment and not self.eval_stride and random.random() < self.style_dropout:
                 style = 0
             x = x + (torch.tensor(style),)
+        if self.with_captions:
+            x = x + (self._caption(file_idx),)
         return x, y
+
+    def _caption(self, file_idx):
+        """The caption string of a window of file_idx (see captions / caption_mode in __init__)."""
+        if self.eval_stride:
+            if self.caption_mode == 'none':
+                return ''
+            if self.caption_mode == 'shuffled':  # a fixed other file: half the file list away
+                file_idx = (file_idx + self.n_files // 2) % self.n_files
+            store_id, fid = int(self.store_ids[file_idx]), int(self.file_ids[file_idx])
+            return self.captioners[store_id].caption(fid, random.Random(store_id * 10_000_000 + fid))
+        if self.augment and random.random() < self.caption_dropout:
+            return ''
+        return self.captioners[int(self.store_ids[file_idx])].caption(int(self.file_ids[file_idx]))
 
     def _read_packed(self, file_idx):
         """A short file followed by random short files of the same store (drawn per note), whole, cut at
@@ -516,9 +560,10 @@ def quantize_velocity(velocity, velocity_bins):
 
 def collate_windows(batch, extra_names=()):
     """Dataset items -> ((4 note streams, {name: tensor} of the optional inputs `extra_names`, in item order after the
-    4 streams, e.g. 'program', 'style'), the target streams)."""
+    4 streams, e.g. 'program', 'style', 'text'), the target streams). Strings (captions) stay a list."""
     xs, ys = zip(*batch)
-    x = [torch.stack([x[i] for x in xs]) for i in range(len(xs[0]))]
+    x = [[x[i] for x in xs] if isinstance(xs[0][i], str) else torch.stack([x[i] for x in xs])
+         for i in range(len(xs[0]))]
     assert len(x) == 4 + len(extra_names), f"{len(x)} input streams, expected 4 + {list(extra_names)}"
     y = tuple(torch.stack([y[i] for y in ys]) for i in range(len(ys[0])))
     return (tuple(x[:4]), dict(zip(extra_names, x[4:]))), y
