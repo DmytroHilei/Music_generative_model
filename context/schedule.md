@@ -5,7 +5,7 @@ details in `context/claude/agents.md` (item 15h for text control, "Inference + p
 Update the status column when a step is done.
 
 Times: **work** = focused working days (writing code, checking results); **machine** = unattended compute.
-Calendar weeks are targets, not commitments. Last update: 2026-10-15 (evening, chat demo added).
+Calendar weeks are targets, not commitments. Last update: 2026-10-18 (second pilot run).
 
 ## Overview
 
@@ -29,11 +29,11 @@ ourselves for the rest of the pretraining data.
 | 1.2 | Match the labels to songs already in our token stores (by file checksum) | 0.5 day | minutes | ✅ 2026-10-15 (local stores; full stores on the 5090) |
 | 1.3 | Compute simple per-song features (key, tempo, density, register, instruments) | 0.5 day | minutes | ✅ 2026-10-15 (local stores; ~1.5M songs take a few minutes on the laptop CPU) |
 | 1.4 | **Probe**: does our model's internal representation know genre / emotion / artist? | 0.5 day | minutes | ✅ 2026-10-15 passed: +11-18 points over plain statistics |
-| 1.5 | Embed all songs (on the rented 5090), label the rest with classifiers trained on the good labels, keep only confident labels | 0.5 day | ~2-3 h on the 5090 (~€1) | ☐ |
-| 1.6 | Caption builder: templates + Qwen paraphrases, one caption per training window | 1-1.5 days | ~1 h | ☐ |
-| 2 | Model code: text encoder + adapter, training flags, text prompts in generation, tests | 2.5 days | — | ☐ |
+| 1.5 | Embed all songs (on the rented 5090), label the rest with classifiers trained on the good labels, keep only confident labels | 0.5 day | ~2-3 h on the 5090 (~€1) | ✅ 2026-10-16 local stores (Aria overnight); full stores on the 5090 |
+| 1.6 | Caption builder: templates + Qwen paraphrases, one caption per training window | 1-1.5 days | ~1 h | ◐ 2026-10-18: Qwen paraphrases + Ukrainian labels replaced by hand-written EN + UK templates; MidiCaps UK translations fixed by rules (86% kept); waits for the user's review |
+| 2 | Model code: text encoder + adapter, training flags, text prompts in generation, tests | 2.5 days | — | ✅ 2026-10-17 (captions provisional: English only, until 1.6 is reviewed) |
 | 2b | Model code for the chat demo: pieces that end at a requested length, and regenerating a part ("change the ending") | 1.5 days | — | ☐ |
-| 3 | Pilot on the 107M model: does it follow captions? frozen vs trainable model; then length + part-regeneration check | 1.5 days | one evening + ~1 h | ☐ **decision point** |
+| 3 | Pilot on the 107M model: does it follow captions? frozen vs trainable model; then length + part-regeneration check | 1.5 days | one evening + ~1 h | ◐ P1 2026-10-17: trainable model wins, following weak; P2 2026-10-18 (centered caption vectors, more piece starts): instruments + tempo + loudness follow with guidance; T2 prefix 2026-10-18 chosen; with the new EN + UK captions Ukrainian prompts follow too (piano, tempo); key, drums not yet |
 | 4 | Train the 450M with text (+ length/ending + part regeneration) on the rented RTX 5090, 2-3 passes over the good labels | 0.5 day | 12-20 h (+2 h setup), ~€5-8 | ☐ |
 | 5 | Redo the Ukrainian fine-tunes (piano, multi-track) on top, with captions | 1.5 days | ~2-3 h | ☐ |
 | 6 | Evaluation and listening (English + Ukrainian prompts) | 1 day | ~1 h | ☐ |

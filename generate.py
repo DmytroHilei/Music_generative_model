@@ -85,6 +85,11 @@ def parse_args():
     parser.add_argument("--style", type=str, default=None,
                         help="models trained with styles: a name from data/styles.json (genre or artist, e.g. pop, "
                              "Скрябін) or 'none' (default: none = unconditional)")
+    parser.add_argument("--text", type=str, default=None,
+                        help="models trained with text (text_dim): a prompt in English or Ukrainian, e.g. "
+                             "'a sad slow piano ballad' (default: none = unconditional)")
+    parser.add_argument("--cfg-scale", type=float, default=1.0,
+                        help="classifier-free guidance strength over --text / --style (1 = off; e.g. 1.5-3)")
     parser.add_argument("--min-notes", type=int, default=0,
                         help="models with BOS/EOS: don't allow the end token before this many new notes")
     parser.add_argument("--density", type=str, default=None,
@@ -245,6 +250,7 @@ def generate_batch(model, config, args, pieces, seed, outs, device, progress=Non
             print(f"Prompt for {out.name}: {label}")
     has_prompt = bool(pieces or args.prompt)
     style = style_id(config, args.style)
+    text = text_vector(config, args.text, device)
     target_nps = None
     if args.density == "prompt":
         if not has_prompt or pitch.size(1) < 2:
@@ -279,9 +285,21 @@ def generate_batch(model, config, args, pieces, seed, outs, device, progress=Non
             return_programs=True,
             program_temperature=args.instrument_temperature,
             cond=cond,
+            text=text,
+            cfg_scale=args.cfg_scale,
         )
     print(f"  {len(outs) * args.max_new_tokens / (time.time() - t0):.0f} notes/s")
     save_samples(outs, [t.cpu() for t in (pitch, velocity, duration, delta_time, programs)], n_prompt, args, config)
+
+
+def text_vector(config, prompt, device):
+    """The caption vector of --text (LaBSE, frozen) for models trained with text, else None."""
+    if not prompt:
+        return None
+    if not config.text_dim:
+        raise SystemExit("this checkpoint was trained without text")
+    from musicar.text import TextEncoder
+    return TextEncoder(device=device).encode([prompt], tokens=config.text_prefix > 0)
 
 
 def style_id(config, name):

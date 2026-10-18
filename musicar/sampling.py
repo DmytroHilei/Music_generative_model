@@ -41,7 +41,7 @@ def generate(model, pitch, velocity, duration, delta_time, max_new_tokens, tempe
              anchor=0, slide=None, progress=None, dt_bias=0.0, target_nps=None, dt_seconds=0.02,
              cuda_graph=True, style=None, min_new=0, program=0, top_p=None, cfg_scale=1.0,
              eos_t1=False, programs=None, allowed_programs=None, return_programs=False, program_temperature=None,
-             cond=None):
+             cond=None, text=None):
     """
     Batched sampling (B rows, same prompt length) with a preallocated KV cache: each new note costs one position
     through the model, not a full re-run. On CUDA the one-note transformer step is captured once as a CUDA graph
@@ -67,9 +67,12 @@ def generate(model, pitch, velocity, duration, delta_time, max_new_tokens, tempe
     program_temperature: temperature of the instrument head only (default: temperature). Lower = fewer switches to
       new instruments; at 0.9 the instrument choice drifted to dozens of rare instruments.
     top_p: nucleus sampling, keep the smallest set of values whose probability reaches top_p (after top_k).
-    cfg_scale != 1 (needs a style): classifier-free guidance. The batch runs twice, with the style and with
-      style 0 (none, which style dropout trained), and every head samples from uncond + s * (cond - uncond); both
-      halves are fed the same note. Not combined with target_nps.
+    text: models with text_dim: caption vectors (text_dim,) or (B, text_dim) from musicar.text.TextEncoder; text_prefix
+      models: token states (L, text_dim) or (B, L, text_dim) (encode(..., tokens=True)), whose prefix occupies the
+      first text_prefix cache slots and is rebuilt with every refill.
+    cfg_scale != 1 (needs a style or a text): classifier-free guidance. The batch runs twice, with the style / text
+      and with style 0 / no text (none, which style and caption dropout trained), and every head samples from
+      uncond + s * (cond - uncond); both halves are fed the same note. Not combined with target_nps.
     eos_t1: EOS keeps its probability at temperature 1 (and outside top-k/top-p); the other pitches use the
       tempered distribution, rescaled to the remaining mass. Lower temperatures otherwise starve the rare EOS.
     Special tokens (pitch vocab 130): BOS is never sampled; EOS (end of piece) not before min_new notes. Rows keep
@@ -81,7 +84,7 @@ def generate(model, pitch, velocity, duration, delta_time, max_new_tokens, tempe
     assert 0 <= anchor and anchor + slide < L, "need anchor + slide < block_size"
     device = pitch.device
     Bo = pitch.size(0)  # rows asked for; with guidance the model runs 2 * Bo (conditional, then unconditional)
-    guided = cfg_scale != 1.0 and style is not None
+    guided = cfg_scale != 1.0 and (style is not None or text is not None)
     assert not (guided and target_nps is not None), "guidance with a density target isn't supported"
     if guided:
         pitch, velocity, duration, delta_time = (torch.cat([t, t]) for t in (pitch, velocity, duration, delta_time))
@@ -109,6 +112,13 @@ def generate(model, pitch, velocity, duration, delta_time, max_new_tokens, tempe
             style = torch.cat([style, torch.zeros_like(style)])
     if cond is not None and guided:
         cond = tuple(torch.cat([c, c]) for c in cond)
+    k_pre = model.config.text_prefix  # cache slots of the T2 prefix in front of the notes
+    if text is not None:
+        text = torch.as_tensor(text, dtype=torch.float32, device=device)
+        text = text.reshape((-1,) + text.shape[-2 if k_pre else -1:])
+        text = text.expand(Bo, *text.shape[1:]).contiguous()
+        if guided:
+            text = torch.cat([text, torch.zeros_like(text)])
     n_prog = model.config.n_programs
     sample_programs = bool(n_prog) and program is None
     fixed_program = torch.full((B, 1), int(program), dtype=torch.long, device=device) \
@@ -164,8 +174,8 @@ def generate(model, pitch, velocity, duration, delta_time, max_new_tokens, tempe
     C = model.config.n_embd
     # a sequence that fits the context never refills the cache, so it only needs prompt + new slots (less memory,
     # and the one-note step attends over fewer slots)
-    cache = KVCache(model.config.n_layer, B, model.config.n_head, min(L, total), C // model.config.n_head, device,
-                    dtype)
+    cache = KVCache(model.config.n_layer, B, model.config.n_head, min(L, total) + k_pre, C // model.config.n_head,
+                    device, dtype)
 
     def prefill(n):
         """Refill the cache from the window ending at note n; returns (last hidden state, cache fill)."""
@@ -175,13 +185,15 @@ def generate(model, pitch, velocity, duration, delta_time, max_new_tokens, tempe
             recent = L - slide - anchor
             window = [torch.cat([o[:, :anchor], o[:, n - recent:n]], dim=1) for o in out]
         w = window[0].size(1)
-        if w == 1:
+        if w == 1 and not k_pre:
             cache.pos.fill_(0)  # a 1-note window goes through the single-step path at slot 0
         prog = None
         if prog_out is not None:
             prog = prog_out[:, :n] if n <= L else torch.cat([prog_out[:, :anchor],
                                                              prog_out[:, n - (L - slide - anchor):n]], dim=1)
-        return model.encode(*window, style=style, program=prog, cache=cache, cond=cond)[:, [-1], :], w
+        kw = dict(step=False) if k_pre else {}  # prefix + window: a prefill even for a 1-note window
+        return model.encode(*window, style=style, program=prog, cache=cache, cond=cond, text=text,
+                            **kw)[:, [-1], :], w
 
     # the one-note step: static inputs -> static output, optionally captured as a CUDA graph
     step_in = [torch.zeros(B, 1, dtype=torch.long, device=device) for _ in range(4)]
@@ -195,11 +207,11 @@ def generate(model, pitch, velocity, duration, delta_time, max_new_tokens, tempe
         stream.wait_stream(torch.cuda.current_stream())
         with torch.cuda.stream(stream):  # warm-up outside the graph (allocator, kernel selection)
             for _ in range(2):
-                model.encode(*step_in, style=step_style, program=step_prog, cache=cache, cond=cond)
+                model.encode(*step_in, style=step_style, program=step_prog, cache=cache, cond=cond, text=text)
         torch.cuda.current_stream().wait_stream(stream)
         graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(graph):
-            step_out = model.encode(*step_in, style=step_style, program=step_prog, cache=cache, cond=cond)
+            step_out = model.encode(*step_in, style=step_style, program=step_prog, cache=cache, cond=cond, text=text)
         # the warm-up and capture wrote junk into slot 0; prefill below overwrites every slot it uses
 
     def step(new, pos, prog=None):
@@ -207,11 +219,11 @@ def generate(model, pitch, velocity, duration, delta_time, max_new_tokens, tempe
             buf.copy_(t)
         if step_prog is not None:
             step_prog.copy_(prog)
-        cache.pos.fill_(pos)
+        cache.pos.fill_(pos + k_pre)
         if graph is not None:
             graph.replay()
             return step_out
-        return model.encode(*step_in, style=step_style, program=step_prog, cache=cache, cond=cond)
+        return model.encode(*step_in, style=step_style, program=step_prog, cache=cache, cond=cond, text=text)
 
     h, filled = prefill(n0)
     for i in range(max_new_tokens):
