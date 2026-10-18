@@ -9,14 +9,15 @@ wandb/
 wandb_logs/
 checkpoints*/
 data/*/
-# tracked inside data/: the artist lists and MAESTRO's metadata (not its MIDI folders)
+# tracked inside data/: the artist lists, MAESTRO's metadata (not its MIDI folders), the Skryabin CSV
 !data/artists/
+!data/skryabin/
 !data/maestro-v3.0.0/
 data/maestro-v3.0.0/*/
 data/*.zip
 giant_midis/
-Skryabin/*.mp3
-Skryabin/midi/
+data/skryabin/*.mp3
+data/skryabin/midi/
 *.mid
 *.midi
 *.mp3

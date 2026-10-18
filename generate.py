@@ -8,12 +8,12 @@ import pandas as pd
 import pretty_midi
 import torch
 
-from musicar.checkpoint import load_model, resolve_checkpoint
-from musicar.data_loader import (BOS_PITCH, DRUM_PROGRAM, EOS_PITCH, density_level, load_styles, tokenize_midi,
+from musicar.model.checkpoint import load_model, resolve_checkpoint
+from musicar.data.loader import (BOS_PITCH, DRUM_PROGRAM, EOS_PITCH, density_level, load_styles, tokenize_midi,
                                  window_conditions)
 from musicar.jobstatus import JobStatus
-from musicar.midi_io import render_mp3, tokens_to_midi
-from musicar.sampling import generate, with_bos
+from musicar.data.midi_io import render_mp3, tokens_to_midi
+from musicar.generation.sampling import generate, with_bos
 
 
 def parse_args():
@@ -298,7 +298,7 @@ def text_vector(config, prompt, device):
         return None
     if not config.text_dim:
         raise SystemExit("this checkpoint was trained without text")
-    from musicar.text import TextEncoder
+    from musicar.text.encoder import TextEncoder
     return TextEncoder(device=device).encode([prompt], tokens=config.text_prefix > 0)
 
 

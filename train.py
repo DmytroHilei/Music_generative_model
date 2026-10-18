@@ -1,10 +1,10 @@
 """
 Training script for pretraining and fine-tuning (nanoGPT style).
 
-    python train.py config/pretrain.py
-    python train.py config/finetune_skryabin.py
-    python train.py config/pretrain.py config/smoke.py       # quick sanity run
-    python train.py config/pretrain.py --dropout=0.1 --n_embd=512
+    python train.py config/pretrain/pretrain.py
+    python train.py config/finetune/finetune_skryabin.py
+    python train.py config/pretrain/pretrain.py config/smoke.py       # quick sanity run
+    python train.py config/pretrain/pretrain.py --dropout=0.1 --n_embd=512
 
 init_from:
     'scratch'  - new model
@@ -26,15 +26,15 @@ import torch
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from musicar.checkpoint import (ARCH_KEYS, bf16_cpu_state, load_expanded, merge_model_args, save_atomic,
+from musicar.model.checkpoint import (ARCH_KEYS, bf16_cpu_state, load_expanded, merge_model_args, save_atomic,
                                 strip_compile_prefix)
-from musicar.data_loader import (NoteWindowDataset, collate_windows, load_styles, source_name, val_loader,
+from musicar.data.loader import (NoteWindowDataset, collate_windows, load_styles, source_name, val_loader,
                                  window_conditions)
 from musicar.eval.val_loss import estimate_val_loss, summed_ce
-from musicar.fp8 import convert_fp8, fp8_supported, refresh_fp8_weights
-from musicar.memory import spill_to_cpu
-from musicar.model import MusicConfig, GPT, STREAM_ORDER
-from musicar.optim import build_optimizer, cooldown_start, freeze_params, lr_at, set_lr
+from musicar.training.fp8 import convert_fp8, fp8_supported, refresh_fp8_weights
+from musicar.training.memory import spill_to_cpu
+from musicar.model.gpt import MusicConfig, GPT, STREAM_ORDER
+from musicar.training.optim import build_optimizer, cooldown_start, freeze_params, lr_at, set_lr
 
 # -----------------------------------------------------------------------------
 # I/O
@@ -115,7 +115,7 @@ n_programs = 0            # multi-instrument: 129 = GM programs + drums (needs a
 # text control (context/claude/text_control.md): a caption per window from the label tables in `captions`, encoded by
 # the frozen `text_encoder`, added at every position through the model's zero-init text_proj (text_dim = its width)
 text_encoder = ''         # e.g. 'sentence-transformers/LaBSE'; '' = off
-captions = ''             # labels dir, e.g. 'data/labels' (musicar/captions.py); store sources may end in '#labeled'
+captions = ''             # labels dir, e.g. 'data/labels' (musicar/text/captions.py); store sources may end in '#labeled'
 caption_dropout = 0.15    # training: share of windows with no caption (keeps the unconditional model, enables guidance)
 caption_uk = 0.3          # share of Ukrainian captions (templates + fixed MidiCaps translations), train and val
 text_lr_mult = 1.0        # LR multiplier of the text adapter (own AdamW group, no weight decay)
@@ -162,11 +162,11 @@ oom_spill_frac = 0.6
 seed = 1337
 # -----------------------------------------------------------------------------
 config_keys = [k for k, v in globals().items() if not k.startswith('_') and isinstance(v, (int, float, bool, str))]
-exec(open('musicar/configurator.py').read())  # overrides from command line or config file
+exec(open('musicar/training/configurator.py').read())  # overrides from command line or config file
 styles = load_styles(style_map) if style_map else None
 assert bool(text_encoder) == bool(captions), "text control needs both text_encoder and captions"
 if text_encoder:
-    from musicar.text import TEXT_DIM
+    from musicar.text.encoder import TEXT_DIM
     text_dim = TEXT_DIM
 if styles:
     n_styles = len(styles)
@@ -294,11 +294,11 @@ optimizer = build_optimizer(optimizer_name, model, weight_decay, learning_rate, 
                             compile_ns=compile, text_lr_mult=text_lr_mult)
 encoder = None
 if text_encoder:
-    from musicar.text import TextEncoder
+    from musicar.text.encoder import TextEncoder
     encoder = TextEncoder(text_encoder, device=device, dtype=ptdtype if device_type == 'cuda' else torch.float32)
     print(f"text encoder: {text_encoder} (frozen), captions from {captions}")
     if model.config.text_center and not model.text_mean.any():
-        from musicar.text import caption_mean
+        from musicar.text.encoder import caption_mean
         model.text_mean.copy_(caption_mean(encoder, train_dataset))
         print(f"text_mean set from training captions (|mean| {model.text_mean.norm():.3f})")
 if init_from == 'resume':

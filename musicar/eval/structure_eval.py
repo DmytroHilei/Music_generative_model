@@ -34,11 +34,11 @@ import numpy as np
 import pandas as pd
 import torch
 
-from musicar.data_loader import BOS_PITCH, EOS_PITCH, load_styles, tokenize_midi
-from musicar.checkpoint import load_model
-from musicar.midi_io import tokens_to_midi
+from musicar.data.loader import BOS_PITCH, EOS_PITCH, load_styles, tokenize_midi
+from musicar.model.checkpoint import load_model
+from musicar.data.midi_io import tokens_to_midi
 from musicar.jobstatus import JobStatus
-from musicar.sampling import generate
+from musicar.generation.sampling import generate
 
 DT = 0.02
 MAJOR = np.array([6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88])

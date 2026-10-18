@@ -21,8 +21,8 @@ import argparse
 import numpy as np
 import torch
 
-from musicar.data_loader import BOS_PITCH, EOS_PITCH, DRUM_PROGRAM
-from musicar.sampling import generate, prompt_inputs
+from musicar.data.loader import BOS_PITCH, EOS_PITCH, DRUM_PROGRAM
+from musicar.generation.sampling import generate, prompt_inputs
 
 STORE = 'data/cache/gigamidi_clean_validation'
 
@@ -220,7 +220,7 @@ def format_line(step, rows, secs, res):
 def _load_reference():
     import json
     import os
-    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'cloud', 'sample_reference.json')
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'sample_reference.json')
     try:
         return json.loads(open(path).read())
     except (OSError, ValueError):
@@ -234,7 +234,7 @@ def main():
     p.add_argument('--new-notes', type=int, default=1000)
     p.add_argument('--temperature', type=float, default=0.9)
     p.add_argument('--reference', default=None, help="write the real-continuation metrics to this JSON (no model) "
-                   "and exit; cloud/status_tables.py shows them as the 'real' row")
+                   "and exit; cloud/status/status_tables.py shows them as the 'real' row")
     args = p.parse_args()
     if args.reference:
         import json
@@ -244,7 +244,7 @@ def main():
         return
     if not args.checkpoint:
         p.error('--checkpoint is required (or --reference to write the real-music reference)')
-    from musicar.checkpoint import load_model
+    from musicar.model.checkpoint import load_model
     model, _ = load_model(args.checkpoint, 'cuda', torch.bfloat16)
     res = evaluate(model, fixed_prompts(args.rows), args.new_notes, args.temperature)
     for mode, m in res.items():

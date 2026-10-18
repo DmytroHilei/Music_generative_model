@@ -33,9 +33,9 @@ import math
 import numpy as np
 import torch
 
-from musicar.data_loader import DRUM_PROGRAM
+from musicar.data.loader import DRUM_PROGRAM
 from musicar.eval.sample_eval import consistency_metrics, row_metrics
-from musicar.sampling import generate, prompt_inputs
+from musicar.generation.sampling import generate, prompt_inputs
 
 STORE = 'data/cache/gigamidi_clean_validation'
 STYLES = ('rock_pop', 'orchestral', 'piano_keys', 'electronic', 'acoustic')
@@ -129,7 +129,7 @@ def csv_store(csv, split='validation', block_size=1128):
     store dir, offsets, tokens (N, 4) memmap, programs (N,) memmap)."""
     from pathlib import Path
     import pandas as pd
-    from musicar.data_loader import NoteWindowDataset
+    from musicar.data.loader import NoteWindowDataset
     ds = NoteWindowDataset(csv, root_dir='.', split=split, block_size=block_size, programs=True,
                            eval_stride=block_size)
     store = ds.store_dirs[0]
@@ -286,7 +286,7 @@ METRICS = {'all', 'notes_per_s', 'top_share', 'takeover', 'runaway', 'out_of_ban
 
 
 def format_line(step, rows, secs, res):
-    """One log line; cloud/status_tables.py parses it."""
+    """One log line; cloud/status/status_tables.py parses it."""
     parts = []
     for mode, r in res.items():
         groups = [s for s in r if s not in METRICS]
@@ -320,7 +320,7 @@ def main():
                       + ', '.join(name(g) for g in x['instruments'])[:110])
         return
     import time
-    from musicar.checkpoint import load_model
+    from musicar.model.checkpoint import load_model
     model, it = load_model(args.checkpoint, 'cuda', torch.bfloat16)
     t = time.time()
     res = evaluate(model, sset, cuda_graph=not args.no_cuda_graph)

@@ -1,4 +1,4 @@
-# ~1 minute sanity run: python train.py config/pretrain.py config/smoke.py
+# ~1 minute sanity run: python train.py config/pretrain/pretrain.py config/smoke.py
 out_dir = 'checkpoints_smoke'
 wandb_log = False
 max_iters = 30

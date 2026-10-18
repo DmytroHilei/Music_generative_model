@@ -28,7 +28,7 @@ style.
   - growing a trained model 2.5–4× faster than training from scratch;
   - the fine-tuned 450M halves the distance to real piano covers vs the earlier best model.
 - **Rejected after testing:** mixture of experts, a bigger pitch head, future-prediction heads, velocity augmentation
-  (kept in [`musicar/rejected.py`](musicar/rejected.py) with their results).
+  (kept in [`musicar/model/rejected.py`](musicar/model/rejected.py) with their results).
 
 Full results: [`docs/experiments.md`](docs/experiments.md).
 
@@ -75,11 +75,11 @@ MP3 rendering needs `fluidsynth`, `ffmpeg` and a General MIDI soundfont (`fluid-
 ## Usage
 
 ```bash
-.venv/bin/python train.py config/finetune_ua450.py                       # train / fine-tune
+.venv/bin/python train.py config/finetune/finetune_ua450.py                       # train / fine-tune
 .venv/bin/python generate.py --checkpoint checkpoints/ua_2048_v2 --style cover --temperature 0.9 \
     --max-new-tokens 2000 --output samples/out.mid                       # sample
 .venv/bin/python tools/status.py                                         # live dashboard of runs and jobs
-.venv/bin/python eval/seed_compare.py --checkpoints checkpoints/a checkpoints/b \
+.venv/bin/python eval/compare/seed_compare.py --checkpoints checkpoints/a checkpoints/b \
     --out-dir samples/compare                                            # continue Ukrainian songs, compare
 .venv/bin/python -m musicar.eval.structure_eval --checkpoints checkpoints/a   # whole-song structure metrics
 ```

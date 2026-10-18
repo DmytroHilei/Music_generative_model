@@ -62,7 +62,7 @@ dropout 0, ~2 passes gave the best generations (Section 7).
 
 ## 5. Tested and rejected
 
-Kept in [`musicar/rejected.py`](../musicar/rejected.py) with their results and the wiring needed to reuse them.
+Kept in [`musicar/model/rejected.py`](../musicar/rejected.py) with their results and the wiring needed to reuse them.
 
 | Idea | Result | Why it lost |
 |---|---|---|

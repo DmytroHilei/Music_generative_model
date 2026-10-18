@@ -2,7 +2,7 @@
 
 import torch
 
-from musicar.model import STREAM_ORDER
+from musicar.model.gpt import STREAM_ORDER
 
 
 def summed_ce(metrics):
