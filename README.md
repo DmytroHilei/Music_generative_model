@@ -35,28 +35,32 @@ Full results: [`docs/experiments.md`](docs/experiments.md).
 ## Layout
 
 ```
-train.py              training (nanoGPT-style configs: python train.py config/<run>.py --key=value)
+train.py              training (nanoGPT-style configs: python train.py config/<group>/<run>.py --key=value)
 generate.py           sampling: MIDI + MP3, prompts from files or validation sets
 musicar/              core package
-  model.py            the architecture: transformer, embeddings, cascade heads, KV cache
-  sampling.py         generation: KV-cache decoding, CUDA graph, density / instrument / EOS controls
-  optim.py            AdamW, AdamW8bit, Muon
-  fp8.py              torchao float8 training of the transformer blocks
-  memory.py           selective activation checkpointing, spilling saved tensors to RAM
-  rejected.py         archive of tested-and-rejected architecture options (MoE, future heads, ...)
-  data_loader.py      tokenization, memory-mapped token stores, the training dataset, window conditions
-  midi_io.py          tokens -> MIDI, MIDI -> MP3
-  checkpoint.py       checkpoint path resolution, loading into a grown model
-  configurator.py     command-line / config-file overrides for train.py
-  jobstatus.py        progress files for the dashboard
+  model/              gpt.py (transformer, embeddings, cascade heads, KV cache), checkpoint.py (paths, loading into
+                      a grown model, saving), rejected.py (tested-and-rejected options: MoE, future heads, ...)
+  training/           optim.py (AdamW, AdamW8bit, Muon, LR schedule), fp8.py (torchao float8), memory.py (selective
+                      activation checkpointing, spilling to RAM), configurator.py (overrides for train.py)
+  data/               loader.py (tokenization, memory-mapped token stores, the dataset, window conditions),
+                      midi_io.py (tokens -> MIDI, MIDI -> MP3)
+  text/               encoder.py (frozen LaBSE), vocab.py (EN + UK caption vocabulary), captions.py (per-file captions)
+  generation/         sampling.py (KV-cache decoding, CUDA graph, density / instrument / EOS / guidance controls),
+                      settings_router.py (generation settings from the seed song)
   eval/               evaluations used during training and by the eval/ scripts
-config/               run configs
-data/                 datasets, token stores and their metadata (see data/README.md)
-data_prep/            dataset preparation: downloads, tokenization into stores, audio -> MIDI
+  jobstatus.py        progress files for the dashboard
+config/               run configs: pretrain/, finetune/, pilots/, smoke.py (stacks on any of them)
+data/                 datasets, token stores and their metadata (see data/README.md); skryabin/ = the hand-picked songs
+data_prep/            datasets/ (downloads, tokenization into stores, store splits), songs/ (song search, download,
+                      audio -> MIDI, fine-tune CSVs), labels/ (features, labels, pseudo-labels, caption text)
 docs/                 experiment results (experiments.md)
-eval/                 analysis scripts: seeded comparisons, sampling sweeps, settings search
-tools/                status dashboard, throughput benchmark, fine-tune sweep, bf16 export
-cloud/                rented-GPU pipeline (setup, preflight, launch, checkpoint sync)
+eval/                 settings/ (sampling sweeps, settings search), compare/ (seeded comparisons, text control,
+                      sample statistics), probes/ (hidden-state probes, label coverage)
+tools/                status.py (dashboard), sweeps/ (fine-tune sweeps), bench/ (GPU / CPU throughput),
+                      checkpoints/ (bf16 export, weight interpolation)
+cloud/                rented-GPU pipeline: setup/ (instance setup, preflight), run/ (launch, auto-resume, stop),
+                      sync/ (Hugging Face Hub checkpoints and data), status/
+tests/                CPU tests per package area: python tests/run.py [filter]  (or pytest tests/)
 legacy/               earlier LSTM and transformer versions
 ```
 

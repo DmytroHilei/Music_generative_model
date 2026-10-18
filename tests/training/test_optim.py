@@ -49,7 +49,8 @@ def test_muon_groups_and_step():
     loss.backward()
     opt.step()
     opt.zero_grad()
-    assert all(not torch.equal(a, b) for a, b in zip(before, m.parameters()) if a.dim() == 2)
+    moved = {n: not torch.equal(a, p) for a, (n, p) in zip(before, m.named_parameters()) if a.dim() == 2}
+    assert all(v for n, v in moved.items() if n != 'transformer.style.weight'), moved  # no style given: no grad
     state = opt.state_dict()
     opt.load_state_dict(state)
     assert all(p.grad is None for p in m.parameters())

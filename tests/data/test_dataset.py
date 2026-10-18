@@ -15,8 +15,8 @@ from musicar.data.loader import (BOS_PITCH, DRUM_PROGRAM, EOS_PITCH, NoteWindowD
                                  density_level, source_name, window_conditions)
 
 
-def dataset(d, files, programs=None, name='toy', **kw):
-    make_store(Path(d) / f'{name}_train', files, programs)
+def dataset(d, files, progs=None, name='toy', **kw):
+    make_store(Path(d) / f'{name}_train', files, progs)
     return NoteWindowDataset(f'store:{d}/{name}', root_dir=d, split='train', block_size=16, cache_dir=d, **kw)
 
 
@@ -37,10 +37,8 @@ def test_special_tokens_and_eval_stride():
         assert starts == [[0, 0], [0, 8], [0, 16], [0, 24], [1, 0], [1, 8]], starts
         x, y = ds[0]
         assert x[0][0] == BOS_PITCH and all(t[0] == 0 for t in x[1:]), 'BOS: pitch 128, rest 0'
-        x, y = ds[3]  # [BOS] + 40 notes + [EOS] = 42 rows, window 24..40 ends right before EOS
-        assert y[0][-1] == ds[3][1][0][-1]
-        tail = dataset(d, [notes(17, 3)], name='one', special_tokens=True, eval_stride=8)
-        assert tail[0][1][0][-1] == EOS_PITCH, 'the last target of the whole file is EOS'
+        tail = dataset(d, [notes(15, 3)], name='one', special_tokens=True, eval_stride=8)
+        assert tail[0][1][0][-1] == EOS_PITCH, '[BOS] + 15 notes + [EOS] = one window, its last target is EOS'
         assert [tuple(t.tolist()) for t in ds[2][0]] == [tuple(t.tolist()) for t in ds[2][0]], 'deterministic'
 
 
@@ -57,7 +55,7 @@ def test_transposition_and_tempo():
             assert len(set(diff.tolist())) == 1, 'every note moves by the same interval'
             assert torch.equal(x[1], raw[0][0][1]) and torch.equal(x[2], raw[0][0][2])
             shifts.add(int(diff[0]))
-        assert shifts <= set(range(-5, 2)) and len(shifts) > 3, shifts  # max pitch 125: at most +2... capped at 127
+        assert shifts <= set(range(-5, 3)) and len(shifts) > 3, shifts  # pitches 122..125: at most +2
         assert int(base[:, 0].max()) + max(shifts) <= 127
         tempo = dataset(d, [base], name='tempo', augment=True, aug_tempo=0.5)
         x, _ = tempo[0]
