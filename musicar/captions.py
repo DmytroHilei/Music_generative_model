@@ -29,7 +29,10 @@ from musicar import caption_vocab as V
 NOTE_NAMES = ['C', 'C#', 'D', 'Eb', 'E', 'F', 'F#', 'G', 'Ab', 'A', 'Bb', 'B']
 MIDICAPS_FULL = 0.4
 UK_SHARE = 0.3
-P_ATTR = dict(mood=0.8, genre=0.8, drums=1.0, ballad=1.0, instruments=0.7, use=0.6)  # other attributes: 0.5
+P_ATTR = dict(mood=0.8, genre=0.8, drums=1.0, ballad=1.0, instruments=0.7, use=0.6, solo=1.0,
+              no_drums=0.4)  # other attributes: 0.5
+FULL_LIST = 0.8   # files with <= 3 instruments: all of them named
+KEEP_DRUMS = 0.7  # more than 3: drums kept in the named subset
 MAX_ADJ = 3
 PSEUDO_MIN_SECONDS = 20.0
 DRUM_ONLY = 0.9
@@ -183,10 +186,20 @@ class StoreCaptions:
         if drum_only:
             a['drums'] = True
             a.pop('instruments', None)
-        elif 'instruments' not in a:
+        else:  # the feature set lists every instrument with >= 2% of the notes, so leaving one out means something
             ids = _dedupe(V.GM_TO_ID[p] for p in np.flatnonzero(self.instruments[i]))
             if ids:
-                a['instruments'] = rng.sample(ids, min(len(ids), rng.randint(1, 3)))
+                if len(ids) <= 3 and rng.random() < FULL_LIST:
+                    a['instruments'] = rng.sample(ids, len(ids))
+                else:
+                    pick = rng.sample(ids, min(len(ids), rng.randint(1, 3)))
+                    if 'drums' in ids and 'drums' not in pick and rng.random() < KEEP_DRUMS:
+                        pick[-1] = 'drums'
+                    a['instruments'] = pick
+                if len(ids) == 1 and ids[0] != 'drums':
+                    a['solo'] = True
+                elif 'drums' not in ids:
+                    a['no_drums'] = True
         pseudo_ok = (not mc and not xm and self.pseudo is not None and not drum_only
                      and f['seconds'][i] >= PSEUDO_MIN_SECONDS)
         if pseudo_ok:
@@ -269,6 +282,9 @@ def render_en(a, rng):
     genres = _dedupe(rng.choice(V.GENRE[g]['en']) for g in a.get('genre', []))
     genre = ' '.join(genres) if len(genres) < 2 or rng.random() < 0.5 else ' and '.join(genres)
     instruments = [rng.choice(V.INSTRUMENT[i][0]) for i in a.get('instruments', [])]
+    solo = a.get('solo') and len(instruments) == 1
+    if a.get('no_drums'):
+        post.append(rng.choice(['without drums', 'with no drums']))
     if 'time_sig' in a:
         post.append(f"in {a['time_sig']} time")
     rng.shuffle(post)
@@ -278,7 +294,8 @@ def render_en(a, rng):
         post.append(rng.choice([f'in a {mode} key'] if rng.random() < 0.25 else
                                [f'in {key}', f'in the key of {key}', f', {key}']))
 
-    tags = adjs + genres + instruments + ([f'{a["key"][0]} {a["key"][1]}'] if 'key' in a else [])
+    tags = adjs + genres + ([f'solo {instruments[0]}'] if solo else instruments) \
+        + (['no drums'] if a.get('no_drums') else []) + ([f'{a["key"][0]} {a["key"][1]}'] if 'key' in a else [])
     if 'tempo' in a and a['tempo'][1] and not any(t in V.TEMPO[a['tempo'][0]]['en'] for t in tags):
         tags.append(a['tempo'][1])
     form = rng.random()
@@ -291,6 +308,12 @@ def render_en(a, rng):
         relative = rng.choice([f' that feels {word}', f' with a {word} mood', f' with a {word} feel'])
     head = ' '.join(w for w in adjs + [genre, noun] if w)
     np_ = head if noun == 'music' else f'{_article(head)} {head}'
+    if solo and rng.random() < 0.5:  # "a sad solo piano piece"
+        head = ' '.join(w for w in adjs + [genre, 'solo', instruments[0], noun] if w)
+        np_ = f'{_article(head)} {head}'
+        instruments = []
+    elif solo:
+        instruments = [f'solo {instruments[0]}']
     if instruments and form < 0.35:  # "piano and bass playing a sad jazz piece"
         text = f'{_join(instruments)} playing {np_}{relative}' + ''.join(' ' + p if p[0] != ',' else p for p in post)
         return _finish_en(text, rng)
@@ -366,7 +389,11 @@ def render_uk(a, rng):
         if g.get('uk_post'):
             post.append(rng.choice(g['uk_post']))
     instruments = [rng.choice(V.INSTRUMENT[i][1]) for i in a.get('instruments', [])]
-    tags += [ins[0] for ins in instruments]
+    solo = a.get('solo') and len(instruments) == 1
+    tags += [f'{instruments[0][0]} соло'] if solo else [ins[0] for ins in instruments]
+    if a.get('no_drums'):
+        tags.append('без ударних')
+        post.append(rng.choice(['без ударних', 'без барабанів']))
     if 'time_sig' in a:
         post.append(f"у розмірі {a['time_sig']}")
     rng.shuffle(post)
@@ -384,7 +411,9 @@ def render_uk(a, rng):
     request = rng.random() < 0.35
     words = [(_uk_acc(f) if request else f) if fem else m for m, f in adjs]
     head = ' '.join(words + [prefix + (acc if request else nom)])
-    if instruments:
+    if solo:
+        head += f' для {instruments[0][1]} соло'
+    elif instruments:
         style = rng.random()
         if style < 0.4:
             head += ' для ' + _join([ins[1] for ins in instruments], rng.choice([' і ', ' та ']))

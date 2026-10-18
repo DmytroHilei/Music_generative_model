@@ -14,6 +14,10 @@
 # T2 (prefix, same compute as P2; adapter at the default 10x LR: fresh MLP behind a zero-init gate):
 #   python train.py config/text_pilot.py --text_prefix=16 --boundary_frac=0.5 --out_dir=checkpoints/text_t2 \
 #       --wandb_run_name=text-t2
+# T2 v3 (new EN + UK captions, complete instrument lists / solo / without drums, short files padded):
+#   python train.py config/text_pilot.py --text_prefix=16 --boundary_frac=0.5 --pad_short=True \
+#       --out_dir=checkpoints/text_t2_v3 --wandb_run_name=text-t2-v3
+# T2 v3 at double length: + --max_iters=4800 --lr_decay_iters=4800 --save_iters=2400 (out_dir text_t2_v3_long)
 init_from = 'finetune'
 init_ckpt = 'checkpoints/pilot_mi_grown/model_bf16.pt'
 csv_path = 'store:data/cache/gigamidi_replay#labeled,store:data/cache/gigamidi_replay#unlabeled'
