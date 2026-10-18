@@ -125,3 +125,51 @@ Kept in [`musicar/rejected.py`](../musicar/rejected.py) with their results and t
 - A cloud pipeline for rented GPUs: data and checkpoints through private Hugging Face repos with checksums, pinned
   environment, preflight (benchmark, LR probe, resume and SIGTERM tests), crash-restart wrapper, hourly checkpoint sync;
   rehearsed end to end on the laptop before any paid hour.
+
+## 10. Text control
+
+Prompts in English or Ukrainian, with no network or API at generation time: a frozen multilingual sentence encoder
+(LaBSE) reads the prompt, and the music model learns to follow it from captions built offline. Pilots on the 107M
+model (grown to 129 instruments, BOS/EOS, RoPE), each 2,400 steps × 65,536 notes (~1 h on the laptop), same data.
+
+**Labels.** MidiCaps captions (168k) and XMIDI emotion / genre labels (108k) were matched to the token stores by an
+exact note hash; key, density, loudness, register, length and instruments were computed for every file. A linear
+probe on the 450M's hidden states beat note statistics alone by 11–18 points (XMIDI emotion 0.52 vs 0.40, XMIDI genre
+0.56 vs 0.45, key mode 0.84 vs 0.66). Pseudo-labels from those embeddings (layers 7 + 14, linear) gave 4 mood groups
+at ~80% precision for 76% of files. Drum loops and very short files got confident nonsense, so pseudo-labels are used
+only for files ≥ 20 s that are not drum-only.
+
+**Text encoder.** In a 10-pair EN / UK test, LaBSE put every prompt nearest to its own translation (20 / 20);
+multilingual-e5-small 12 / 20, e5-base 10 / 20.
+
+| Run | Conditioning | Caption gain, first 8 notes¹ | Generation from BOS |
+|---|---|---|---|
+| P1, frozen trunk | pooled vector → linear, added at every position | — | no consistent effect |
+| P1, trained trunk | same | +0.222 | tempo / energy words, weak |
+| P2 | caption vectors centred on the mean and rescaled; 25% of windows at a piece start | +0.323 | instruments, tempo, loudness with guidance (piano share 0.81 vs 0.29) |
+| **T2** | 16 prefix vectors from LaBSE token states (learned queries, MLP, gate) | **+0.480** | loudness, guitar, strings; several without guidance; Ukrainian worse |
+| T2 + new captions | 30% Ukrainian captions | — ² | Ukrainian piano share +0.75 and tempo follow; English unchanged |
+
+¹ CE with another file's caption minus with the own caption, first window of 256 held-out files (same files for
+these rows). ² validation captions changed.
+
+- **The caption only matters at the start.** The gain is +0.2–0.5 over the first 8 notes and +0.001–0.002 after 128;
+  afterwards the music itself tells the model what the caption says. A 1,024-position average hides the effect.
+- **Weak following was a signal problem, not a wiring bug.** Gradients reached the adapter (its weights grew from zero
+  to norm 10.9), but 39% of the caption vectors' energy lay in their shared direction, so the adapter mostly learned
+  "a caption is present". Centring the vectors raised the opening gain by 45%.
+- **A trainable trunk is needed:** the frozen trunk never learned to start a piece from the new BOS token.
+- **T2 at the same compute** beat P2 on every validation measure (+0.0043 vs +0.0030 average caption gain, val CE
+  2.687 vs 2.691). Its first launch went to NaN: an all-zero prefix (zero gate and null vectors) gave NaN gradients in
+  the trunk; a small nonzero init fixed it.
+- **LaBSE aligns languages in its sentence vector, not in its token states.** T2 needed Ukrainian captions in training;
+  with them, Ukrainian prompts follow.
+- **Captions from the local LLM (Qwen3 8B) were not usable:** broken English templates ("music for {instruments} make
+  me"), invented content in about half of the Ukrainian label lines, adjective gender errors in ~29% of its MidiCaps
+  translations. Replaced by a hand-written English + Ukrainian vocabulary with gender agreement; the translations were
+  repaired by rules and filtered with a Hunspell dictionary (86% kept).
+- **Drums and key mode did not follow in any run.** Drum-only files are short (below the 1,024-note window), so they
+  made up 0.1–0.3% of training windows, while 93% of labeled windows contained drums and only a third of their captions
+  said so.
+- **Evaluation:** pooled notes/s (all notes over all seconds) reversed one tempo pair because a few slow pieces
+  dominate it; per-piece medians do not. 16 pieces per prompt only resolve large effects.

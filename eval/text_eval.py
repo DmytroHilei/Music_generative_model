@@ -25,31 +25,40 @@ import torch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from musicar.checkpoint import load_model  # noqa: E402
-from musicar.data_loader import BOS_PITCH, DRUM_PROGRAM, EOS_PITCH  # noqa: E402
-from musicar.eval.structure_eval import key_of  # noqa: E402
+from musicar.data_loader import BOS_PITCH, EOS_PITCH  # noqa: E402
 from musicar.jobstatus import JobStatus  # noqa: E402
 from musicar.midi_io import tokens_to_midi  # noqa: E402
 from musicar.sampling import generate  # noqa: E402
 from musicar.text import TextEncoder  # noqa: E402
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'data_prep'))
+from song_features import FIELDS, file_features  # noqa: E402
+
 # (name, prompt); pairs share a stem and differ in the attribute: <stem>+ should raise the metric over <stem>-
 PROMPTS = [
     ('none', ''),
     ('fast+', 'a fast, busy piece'), ('fast-', 'a slow, sparse piece'),
-    ('minor+', 'a song in a minor key'), ('minor-', 'a song in a major key'),
-    ('piano+', 'solo piano'), ('drums+', 'a drum beat'), ('strings+', 'a piece for string ensemble'),
-    ('guitar+', 'a rock song with electric guitar, bass and drums'),
+    ('minor+', 'a piece in a minor key'), ('minor-', 'a piece in a major key'),
     ('loud+', 'a loud, powerful piece'), ('loud-', 'a soft, quiet piece'),
+    ('high+', 'a high-pitched piece'), ('high-', 'a deep, low-pitched piece'),
+    ('piano+', 'solo piano'), ('drums+', 'a drum beat'), ('nodrums+', 'a piece without drums'),
+    ('strings+', 'a piece for string ensemble'), ('guitar+', 'a rock song with electric guitar, bass and drums'),
     ('sad', 'a sad slow piano ballad'), ('happy', 'a happy upbeat pop song'),
     ('uk_fast+', 'швидка енергійна музика'), ('uk_fast-', 'повільна спокійна музика'),
-    ('uk_minor+', 'сумна пісня в мінорі'), ('uk_minor-', 'весела пісня в мажорі'),
-    ('uk_piano+', 'фортепіано соло'), ('uk_drums+', 'барабанний ритм'),
+    ('uk_minor+', 'твір у мінорі'), ('uk_minor-', 'твір у мажорі'),
+    ('uk_loud+', 'гучна потужна музика'), ('uk_loud-', "тиха м'яка музика"),
+    ('uk_high+', 'твір у високому регістрі'), ('uk_high-', 'твір у низькому регістрі'),
+    ('uk_piano+', 'фортепіано соло'), ('uk_drums+', 'барабанний ритм'), ('uk_nodrums+', 'музика без ударних'),
+    ('uk_strings+', 'п\'єса для струнного ансамблю'),
 ]
-# pair stem -> the metric it should move
-PAIRS = {'fast': 'nps', 'minor': 'minor', 'loud': 'velocity', 'piano': 'piano', 'drums': 'drums',
-         'strings': 'strings', 'guitar': 'guitar', 'uk_fast': 'nps', 'uk_minor': 'minor', 'uk_piano': 'piano',
-         'uk_drums': 'drums'}
-METRICS = ('nps', 'ops', 'velocity', 'piano', 'drums', 'strings', 'guitar', 'minor', 'n_notes')
+# pair stem -> the metric it should move (+ minus -, or + minus none; 'nodrums' should lower its metric)
+PAIRS = {'fast': 'nps', 'minor': 'minor', 'loud': 'velocity', 'high': 'pitch', 'piano': 'piano', 'drums': 'drums',
+         'nodrums': 'has_drums', 'strings': 'strings', 'guitar': 'guitar', 'uk_fast': 'nps', 'uk_minor': 'minor',
+         'uk_loud': 'velocity', 'uk_high': 'pitch', 'uk_piano': 'piano', 'uk_drums': 'drums',
+         'uk_nodrums': 'has_drums', 'uk_strings': 'strings'}
+METRICS = ('nps', 'ops', 'velocity', 'pitch', 'piano', 'drums', 'has_drums', 'strings', 'guitar', 'minor', 'n_notes')
+MEDIAN = ('nps', 'ops', 'velocity', 'pitch')  # per-prompt median over rows (a few rows stack hundreds of notes / s)
+KEY_CONF = 0.072  # the caption builder's key threshold (musicar/captions.py)
 DT = 0.02
 
 
@@ -70,19 +79,20 @@ def parse_args():
 
 
 def row_metrics(pitch, vel, dur, dt, prog):
-    """Metrics of one generated row (numpy arrays of the new notes, cut at the first EOS)."""
+    """Metrics of one generated row (numpy arrays of the new notes, cut at the first EOS), computed like the caption
+    labels (data_prep/song_features.file_features): minor = the Krumhansl-Schmuckler key is minor, only when its
+    margin passes the caption threshold (else NaN); has_drums = drums are >= 2% of the notes."""
     end = np.flatnonzero(pitch >= BOS_PITCH)
     n = int(end[0]) if len(end) else len(pitch)
-    pitch, vel, dur, dt, prog = (a[:n] for a in (pitch, vel, dur, dt, prog))
-    secs = max(dt.sum() * DT, 0.5)
-    drums = prog == DRUM_PROGRAM
-    pitched = ~drums
-    key = key_of(pitch[pitched], dur[pitched].astype(np.float64)) if pitched.sum() >= 16 else -1
-    return dict(nps=n / secs, ops=((dt > 0).sum() + 1) / secs, velocity=float(vel.mean()) if n else 0.0,
-                piano=float(np.isin(prog, range(8)).mean()) if n else 0.0, drums=float(drums.mean()) if n else 0.0,
-                strings=float(np.isin(prog, range(40, 52)).mean()) if n else 0.0,
-                guitar=float(np.isin(prog, range(24, 32)).mean()) if n else 0.0,
-                minor=float(key >= 12) if key >= 0 else np.nan, n_notes=n)
+    if n < 16:
+        return dict({k: np.nan for k in METRICS}, n_notes=n)
+    tok = np.stack([a[:n] for a in (pitch, vel, dur, dt)], 1)
+    prog = prog[:n]
+    f = dict(zip(FIELDS, file_features(tok, prog)[0]))
+    return dict(nps=f['nps'], ops=f['ops'], velocity=f['vel_mean'], pitch=f['pitch_mean'] if f['drums'] < 1 else np.nan,
+                piano=float(np.isin(prog, range(8)).mean()), drums=f['drums'], has_drums=float(f['drums'] >= 0.02),
+                strings=float(np.isin(prog, range(40, 52)).mean()), guitar=float(np.isin(prog, range(24, 32)).mean()),
+                minor=float(f['key'] >= 12) if f['key'] >= 0 and f['key_conf'] >= KEY_CONF else np.nan, n_notes=n)
 
 
 def slug(name):
@@ -151,17 +161,15 @@ def main():
 
 
 def summarize(rows):
-    """Per checkpoint x scale: mean metrics per prompt (notes/s = all notes / all seconds of the prompt's rows: a mean
-    of per-row ratios is dominated by the few rows that stack hundreds of notes in a second), then each pair's
-    contrast (+ minus -, or + minus none)."""
+    """Per checkpoint x scale: metrics per prompt (median over rows for MEDIAN, else mean; NaN rows left out), then
+    each pair's contrast (+ minus -, or + minus none)."""
     lines = []
     groups = {}
     for r in rows:
         groups.setdefault((r['checkpoint'], r['cfg']), {}).setdefault(r['prompt'], []).append(r)
     for (ck, s), by_prompt in groups.items():
-        mean = {p: {k: float(np.nanmean([r[k] for r in rs])) for k in METRICS} for p, rs in by_prompt.items()}
-        for p, rs in by_prompt.items():
-            mean[p]['nps'] = sum(r['n_notes'] for r in rs) / sum(r['n_notes'] / r['nps'] for r in rs)
+        agg = lambda k, v: float(np.nanmedian(v) if k in MEDIAN else np.nanmean(v)) if np.isfinite(v).any() else np.nan
+        mean = {p: {k: agg(k, np.array([r[k] for r in rs], float)) for k in METRICS} for p, rs in by_prompt.items()}
         lines += [f'## {ck}, cfg {s:g}', '', '| prompt | ' + ' | '.join(METRICS) + ' |',
                   '|---|' + '---|' * len(METRICS)]
         for p, m in mean.items():
