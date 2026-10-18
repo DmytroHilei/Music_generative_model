@@ -58,7 +58,9 @@ def read_store(store):
     offsets = np.load(Path(store) / 'offsets.npy')
     n = int(offsets[-1])
     tokens = np.memmap(Path(store) / 'tokens.u16', dtype=np.uint16, mode='r', shape=(n, 4))
-    programs = np.memmap(Path(store) / 'programs.u8', dtype=np.uint8, mode='r', shape=(n,))
+    path = Path(store) / 'programs.u8'  # piano-only stores have none: program 0 (as in musicar/data_loader.py)
+    programs = (np.memmap(path, dtype=np.uint8, mode='r', shape=(n,)) if path.exists()
+                else np.broadcast_to(np.zeros(1, np.uint8), (n,)))
     return offsets, tokens, programs
 
 

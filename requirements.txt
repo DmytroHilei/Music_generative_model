@@ -7,3 +7,5 @@ wandb
 mido
 rich
 torchao
+transformers
+spylls
