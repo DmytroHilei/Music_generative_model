@@ -3,6 +3,8 @@ Live dashboard of everything running in this project: training runs, song downlo
 
     .venv/bin/python tools/status.py            # refreshes every 5 s, Ctrl+C to quit
     .venv/bin/python tools/status.py --once     # print once
+    .venv/bin/python tools/status.py --web 8765 # no terminal view: serve it as a web page (phone on the same network:
+                                                # http://<laptop ip>:8765/?t=<token>, the token is printed)
 
 Everything is read from files (logs/*.log, data/audio, data/finetune) and nvidia-smi, so it never touches
 the running jobs.
@@ -175,6 +177,19 @@ def active_train_logs():
     return active
 
 
+SKIP_SETTINGS = {'out_dir', 'wandb_run_name', 'lr_decay_iters', 'eval_interval'}
+SEC_LATE = re.compile(r'section gain [-+.\d]+ / none [-+.\d]+, late [-+.\d]+ / ([-+.\d]+)')
+
+
+def run_settings(path):
+    """The command-line overrides a train.py log printed ('Overriding: key = value'), e.g. 'section_mode=xattn
+    section_lead=128', plus the latest late section gain vs none if the run logs one."""
+    head = head_until(path, 'compiling the model')
+    items = [f'{k}={v}' for k, v in re.findall(r'^Overriding: (\w+) = (.*)$', head, re.M) if k not in SKIP_SETTINGS]
+    gains = SEC_LATE.findall(tail_text(path) or '')
+    return ' '.join(items) + (f'\nsection gain late {gains[-1]}' if gains else '')
+
+
 def training_table(done_keep=None):
     """All unfinished runs plus the last done_keep finished ones (None = all)."""
     t = Table(title='Training runs', expand=True, title_justify='left')
@@ -187,7 +202,13 @@ def training_table(done_keep=None):
     # live runs not listed in RUNS are picked up from their process: label = log name, params = config file
     known = {log for _, log, _ in RUNS}
     runs = [(label, LOGS / log, params) for label, log, params in RUNS]
-    runs += [(path.stem, path, config) for name, (_, path, config) in sorted(active.items()) if name not in known]
+    # section-caption arms (tools/sweeps/section_sweep.py), live or finished, with their settings
+    sections = sorted((p for p in (LOGS / 'sections').glob('*.log') if p.name != 'overnight.log'),
+                      key=lambda p: p.stat().st_mtime)
+    runs += [(f'sec {p.stem}', p, run_settings(p)) for p in sections]
+    known |= {p.name for p in sections}
+    runs += [(path.stem, path, run_settings(path) or config) for name, (_, path, config) in sorted(active.items())
+             if name not in known]
     rows = []  # (finished?, cells)
     for label, path, params in runs:
         log = path.name
@@ -716,12 +737,52 @@ def render(show_all=False):
                  training_table(None if show_all else 4), jobs_table(keep=6 if show_all else 2))
 
 
+def serve(port, interval, show_all, token):
+    """The dashboard as a self-refreshing HTML page (rich's own HTML export of the same view) on port, for every
+    address of this machine; requests without ?t=<token> get 403."""
+    import io
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    from rich.console import Console
+    page = [b'starting']
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            ok = f't={token}' in self.path
+            body = page[0] if ok else b'forbidden'
+            self.send_response(200 if ok else 403)
+            self.send_header('Content-Type', 'text/html; charset=utf-8')
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+    server = ThreadingHTTPServer(('0.0.0.0', port), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    ips = subprocess.run(['hostname', '-I'], capture_output=True, text=True).stdout.split()
+    print('dashboard on ' + ', '.join(f'http://{ip}:{port}/?t={token}' for ip in ips), flush=True)
+    head = (f'<meta http-equiv="refresh" content="{max(5, int(interval))}">'
+            '<meta name="viewport" content="width=device-width, initial-scale=1">')
+    while True:
+        console = Console(record=True, width=140, file=io.StringIO(), color_system='truecolor')
+        console.print(render(show_all))
+        page[0] = console.export_html(inline_styles=True).replace('<head>', '<head>' + head, 1).encode()
+        time.sleep(interval)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--once', action='store_true')
+    parser.add_argument('--web', type=int, default=0, metavar='PORT', help='serve the view as a web page instead')
+    parser.add_argument('--token', default='', help='access token of the web page (default: a random one)')
     parser.add_argument('--interval', type=float, default=5)
     parser.add_argument('--all', action='store_true', help='also show old finished runs and sampling jobs')
     args = parser.parse_args()
+    if args.web:
+        import secrets
+        serve(args.web, max(args.interval, 10), args.all, args.token or secrets.token_urlsafe(8))
+        return
     if args.once:
         from rich.console import Console
         Console().print(render(args.all))

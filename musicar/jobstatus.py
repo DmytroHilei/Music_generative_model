@@ -26,11 +26,12 @@ class JobStatus:
         self._last_write = 0.0
         self._write()
 
-    def update(self, done, detail=None):
+    def update(self, done, detail=None, force=False):
+        """force: write now (rare phase changes that must not be swallowed by the once-a-second limit)."""
         self.state['done'] = int(done)
         if detail is not None:
             self.state['detail'] = detail
-        if time.time() - self._last_write >= 1.0:
+        if force or time.time() - self._last_write >= 1.0:
             self._write()
 
     def finish(self, result=''):
