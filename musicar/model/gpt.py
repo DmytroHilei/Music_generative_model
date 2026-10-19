@@ -94,7 +94,15 @@ class CausalSelfAttention(nn.Module):
         if rope is not None:
             q, k = apply_rope(q, *rope), apply_rope(k, *rope)
         causal, mask = True, None
-        if cache is not None:
+        if cache is not None and cache.chunk_start is not None:
+            # a chunk appended at slots s..s+T-1 (inserted section vectors): attends to everything before + causal
+            s = cache.chunk_start
+            ck, cv = cache.k[layer], cache.v[layer]
+            ck[:, :, s:s + T] = k
+            cv[:, :, s:s + T] = v
+            k, v, causal = ck[:, :, :s + T], cv[:, :, :s + T], False
+            mask = (torch.arange(s + T, device=x.device)[None, :] <= s + torch.arange(T, device=x.device)[:, None])
+        elif cache is not None:
             ck, cv = cache.k[layer], cache.v[layer]
             if T > 1:
                 ck[:, :, :T] = k
@@ -209,6 +217,17 @@ class MusicConfig:
     # padding, all zero = no caption) -> TextPrefix -> text_prefix vectors in front of the notes (no loss on them),
     # instead of the T1 vector
     text_prefix: int = 0
+    # section captions (text_control.md "Where the caption acts"): a caption per section_len notes of the piece, from
+    # that section's own notes (0 = off; needs text_prefix). The caption of section k arrives section_lead notes
+    # before the section starts (0 = with its first note, section_len = a whole section ahead). Its token states ->
+    # a second TextPrefix -> section_slots vectors, used per section_mode: 'prefix' = inserted into the sequence where
+    # the caption arrives (no loss on them), 'xattn' = every section_xattn_every-th block is followed by a gated
+    # cross-attention from each position to the vectors of its latest section caption
+    section_len: int = 0
+    section_lead: int = 0
+    section_slots: int = 4
+    section_mode: str = 'prefix'
+    section_xattn_every: int = 2
 
 
 # order in which attributes of the next note are decided by CascadeHeads
@@ -335,6 +354,59 @@ class TextPrefix(nn.Module):
         return torch.where(has[:, None, None], p, self.null.to(p.dtype).expand(b, -1, -1))
 
 
+class SectionCrossAttention(nn.Module):
+    """Section arm 'xattn': x + tanh(gate) * proj(attention from x to the section vectors), gate init 0 (starts as the
+    model without it, like Flamingo's gated cross-attention). mem: (B, M, C); mask: (B, 1, N, M) bool, True = may
+    attend, or None (every position sees all of mem: the one-note step)."""
+
+    def __init__(self, config):
+        super().__init__()
+        C = config.n_embd
+        self.n_head = config.n_head
+        self.ln = block_norm(config)
+        self.ln_mem = block_norm(config)
+        self.q = nn.Linear(C, C, bias=config.bias)
+        self.kv = nn.Linear(C, 2 * C, bias=config.bias)
+        self.proj = nn.Linear(C, C, bias=config.bias)
+        self.gate = nn.Parameter(torch.zeros(1))
+
+    def forward(self, x, mem, mask=None):
+        B, N, C = x.shape
+        hs = C // self.n_head
+        q = self.q(self.ln(x)).view(B, N, self.n_head, hs).transpose(1, 2)
+        k, v = self.kv(self.ln_mem(mem.to(x.dtype))).split(C, dim=2)
+        k = k.view(B, -1, self.n_head, hs).transpose(1, 2)
+        v = v.view(B, -1, self.n_head, hs).transpose(1, 2)
+        y = F.scaled_dot_product_attention(q, k, v, attn_mask=mask)
+        return x + torch.tanh(self.gate).to(x.dtype) * self.proj(y.transpose(1, 2).reshape(B, N, C))
+
+
+def section_layout(pos, t, k_pre, slots):
+    """Where notes and section vectors go when the vectors are inserted into the sequence (section_mode 'prefix').
+    pos: (B, E) note index (in the window) each section caption comes before, ascending; pos > t = unused slot (its
+    vectors go after everything and are never read). Every window has a caption at 0 (the one in force).
+    Returns (dest (B, k_pre + t + E * slots): sequence index of [prefix, notes, section vectors], read (B, t): the
+    sequence index whose output predicts note i + 1, i.e. the slot just before note i + 1 (the last vector of a
+    caption that comes before it, else note i itself))."""
+    B, E = pos.shape
+    i = torch.arange(t + 1, device=pos.device)
+    before = (pos[:, None, :] <= i[None, :, None]).sum(-1)               # (B, t + 1) captions before note i
+    note_dest = k_pre + i + slots * before                              # note t = the one after the window
+    ev_dest = k_pre + pos.clamp(max=t) + slots * torch.arange(E, device=pos.device)  # (B, E) first vector
+    ev_dest = (ev_dest[:, :, None] + torch.arange(slots, device=pos.device)).flatten(1)
+    pre = torch.arange(k_pre, device=pos.device).expand(B, -1)
+    return torch.cat([pre, note_dest[:, :t], ev_dest], 1), note_dest[:, 1:] - 1
+
+
+def section_query_index(pos, n_query, k_pre):
+    """Section arm 'xattn': for each sequence position (k_pre prefix slots, then notes), the index of its latest
+    section caption: note i predicts note i + 1, so it reads the last caption with pos <= i + 1; prefix slots read
+    the caption in force at the window start. (B, n_query)."""
+    i = torch.arange(n_query - k_pre, device=pos.device)
+    idx = (pos[:, None, :] <= (i + 1)[None, :, None]).sum(-1) - 1
+    return torch.cat([torch.zeros(pos.size(0), k_pre, dtype=idx.dtype, device=pos.device), idx], 1)
+
+
 class KVCache:
     """Preallocated keys/values for all layers (inference). pos = position of the next single-note step (a device
     tensor, so a captured CUDA graph reads it at replay time); mask = which cache slots that step may attend to."""
@@ -346,6 +418,7 @@ class KVCache:
         self.pos = torch.zeros(1, dtype=torch.long, device=device)
         self.slots = torch.arange(block_size, device=device)
         self.mask = torch.zeros(1, 1, 1, block_size, dtype=torch.bool, device=device)
+        self.chunk_start = None  # set by GPT.encode_chunk: append a chunk at this slot
 
 
 class GPT(nn.Module):
@@ -388,7 +461,17 @@ class GPT(nn.Module):
             assert config.pos_emb == 'rope', 'text_prefix shifts the notes by K positions: RoPE only'
             self.transformer['text_prefix'] = TextPrefix(config.text_dim, config.n_embd, config.text_prefix,
                                                          n_head=config.n_head)
+            if config.section_len:
+                assert config.section_mode in ('prefix', 'xattn'), config.section_mode
+                assert 0 <= config.section_lead <= config.section_len
+                self.transformer['section_prefix'] = TextPrefix(config.text_dim, config.n_embd,
+                                                                config.section_slots, n_head=config.n_head)
+                if config.section_mode == 'xattn':
+                    self.transformer['section_xattn'] = nn.ModuleDict({
+                        str(i): SectionCrossAttention(config) for i in range(config.n_layer)
+                        if (i + 1) % config.section_xattn_every == 0})
         elif config.text_dim:
+            assert not config.section_len, 'section captions need text_prefix'
             self.transformer['text_proj'] = nn.Linear(config.text_dim, config.n_embd, bias=False)
             if config.text_center:
                 self.register_buffer('text_mean', torch.zeros(config.text_dim))
@@ -413,6 +496,11 @@ class GPT(nn.Module):
         if config.text_prefix:  # _init_weights re-drew its Linears; small gate, embedding-like null prefix
             torch.nn.init.constant_(self.transformer['text_prefix'].gate, 0.01)
             torch.nn.init.normal_(self.transformer['text_prefix'].null, std=0.02)
+        if config.section_len:
+            torch.nn.init.constant_(self.transformer['section_prefix'].gate, 0.01)
+            torch.nn.init.normal_(self.transformer['section_prefix'].null, std=0.02)
+            for xa in self.transformer['section_xattn'].values() if config.section_mode == 'xattn' else ():
+                torch.nn.init.zeros_(xa.gate)
 
     @property
     def head_names(self):
@@ -440,13 +528,20 @@ class GPT(nn.Module):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
     def encode(self, pitch, velocity, duration, delta_time, style=None, program=None, cache=None, cond=None,
-               text=None, step=None):
+               text=None, step=None, sections=None):
         """The trunk: notes -> hidden states after ln_f, (B, T, C).
         cache=None: plain forward. With a KVCache: T > 1 = prefill from position 0, T == 1 = one step at cache.pos.
         text: (B, text_dim) caption vectors for models with text_dim (zeros / None = no caption); text_prefix models:
         (B, L, text_dim) token states (None = no caption), whose prefix goes in front of the notes (positions 0..K-1,
         the notes from K; only the notes' states are returned) in every call but a one-note step.
-        step: whether a T == 1 call with a cache is a one-note step (default) or a prefill (text_prefix models)."""
+        step: whether a T == 1 call with a cache is a one-note step (default) or a prefill (text_prefix models).
+        sections (section_len models): (vectors (B, E, section_slots, C) from section_vectors, pos (B, E)): the
+        window's section captions and the note index each one comes before (ascending, pos[:, 0] = 0, pos > T =
+        unused); None = every caption is the null one. 'prefix': the vectors are inserted into the sequence (a cache
+        prefill stores them too), and the returned state of note i is read from the slot just before note i + 1;
+        'xattn': position i cross-attends to its latest caption. In a one-note step 'xattn' takes (vectors
+        (B, 1, section_slots, C), None) = the caption of the note being predicted; 'prefix' ignores it (generation
+        appends the vectors with encode_chunk)."""
         device = pitch.device
         b, t = pitch.size()
         assert t <= self.config.block_size
@@ -480,12 +575,31 @@ class GPT(nn.Module):
                 centered = F.normalize(text.float() - self.text_mean.float(), dim=-1) * math.sqrt(text.size(-1))
                 text = torch.where(has, centered, torch.zeros_like(centered))
             x = x + self.transformer['text_proj'](text.to(x.dtype)).unsqueeze(1)
+        hs = self.config.n_embd // self.config.n_head
+        S = self.config.section_len
+        if S and sections is None and not (step and self.config.section_mode == 'prefix'):
+            null = self.section_vectors(torch.zeros(b, 1, 1, self.config.text_dim, device=device)).to(x.dtype)
+            sections = (null, None if step else torch.zeros(b, 1, dtype=torch.long, device=device))
+        read = mem = mask = None
         if k_pre:
             if text is None:
                 text = torch.zeros(b, 1, self.config.text_dim, device=device)
             x = torch.cat([self.transformer['text_prefix'](text.to(x.dtype)).to(x.dtype), x], dim=1)
-            rope = rope_tables(torch.arange(k_pre + t, device=device), self.config.n_embd // self.config.n_head,
-                               self.config.rope_base)
+            n_seq = k_pre + t
+            if S and self.config.section_mode == 'prefix':
+                vecs, pos = sections
+                dest, read = section_layout(pos, t, k_pre, self.config.section_slots)
+                src = torch.cat([x, vecs.to(x.dtype).flatten(1, 2)], 1)
+                x = torch.zeros_like(src).scatter(1, dest[..., None].expand_as(src), src)
+                n_seq = src.size(1)
+            rope = rope_tables(torch.arange(n_seq, device=device), hs, self.config.rope_base)
+        if S and self.config.section_mode == 'xattn':
+            vecs, pos = sections
+            mem = vecs.to(x.dtype).flatten(1, 2)                                 # (B, E * slots, C)
+            if pos is not None:
+                q_ev = section_query_index(pos, x.size(1), k_pre)                # (B, N)
+                k_ev = torch.arange(mem.size(1), device=device) // self.config.section_slots
+                mask = (q_ev[:, :, None] == k_ev[None, None, :])[:, None]       # (B, 1, N, E * slots)
         x = self.transformer.drop(x)
         n_ckpt = len(self.transformer.h) if self.act_ckpt < 0 else self.act_ckpt
         ckpt_kw = dict(context_fn=partial(sac_context, self.act_ckpt_save)) if self.act_ckpt_save else {}
@@ -495,10 +609,37 @@ class GPT(nn.Module):
                                                       respect_saved_tensors_hooks=True, **ckpt_kw)
             else:
                 x = block(x, cache, i, rope)
+            if mem is not None and str(i) in self.transformer['section_xattn']:
+                x = self.transformer['section_xattn'][str(i)](x, mem, mask)
+        if read is not None:
+            return self.transformer.ln_f(x.gather(1, read[..., None].expand(-1, -1, x.size(-1))))
         return self.transformer.ln_f(x[:, k_pre:] if k_pre else x)
 
+    def section_vectors(self, states):
+        """Section caption token states (..., L, text_dim) -> (..., section_slots, n_embd); all-zero = the null
+        caption."""
+        lead = states.shape[:-2]
+        prefix = self.transformer['section_prefix']
+        out = prefix(states.reshape(-1, *states.shape[-2:]).to(prefix.queries.dtype))
+        return out.view(*lead, *out.shape[1:])
+
+    def encode_chunk(self, vectors, cache, start):
+        """Section arm 'prefix' in generation: append the section vectors (B, section_slots, C) to the KV cache at
+        slots start.. (RoPE positions = slots) and return the hidden state after the last one, (B, 1, C): what
+        predicts the next note."""
+        cache.chunk_start = start
+        try:
+            x = vectors.to(cache.k.dtype)
+            rope = rope_tables(torch.arange(start, start + x.size(1), device=x.device),
+                               self.config.n_embd // self.config.n_head, self.config.rope_base)
+            for i, block in enumerate(self.transformer.h):
+                x = block(x, cache, i, rope)
+        finally:
+            cache.chunk_start = None
+        return self.transformer.ln_f(x[:, -1:])
+
     def forward(self, pitch, velocity, duration, delta_time, style=None, program=None, targets=None, cond=None,
-                text=None):
+                text=None, sections=None, late_from=0):
         """
         Returns (parts, loss). loss = sum of the per-head CEs with label smoothing (what we optimize),
         parts = dict name -> CE without label smoothing (detached, for honest logging / comparing runs).
@@ -508,8 +649,13 @@ class GPT(nn.Module):
         next note's program (see head_names). Duration targets of drum notes are expected as -1 (masked).
         cond: (instrument multi-hot (B, n_programs), density level (B,)) for models with cond_inst / n_density.
         text: (B, text_dim) caption vectors for models with text_dim.
+        sections: (token states (B, E, L, text_dim), pos (B, E)) of the window's section captions (see encode).
+        late_from > 0: parts also has 'late_<head>' = the CE over positions >= late_from only (validation).
         """
-        x = self.encode(pitch, velocity, duration, delta_time, style=style, program=program, cond=cond, text=text)
+        if sections is not None:
+            sections = (self.section_vectors(sections[0]), sections[1])
+        x = self.encode(pitch, velocity, duration, delta_time, style=style, program=program, cond=cond, text=text,
+                        sections=sections)
         assert len(targets) == len(self.head_names), f"{len(targets)} targets for heads {self.head_names}"
         tgt = dict(zip(self.head_names, targets))
         logits = self.cascade(x, tgt)
@@ -525,6 +671,11 @@ class GPT(nn.Module):
             loss = loss + F.cross_entropy(lg, t, ignore_index=-1, label_smoothing=ls, reduction='sum') / n_valid
             with torch.no_grad():
                 parts[name] = F.cross_entropy(lg.float(), t, ignore_index=-1, reduction='sum') / n_valid
+                if late_from:
+                    lt = tgt[name][:, late_from:]
+                    parts[f'late_{name}'] = F.cross_entropy(
+                        logits[name][:, late_from:].reshape(-1, lg.size(-1)).float(), lt.reshape(-1),
+                        ignore_index=-1, reduction='sum') / (lt != -1).sum().clamp(min=1)
         return parts, loss
 
     def crop_block_size(self, block_size):

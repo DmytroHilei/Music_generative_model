@@ -10,6 +10,8 @@ def summed_ce(metrics):
     metrics['ce/total'] = sum(metrics[f'ce/{name}'] for name in STREAM_ORDER)
     if 'ce/program' in metrics:
         metrics['ce/total_all'] = metrics['ce/total'] + metrics['ce/program']
+    if 'ce/late_pitch' in metrics:  # GPT.forward(late_from=...): the same over the late positions only
+        metrics['ce/late_total'] = sum(metrics[f'ce/late_{name}'] for name in STREAM_ORDER)
 
 
 @torch.no_grad()

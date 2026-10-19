@@ -35,12 +35,13 @@ class TextEncoder:
         self.dim = self.model.config.hidden_size
 
     @torch.no_grad()
-    def encode(self, texts, tokens=False):
+    def encode(self, texts, tokens=False, max_length=None):
         """tokens=True (T2 prefix models): (B, max_length, dim) last-layer token states, padded to max_length with
-        zero rows (fixed shape for torch.compile); '' -> all zero = no caption."""
+        zero rows (fixed shape for torch.compile); '' -> all zero = no caption. max_length: tokens kept per text
+        (default: the encoder's; section captions are short)."""
         texts = list(texts)
         if tokens:
-            return self._tokens(texts)
+            return self._tokens(texts, max_length or self.max_length)
         out = torch.zeros(len(texts), self.dim, device=self.device)
         idx = [i for i, t in enumerate(texts) if t]
         if idx:
@@ -50,12 +51,12 @@ class TextEncoder:
             out[idx] = torch.nn.functional.normalize(pooled, dim=-1)
         return out
 
-    def _tokens(self, texts):
-        out = torch.zeros(len(texts), self.max_length, self.dim, device=self.device)
+    def _tokens(self, texts, max_length):
+        out = torch.zeros(len(texts), max_length, self.dim, device=self.device)
         idx = [i for i, t in enumerate(texts) if t]
         if idx:
             batch = self.tokenizer([texts[i] for i in idx], padding='max_length', truncation=True,
-                                   max_length=self.max_length, return_tensors='pt').to(self.device)
+                                   max_length=max_length, return_tensors='pt').to(self.device)
             states = self.model(**batch).last_hidden_state.float()
             out[idx] = states * batch['attention_mask'][..., None].float()
         return out

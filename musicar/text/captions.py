@@ -44,6 +44,11 @@ VEL_Q = (19.3, 23.8)
 SECONDS_Q = (20.0, 180.0)
 KEY_CONF_MEDIAN = 0.072
 UK_VOWELS = set('аеєиіїоуюя')
+# section captions: what can change inside a piece, read from the section's own notes (the file caption keeps mood,
+# genre, key, length); per attribute the chance of naming it
+SECTION_P = dict(instruments=0.7, pace=0.6, dynamics=0.6, register=0.5, drums=1.0, solo=1.0, no_drums=0.5)
+DT = 0.02  # seconds per time bin
+DRUM_PROGRAM = 128
 
 
 def instrument_name(program):
@@ -222,6 +227,62 @@ class StoreCaptions:
             if 'key' not in a and key >= 0 and f['key_conf'][i] >= KEY_CONF_MEDIAN:
                 a['key'] = (NOTE_NAMES[key % 12], 'minor' if key >= 12 else 'major')
         return a
+
+
+def section_attributes(tok, prog):
+    """Language-neutral attribute ids of a stretch of notes from the notes themselves (tok (n, 4) pitch, velocity,
+    duration, delta_time bins; prog (n,) GM programs, 128 = drums), with the file caption's thresholds: pace from
+    onsets/s, dynamics from the mean velocity bin, register from the mean pitch of pitched notes, the instruments with
+    >= 2% of the notes (at least 4), drums-only / solo / without drums. {} for no notes."""
+    n = len(tok)
+    if n == 0:
+        return {}
+    pitch, vel, dt = tok[:, 0], tok[:, 1], tok[:, 3]
+    a = {}
+    drums = prog == DRUM_PROGRAM
+    if drums.mean() >= DRUM_ONLY:
+        a['drums'] = True
+    else:
+        counts = np.bincount(prog, minlength=129)
+        present = np.flatnonzero((counts >= 4) & (counts >= 0.02 * n))
+        ids = _dedupe(V.GM_TO_ID[int(p)] for p in present)
+        if ids:
+            a['instruments'] = ids
+            if len(ids) == 1 and ids[0] != 'drums':
+                a['solo'] = True
+            elif 'drums' not in ids:
+                a['no_drums'] = True
+        level = _level(float(pitch[~drums].mean()), PITCH_Q)
+        if level:
+            a['register'] = level
+    seconds = max(float(dt[1:].sum()) * DT, 0.5)
+    for name, value, q in (('pace', float((dt[1:] > 0).sum()) / seconds, OPS_Q), ('dynamics', float(vel.mean()), VEL_Q)):
+        level = _level(value, q)
+        if level:
+            a[name] = level
+    return a
+
+
+def section_caption(tok, prog, rng=random, uk_share=UK_SHARE, lang=None):
+    """A caption of a section from its own notes (section_attributes): a random subset (SECTION_P, at least one;
+    instrument lists of <= 3 named whole with FULL_LIST, else 1-3 of them) rendered like the file captions. '' when
+    nothing describes it."""
+    attrs = section_attributes(tok, prog)
+    if not attrs:
+        return ''
+    lang = lang or ('uk' if rng.random() < uk_share else 'en')
+    ids = attrs.get('instruments')
+    if ids and not (len(ids) <= 3 and rng.random() < FULL_LIST):
+        attrs['instruments'] = rng.sample(ids, min(len(ids), rng.randint(1, 3)))
+    elif ids:
+        attrs['instruments'] = rng.sample(ids, len(ids))
+    keep = {k: v for k, v in attrs.items() if rng.random() < SECTION_P.get(k, 0.5)}
+    if not keep:
+        k = rng.choice(list(attrs))
+        keep[k] = attrs[k]
+    if keep.get('solo') and 'instruments' not in keep:
+        keep['instruments'] = attrs['instruments']
+    return render_en(keep, rng) if lang == 'en' else render_uk(keep, rng)
 
 
 def _resolve_clashes(a):

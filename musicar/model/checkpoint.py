@@ -9,11 +9,13 @@ from torch.nn import functional as F
 # the MusicConfig fields a checkpoint stores as model_args
 ARCH_KEYS = ('n_layer', 'n_head', 'n_embd', 'block_size', 'bias', 'pitch_size', 'velocity_size', 'duration_size',
              'delta_time_size', 'n_styles', 'n_programs', 'pos_emb', 'rope_base', 'norm', 'mlp', 'qk_norm', 'cond_inst',
-             'n_density', 'text_dim', 'text_center', 'text_prefix')
+             'n_density', 'text_dim', 'text_center', 'text_prefix', 'section_len', 'section_lead', 'section_slots',
+             'section_mode', 'section_xattn_every')
 # what checkpoints that predate a key actually used
 LEGACY_DEFAULTS = {'n_styles': 0, 'n_programs': 0, 'pos_emb': 'learned', 'rope_base': 10000.0, 'norm': 'layernorm',
                    'mlp': 'gelu', 'qk_norm': False, 'cond_inst': False, 'n_density': 0,
-                   'text_dim': 0, 'text_center': False, 'text_prefix': 0}
+                   'text_dim': 0, 'text_center': False, 'text_prefix': 0, 'section_len': 0, 'section_lead': 0,
+                   'section_slots': 4, 'section_mode': 'prefix', 'section_xattn_every': 2}
 
 
 def resolve_checkpoint(path):
@@ -66,8 +68,9 @@ def merge_model_args(saved, wanted, finetune, block_size):
     text input (text_dim 0 -> the encoder's width), its centering (text_center) or the T2 prefix (text_prefix), switch to RoPE, and set block_size (RoPE: any; learned positions:
     larger, the table is stretched)."""
     args = {}
+    add_sections = finetune and not saved.get('section_len', 0)
     for k in ARCH_KEYS:
-        args[k] = saved.get(k, LEGACY_DEFAULTS.get(k, wanted[k]))
+        args[k] = saved[k] if k in saved else LEGACY_DEFAULTS[k] if k in LEGACY_DEFAULTS else wanted[k]
         if finetune and k in ('pitch_size', 'n_styles', 'n_programs') and wanted[k] > args[k]:
             args[k] = wanted[k]  # grow: BOS/EOS rows, a style table, the instrument attribute
         if finetune and k == 'text_dim' and args[k] == 0:
@@ -76,6 +79,8 @@ def merge_model_args(saved, wanted, finetune, block_size):
             args[k] = True  # text_mean is then set from the training captions (train.py)
         if finetune and k == 'text_prefix' and args[k] == 0:
             args[k] = wanted[k]  # add the T2 prefix adapter
+        if add_sections and k.startswith('section_'):
+            args[k] = wanted.get(k, args[k])  # add section captions (fresh adapter; 'xattn' starts as the old model)
         if finetune and k == 'pos_emb' and wanted[k] == 'rope':
             args[k] = 'rope'  # switch to RoPE: the position table is dropped (not function-preserving)
     if finetune and args['pos_emb'] == 'rope':

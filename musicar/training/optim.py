@@ -102,7 +102,9 @@ class CombinedOptimizer:
             opt.load_state_dict(s)
 
 
-TEXT_PREFIX = ('transformer.text_proj.', 'transformer.text_prefix.')  # T1 vector, T2 prefix adapter
+# T1 vector, T2 prefix adapter, section captions (their prefix adapter and gated cross-attention)
+TEXT_PREFIX = ('transformer.text_proj.', 'transformer.text_prefix.', 'transformer.section_prefix.',
+               'transformer.section_xattn.')
 
 
 def text_group(model, text_lr_mult):

@@ -104,6 +104,10 @@ class NoteWindowDataset(Dataset):
         caption_dropout=0.0,
         caption_mode='true',
         caption_uk=0.3,
+        section_len=0,
+        section_lead=0,
+        section_dropout=0.0,
+        section_caption_mode='true',
     ):
         """
         csv_path:    one or more sources separated by ',': a CSV (paths inside relative to root_dir or absolute),
@@ -146,6 +150,15 @@ class NoteWindowDataset(Dataset):
                      validation captions are fixed per file. caption_uk: share of Ukrainian captions.
                      A store source may end in '#labeled' / '#unlabeled':
                      only its files with / without MidiCaps or XMIDI labels (tier 1 vs the rest)
+        section_len: section captions (MusicConfig.section_len, needs captions): the virtual sequence of a file is cut
+                     into sections of section_len rows (from BOS), each captioned from its own notes
+                     (musicar.text.captions.section_caption); the caption of section k comes before row
+                     max(0, k * section_len - section_lead). Each window then also returns, after its caption, the
+                     captions of its sections (a list of section_events strings: the one in force at the window start,
+                     then those arriving inside it, '' = unused or dropped) and their positions (a (section_events,)
+                     tensor of the window index each comes before; block_size + 1 = unused). section_dropout
+                     (training): share of section captions replaced by ''. section_caption_mode (validation): 'true' /
+                     'shuffled' (another file's sections) / 'none', fixed per file like caption_mode
         """
         sources = [s.strip() for s in str(csv_path).split(',') if s.strip()]
         self.csv_paths = [Path(s) for s in sources if not s.startswith('store:')]
@@ -198,6 +211,14 @@ class NoteWindowDataset(Dataset):
             self.captioners = [StoreCaptions(store.name, captions or 'data/labels', uk_share=caption_uk)
                                for store in self.store_dirs]
         self.with_captions = bool(captions)
+        self.caption_uk = caption_uk
+        self.section_len, self.section_lead = section_len, section_lead
+        self.section_dropout, self.section_caption_mode = section_dropout, section_caption_mode
+        assert not section_len or (captions and not self.pack_short), 'section captions need captions, no pack_short'
+        assert 0 <= section_lead <= section_len
+        # the caption in force at the window start + at most one per section_len rows inside it (+ the one before
+        # the note after the window)
+        self.section_events = 2 + -(-block_size // section_len) if section_len else 0
 
         store_ids, starts, lengths, styles_kept, file_ids = [], [], [], [], []
         for i, store in enumerate(self.store_dirs):
@@ -455,6 +476,8 @@ class NoteWindowDataset(Dataset):
             x = x + (torch.tensor(style),)
         if self.with_captions:
             x = x + (self._caption(file_idx),)
+        if self.section_len:
+            x = x + self._sections(file_idx, v)
         return x, y
 
     def _caption(self, file_idx):
@@ -469,6 +492,47 @@ class NoteWindowDataset(Dataset):
         if self.augment and random.random() < self.caption_dropout:
             return ''
         return self.captioners[int(self.store_ids[file_idx])].caption(int(self.file_ids[file_idx]))
+
+    def _sections(self, file_idx, v):
+        """(captions, positions) of the sections of the window at virtual row v of file_idx (see section_len)."""
+        S, T = self.section_len, self.block_size
+        at = [max(0, k * S - self.section_lead) for k in range(-(-int(self.lengths[file_idx]) // S))]
+        now = max(k for k, p in enumerate(at) if p <= v)
+        events = [(0, now)] + [(p - v, k) for k, p in enumerate(at) if v < p <= v + T]
+        caps = [self._section_caption(file_idx, k) for _, k in events]
+        pad = self.section_events - len(events)
+        assert pad >= 0, (len(events), self.section_events)
+        return caps + [''] * pad, torch.tensor([p for p, _ in events] + [T + 1] * pad)
+
+    def _section_caption(self, file_idx, k):
+        S = self.section_len
+        rng = random
+        if self.eval_stride:
+            if self.section_caption_mode == 'none':
+                return ''
+            if self.section_caption_mode == 'shuffled':  # the same fixed other file as caption_mode 'shuffled'
+                file_idx = (file_idx + self.n_files // 2) % self.n_files
+                k %= -(-int(self.lengths[file_idx]) // S)
+            store_id, fid = int(self.store_ids[file_idx]), int(self.file_ids[file_idx])
+            rng = random.Random((store_id * 10_000_000 + fid) * 1_000 + k)
+        elif self.augment and random.random() < self.section_dropout:
+            return ''
+        from musicar.text.captions import section_caption
+        return section_caption(*self._section_notes(file_idx, k), rng, uk_share=self.caption_uk)
+
+    def _section_notes(self, file_idx, k):
+        """Tokens (n, 4) and programs (n,) of the real notes in rows k * section_len .. (k + 1) * section_len - 1 of
+        a file's virtual sequence (BOS / EOS left out; programs 0 for piano stores)."""
+        S = self.section_len
+        store_id, start = int(self.store_ids[file_idx]), int(self.starts[file_idx])
+        n = int(self.lengths[file_idx]) - 2 * self.pad
+        lo = max(k * S - self.pad, 0)
+        hi = max(min((k + 1) * S - self.pad, n), lo)
+        tok = np.asarray(self.tokens[store_id][start + lo:start + hi], dtype=np.int64)
+        progs = self._programs[store_id]
+        prog = np.asarray(progs[start + lo:start + hi], dtype=np.int64) if progs is not None else \
+            np.zeros(hi - lo, np.int64)
+        return tok, prog
 
     def _read_packed(self, file_idx):
         """A short file followed by random short files of the same store (drawn per note), whole, cut at
@@ -560,9 +624,10 @@ def quantize_velocity(velocity, velocity_bins):
 
 def collate_windows(batch, extra_names=()):
     """Dataset items -> ((4 note streams, {name: tensor} of the optional inputs `extra_names`, in item order after the
-    4 streams, e.g. 'program', 'style', 'text'), the target streams). Strings (captions) stay a list."""
+    4 streams, e.g. 'program', 'style', 'text'), the target streams). Strings (captions) and lists of them (section
+    captions) stay lists."""
     xs, ys = zip(*batch)
-    x = [[x[i] for x in xs] if isinstance(xs[0][i], str) else torch.stack([x[i] for x in xs])
+    x = [[x[i] for x in xs] if isinstance(xs[0][i], (str, list)) else torch.stack([x[i] for x in xs])
          for i in range(len(xs[0]))]
     assert len(x) == 4 + len(extra_names), f"{len(x)} input streams, expected 4 + {list(extra_names)}"
     y = tuple(torch.stack([y[i] for y in ys]) for i in range(len(ys[0])))

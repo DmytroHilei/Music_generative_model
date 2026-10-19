@@ -124,6 +124,17 @@ freeze_trunk_keep = 'transformer.text_proj'  # ... and these comma-separated nam
 text_center = False       # center captions on the mean training caption vector (MusicConfig.text_center)
 text_prefix = 0           # T2: K prefix vectors from the caption's token states instead of the T1 vector
 text_dim = 0              # set from the encoder
+# section captions (MusicConfig.section_len, needs text_prefix): a caption per section_len notes from that section's
+# own notes, arriving section_lead notes before the section; 'prefix' = section_slots vectors inserted into the
+# sequence, 'xattn' = gated cross-attention after every section_xattn_every-th block
+section_len = 0
+section_lead = 0
+section_slots = 4
+section_mode = 'prefix'
+section_xattn_every = 2
+section_dropout = 0.2     # training: share of section captions replaced by the null caption
+section_max_length = 48   # encoder tokens per section caption
+late_from = 256           # validation with captions: also the CE over window positions >= late_from (val/*late*)
 
 # wandb logging
 wandb_log = True
@@ -197,14 +208,15 @@ ctx = nullcontext() if device_type == 'cpu' else torch.amp.autocast(device_type=
 
 # -----------------------------------------------------------------------------
 # data
-extra_names = (['program'] if n_programs else []) + (['style'] if styles else []) + (['text'] if captions else [])
+extra_names = (['program'] if n_programs else []) + (['style'] if styles else []) + (['text'] if captions else []) \
+    + (['sec_text', 'sec_pos'] if section_len else [])
 data_kw = dict(root_dir=root_dir, cache_dir=cache_dir, special_tokens=special_tokens, styles=styles,
                programs=n_programs > 0, pad_short=pad_short, min_notes=min_notes, captions=captions or None,
-               caption_uk=caption_uk)
+               caption_uk=caption_uk, section_len=section_len, section_lead=section_lead)
 # train: random windows (uniform over all note positions of all files), with augmentation
 train_dataset = NoteWindowDataset(csv_path, split='train', block_size=block_size, augment=True, **data_kw,
                                style_dropout=style_dropout, boundary_frac=boundary_frac, aug_tempo=aug_tempo,
-                               pack_short=pack_short, caption_dropout=caption_dropout,
+                               pack_short=pack_short, caption_dropout=caption_dropout, section_dropout=section_dropout,
                                aug_stores=as_list(aug_stores, int), source_weights=as_list(source_weights, float))
 train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=num_workers, drop_last=True,
                           collate_fn=partial(collate_windows, extra_names=tuple(extra_names)),
@@ -217,6 +229,12 @@ val_loader_main = make_val_loader(val_csv_path or csv_path)
 # text control: the main val set again with another file's caption and with none -> val/text_gain (> 0 = captions used)
 text_loaders = {mode: make_val_loader(val_csv_path or csv_path, caption_mode=mode)
                 for mode in ('shuffled', 'none')} if captions else {}
+# section captions: another file's sections / none (own file caption), and no text at all
+if section_len:
+    text_loaders.update({f'sec_{mode}': make_val_loader(val_csv_path or csv_path, section_caption_mode=mode)
+                         for mode in ('shuffled', 'none')})
+    text_loaders['all_none'] = make_val_loader(val_csv_path or csv_path, caption_mode='none',
+                                               section_caption_mode='none')
 val2_loader = make_val_loader(val2_csv_path) if val2_csv_path else None
 extra_loaders = {name: make_val_loader(src) for name, src in (e.split('=', 1) for e in val_extra.split(';') if e)}
 print(f"Validation: {val_name} (main, picks the best checkpoint)" + (f", {val2_name}" if val2_name else "")
@@ -320,7 +338,12 @@ def prepare(X, Y, cond_drop_p):
     replaced by 'none' with probability cond_drop_p per window."""
     streams = to_device(X[0])
     extra = {k: encoder.encode(v, tokens=raw_model.config.text_prefix > 0) if k == 'text'
-             else v.to(device, non_blocking=True) for k, v in X[1].items()}
+             else v.to(device, non_blocking=True) for k, v in X[1].items() if not k.startswith('sec_')}
+    if 'sec_text' in X[1]:  # B lists of section_events captions -> (B, E, L, text_dim) token states
+        caps = X[1]['sec_text']
+        states = encoder.encode([c for row in caps for c in row], tokens=True, max_length=section_max_length)
+        extra['sections'] = (states.view(len(caps), len(caps[0]), *states.shape[1:]),
+                             X[1]['sec_pos'].to(device, non_blocking=True))
     if cond_inst or n_density:
         extra['cond'] = window_conditions(streams[0], streams[3], extra.get('program'), n_programs, n_density,
                                           drop_p=cond_drop_p)
@@ -334,8 +357,15 @@ def infinite_batches(loader):
 
 
 def val_loss(loader, conditioned=True):
-    """conditioned=False (conditioning models): every window gets 'none', i.e. the unconditional model."""
-    return estimate_val_loss(model, (prepare(X, Y, 0.0 if conditioned else 1.0) for X, Y in loader), ctx)
+    """conditioned=False (conditioning models): every window gets 'none', i.e. the unconditional model.
+    Text models also get the CE over positions >= late_from (ce/late_*)."""
+    def batches():
+        for X, Y in loader:
+            (streams, extra), Yd = prepare(X, Y, 0.0 if conditioned else 1.0)
+            if captions and late_from:
+                extra['late_from'] = late_from
+            yield (streams, extra), Yd
+    return estimate_val_loss(model, batches(), ctx)
 
 
 if wandb_log:
@@ -491,8 +521,12 @@ for iter_num in pbar:
         for mode, loader in text_loaders.items():
             extra[f'text_{mode}'] = val_loss(loader)
         if text_loaders:  # CE(other file's caption) - CE(own caption); and CE(no caption) - CE(own caption)
-            val['text_gain'] = extra['text_shuffled']['ce/total'] - val['ce/total']
-            val['text_gain_none'] = extra['text_none']['ce/total'] - val['ce/total']
+            for name, mode in (('text_gain', 'shuffled'), ('text_gain_none', 'none'), ('sec_gain', 'sec_shuffled'),
+                               ('sec_gain_none', 'sec_none'), ('text_gain_all', 'all_none')):
+                if f'text_{mode}' in extra:
+                    val[name] = extra[f'text_{mode}']['ce/total'] - val['ce/total']
+                    if 'ce/late_total' in val:
+                        val[f'{name}_late'] = extra[f'text_{mode}']['ce/late_total'] - val['ce/late_total']
         samples = run_sample_eval(iter_num)
         train = {k: (v / train_n).item() for k, v in train_sums.items()} if train_n else {}
         if train:
@@ -505,6 +539,11 @@ for iter_num in pbar:
                    + (f" | prog CE {val['ce/program']:.3f}" if 'ce/program' in val else "")
                    + (f" | text gain {val['text_gain']:+.4f} (vs none {val['text_gain_none']:+.4f})"
                       if 'text_gain' in val else "")
+                   + (f" | late {val['text_gain_late']:+.4f} / none {val['text_gain_none_late']:+.4f}"
+                      if 'text_gain_late' in val else "")
+                   + (f" | section gain {val['sec_gain']:+.4f} / none {val['sec_gain_none']:+.4f}, late "
+                      f"{val['sec_gain_late']:+.4f} / {val['sec_gain_none_late']:+.4f} | all text late "
+                      f"{val['text_gain_all_late']:+.4f}" if 'sec_gain' in val else "")
                    + "".join(f" | {name} CE {e['ce/total']:.3f}" for name, e in extra.items()))
         if wandb_log:
             wandb.log({"iter": iter_num, "lr": lr,
