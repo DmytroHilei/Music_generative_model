@@ -105,8 +105,9 @@ def probe(ck, encoder, args):
         return None
     S = cfg.section_len
     style = args.section_style or train_setting(ck, 'section_style', 'plain')
+    labels = ROOT / (train_setting(ck, 'captions', '') or 'data/labels')  # the label tables the model trained with
     kw = dict(root_dir=str(ROOT), split='validation', block_size=args.block, eval_stride=args.block,
-              special_tokens=True, programs=True, pad_short=True, captions=str(ROOT / 'data/labels'), caption_uk=0.3,
+              special_tokens=True, programs=True, pad_short=True, captions=str(labels), caption_uk=0.3,
               section_len=S, section_lead=cfg.section_lead, section_style=style)
     sets = {m: NoteWindowDataset(VAL_SOURCE, section_caption_mode=m, **kw) for m in MODES}
     ds = sets['true']
