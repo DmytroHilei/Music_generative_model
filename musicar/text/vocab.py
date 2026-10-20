@@ -160,6 +160,9 @@ GENRE = {
     'dnb': dict(en=['drum and bass'], uk_post=['у стилі драм-енд-бейс'], uk_tag='драм-енд-бейс'),
     'breakbeat': dict(en=['breakbeat'], prefix='брейкбіт', uk_tag='брейкбіт'),
     'industrial': dict(en=['industrial'], prefix='індастріал', uk_tag='індастріал'),
+    # Aria genres not covered above
+    'ragtime': dict(en=['ragtime'], uk_post=['у стилі регтайм'], uk_tag='регтайм'),
+    'atonal': dict(en=['atonal'], uk=[('атональний', 'атональна')], uk_tag='атональна музика'),
 }
 ERAS = {'medieval', 'renaissance', 'baroque', 'romanticera', 'modernclassical'}  # replace 'classical', come first
 DECADES = {'50s', '60s', '70s', '80s', '90s', '2000s', '2010s'}  # come first, never joined with 'and'

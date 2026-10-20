@@ -307,8 +307,8 @@ def test_gigamidi_styles():
     assert gigamidi_ids({'styles': ['love songs'], 'artist': 'Video Games'}) == {'mood': ['love'], 'use': ['game']}
     assert gigamidi_ids({'styles': ['midi karaoke'], 'artist': 'Queen'}) == {}
     with tempfile.TemporaryDirectory() as d:
-        rows = [dict(file=0, md5='a', gigamidi=dict(styles=['classical', 'baroque'], artist='Bach, Johann Sebastian')),
-                dict(file=1, md5='b', gigamidi=dict(artist='Queen', title='Bohemian Rhapsody')),
+        rows = [dict(file=0, md5='a', gigamidi=dict(styles=['classical', 'baroque'])),
+                dict(file=1, md5='b', gigamidi=dict(artist='Sysmoebius, Z Q', title='Fugue 3')),
                 dict(file=2, md5='c', gigamidi=dict(styles=['hits of the 1980s', 'pop', 'rock']))]
         (Path(d) / 'toy.jsonl').write_text('\n'.join(json.dumps(r) for r in rows) + '\n')
         c = StoreCaptions('toy', d)
@@ -323,6 +323,59 @@ def test_gigamidi_styles():
         assert not any(re.search('[A-Za-z]', x) for x in uk), uk
         assert any('барок' in x for x in uk) and any('80-х' in x for x in uk), uk
         assert c.caption(1, rng, 'en') == ''
+
+
+def test_artists():
+    from musicar.text import artists as A
+    assert A.resolve('Bach, Johann Sebastian') == A.resolve('bach', 'aria') == A.resolve('Iogann Sebastyan Bah') == 'bach'
+    assert A.resolve('Aleksandr Nikolaevich Skryabin (1872-1915)') == A.resolve('scriabin', 'aria') \
+        == A.resolve('Scriabin, Aleksandr') == 'scriabin'
+    assert A.resolve('Beatles (The)') == A.resolve('Beatles, The') == A.resolve('beatles', 'aria') == 'beatles'
+    assert A.resolve('williams', 'aria') == 'john_williams' and A.resolve('Williams') is None
+    assert A.resolve('nazareth', 'aria') == 'nazareth' and A.resolve('Nazareth') is None
+    assert A.resolve('händel', 'aria') == 'handel' and A.resolve('Trad.') is None and A.resolve(None) is None
+    for i, a in A.ARTISTS.items():
+        assert a['en'] and not any(re.search('[а-яіїєґА-ЯІЇЄҐ]', n) for n in a['en']), i
+        assert not any(re.search('[A-Za-z]', w) for pair in a['uk'] for w in pair), i
+        assert not (a['band'] and a['uk']), i
+
+
+def test_artist_captions():
+    with tempfile.TemporaryDirectory() as d:
+        rows = [dict(file=0, md5='a', gigamidi=dict(artist='Chopin, Frédéric')),
+                dict(file=1, md5='b', gigamidi=dict(artist='Queen', styles=['rock'])),
+                dict(file=2, aria=dict(genre='ragtime', composer='joplin')),
+                dict(file=3, md5='d', gigamidi=dict(artist='Thomas Weelkes')),
+                dict(file=4, md5='e', gigamidi=dict(artist='Sysmoebius, Z Q'))]
+        (Path(d) / 'toy.jsonl').write_text('\n'.join(json.dumps(r, ensure_ascii=False) for r in rows) + '\n')
+        c = StoreCaptions('toy', d)
+        assert [c.labeled(i) for i in range(5)] == [True, True, True, True, False]
+        rng = random.Random(0)
+        en = [c.caption(0, rng, 'en') for _ in range(100)]  # the artist is the only attribute
+        assert all('Chopin' in x for x in en) and any('by Chopin' in x or 'by Frédéric' in x for x in en), en
+        uk = [c.caption(0, rng, 'uk') for _ in range(100)]
+        assert all('Шопен' in x for x in uk) and any('Шопена' in x for x in uk), uk
+        queen = [c.caption(1, rng, 'uk') for _ in range(100)]
+        assert any('гурту Queen' in x for x in queen), queen
+        joplin = [c.caption(2, rng, 'en') for _ in range(100)]
+        assert any('Joplin' in x for x in joplin) and any('ragtime' in x for x in joplin), joplin
+        assert all('Weelkes' in c.caption(3, rng, 'en') for _ in range(20))
+        assert c.caption(3, rng, 'uk') == '' and c.caption(4, rng, 'en') == ''  # English-only name; unknown artist
+
+
+def test_aria_rows():
+    import pandas as pd
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'data_prep' / 'labels'))
+    from aria_labels import aria_rows
+    meta = pd.DataFrame(dict(genre=['classical', '', ''], composer=['chopin', '', 'satie'], n_notes=['10', '5', '7']))
+    assert aria_rows(meta, np.array([0, 10, 15, 22])) == [{'file': 0, 'aria': {'genre': 'classical', 'composer': 'chopin'}},
+                                                         {'file': 2, 'aria': {'composer': 'satie'}}]
+    try:
+        aria_rows(meta, np.array([0, 10, 16, 22]))
+        aligned = True
+    except AssertionError:
+        aligned = False
+    assert not aligned, 'a store whose note counts differ from the CSV must be rejected'
 
 
 def test_gigamidi_meta_styles():
