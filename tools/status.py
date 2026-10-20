@@ -7,7 +7,8 @@ Live dashboard of everything running in this project: training runs, song downlo
                                                 # http://<laptop ip>:8765/?t=<token>, the token is printed)
 
 Everything is read from files (logs/*.log, data/audio, data/finetune) and nvidia-smi, so it never touches
-the running jobs.
+the running jobs. Long section runs (tools/sweeps/section_long.py, train.py in chunks) get their own table: the chunk
+in progress and when it ends, the last evaluation, the probes after each chunk and the early stop.
 """
 
 import argparse
@@ -202,11 +203,14 @@ def training_table(done_keep=None):
     # live runs not listed in RUNS are picked up from their process: label = log name, params = config file
     known = {log for _, log, _ in RUNS}
     runs = [(label, LOGS / log, params) for label, log, params in RUNS]
-    # section-caption arms (tools/sweeps/section_sweep.py), live or finished, with their settings
-    sections = sorted((p for p in (LOGS / 'sections').glob('*.log') if p.name != 'overnight.log'),
+    # section-caption arms (tools/sweeps/section_sweep.py), live or finished, with their settings: train.py logs only
+    # (not the probe / driver logs next to them); the chunked long runs have their own table (long_runs_view)
+    logs = [p for p in (LOGS / 'sections').glob('*.log') if p.name != 'overnight.log']
+    heads = {p: log_head(p) for p in logs}
+    sections = sorted((p for p in logs if b'Overriding' in heads[p] and b'===== chunk ' not in heads[p]),
                       key=lambda p: p.stat().st_mtime)
     runs += [(f'sec {p.stem}', p, run_settings(p)) for p in sections]
-    known |= {p.name for p in sections}
+    known |= {p.name for p in logs}
     runs += [(path.stem, path, run_settings(path) or config) for name, (_, path, config) in sorted(active.items())
              if name not in known]
     rows = []  # (finished?, cells)
@@ -715,6 +719,233 @@ def jobs_table(keep=6):
     return t
 
 
+# long section runs (tools/sweeps/section_long.py): train.py in chunks, all appended to LONG_DIR/<name>.log, each after
+# a '===== chunk <date>: <train.py args>' line; the probe after each chunk and the early stop in LONG_DIR/<name>.json
+LONG_DIR = LOGS / 'sections'
+LONG_DRIVER = ROOT / 'tools/sweeps/section_long.py'
+# on the raw bytes, so offsets are byte offsets (progress bars hold multi-byte characters)
+LONG_HEADER = re.compile(rb'^===== chunk (\d{4}-\d\d-\d\d \d\d:\d\d): ([^\r\n]*)', re.M)
+LONG_EVAL = re.compile(rb'step \d+: train loss [^\r\n]*')
+EVAL_HEAD = re.compile(r'step (\d+): train loss ([\d.na]+), val loss [\d.]+ \| (\S+) CE ([\d.]+)')
+SEC_GAIN = re.compile(r'section gain ([-+.\d]+) / none ([-+.\d]+), late ([-+.\d]+) / ([-+.\d]+)')
+LONG_STARTUP = 90  # seconds from a chunk's header to its training loop (data, LaBSE, model): before its first step
+_long_logs = {}  # log path -> what long_log_marks has read of it
+
+
+def log_head(path, n_bytes=4096):
+    try:
+        with open(path, 'rb') as f:
+            return f.read(n_bytes)
+    except OSError:
+        return b''
+
+
+def read_bytes(path, start, end):
+    with open(path, 'rb') as f:
+        f.seek(start)
+        return f.read(max(0, end - start))
+
+
+def as_text(data):
+    """Log bytes as text, progress-bar carriage returns as newlines."""
+    return data.decode('utf-8', 'ignore').replace('\r', '\n')
+
+
+def _last_marks(data, base):
+    """The last chunk header (byte offset, date, args) and the last evaluation line (byte offset, line) in data, which
+    starts at byte base of its file."""
+    heads, evals = list(LONG_HEADER.finditer(data)), list(LONG_EVAL.finditer(data))
+    return {'header': (base + heads[-1].start(), as_text(heads[-1].group(1)), as_text(heads[-1].group(2)))
+            if heads else None,
+            'eval': (base + evals[-1].start(), as_text(evals[-1].group(0))) if evals else None}
+
+
+def long_log_marks(path, block=1 << 18, overlap=4096):
+    """The last chunk header and the last evaluation line of a long-run log (see _last_marks), reading only what wasn't
+    read before: the first call goes back from the end until it has both (about one chunk), later calls only read
+    what was appended since."""
+    size = path.stat().st_size
+    marks = _long_logs.get(path)
+    if marks is None or size < marks['size']:  # first look, or a new log under the same name
+        marks = {'size': size, 'header': None, 'eval': None}
+        end = size
+        while end > 0 and not (marks['header'] and marks['eval']):
+            start = max(0, end - block)
+            for k, v in _last_marks(read_bytes(path, start, min(size, end + overlap)), start).items():
+                marks[k] = marks[k] or v
+            end = start
+    elif size > marks['size']:
+        lo = max(0, marks['size'] - overlap)
+        for k, v in _last_marks(read_bytes(path, lo, size), lo).items():
+            if v and (marks[k] is None or v[0] > marks[k][0]):
+                marks[k] = v
+        marks['size'] = size
+    _long_logs[path] = marks
+    return marks
+
+
+def long_drivers():
+    """{run name: (pid, command line)} of the running section_long.py drivers (--name, else the script's default)."""
+    try:
+        default = re.search(r"^NAME = '([^']+)'", LONG_DRIVER.read_text(encoding='utf-8'), re.M).group(1)
+    except (OSError, AttributeError):
+        default = ''
+    out = {}
+    for line in subprocess.run(['pgrep', '-af', 'tools/sweeps/section_long.py'], capture_output=True,
+                               text=True).stdout.splitlines():
+        pid, _, cmd = line.partition(' ')
+        if 'python' not in (cmd.split() or [''])[0]:  # the shell that started it
+            continue
+        m = re.search(r'--name[= ](\S+)', cmd)
+        out[m.group(1) if m else default] = (pid, cmd)
+    return out
+
+
+def long_stop_rule(cmd=''):
+    """(iteration from which the early stop applies, min gain vs shuffled): the driver's arguments, else its defaults."""
+    try:
+        src = LONG_DRIVER.read_text(encoding='utf-8')
+    except OSError:
+        src = ''
+    out = []
+    for flag, cast in (('--stop-at', int), ('--min-gain', float)):
+        m = re.search(rf'{flag}[= ](\S+)', cmd) or re.search(rf"'{flag}', type=\w+, default=([\d.]+)", src)
+        out.append(cast(m.group(1)) if m else None)
+    return out
+
+
+def hms(s):
+    """tqdm's '12:30' / '1:02:30' -> seconds."""
+    secs = 0
+    for part in s.split(':'):
+        secs = secs * 60 + int(part)
+    return secs
+
+
+def long_run_row(name, active, drivers):
+    """Cells of one long run (state, progress, chunk, last evaluation) and its probe table (None before the first
+    probe)."""
+    log, state_path = LONG_DIR / f'{name}.log', LONG_DIR / f'{name}.json'
+    try:
+        state = json.loads(state_path.read_text())
+    except (OSError, ValueError):  # no probe yet (or the driver is writing it)
+        state = {}
+    probes, stopped = state.get('probes', []), state.get('stopped', '')
+    marks = long_log_marks(log) if log.exists() else {'size': 0, 'header': None, 'eval': None}
+    tail_at = max(0, marks['size'] - 200_000)
+    data = read_bytes(log, tail_at, marks['size']) if log.exists() else b''
+    header = marks['header']
+    tail = as_text(data)
+    chunk = as_text(data[header[0] - tail_at:]) if header and header[0] >= tail_at else tail  # this chunk's part
+    bars, bars_now = TQDM.findall(tail), TQDM.findall(chunk)
+    it, total = (int(bars[-1][1]), int(bars[-1][2])) if bars else (0, 0)
+    saved = re.findall(r'saved resumable checkpoint at iter (\d+)', tail)
+    if saved and not bars_now:  # between chunks: the next chunk starts at the saved iteration
+        it = int(saved[-1])
+    spi = None  # seconds per iteration in this chunk
+    if bars_now and bars_now[-1][5] != '?':
+        rate = float(bars_now[-1][5])
+        spi = rate if bars_now[-1][6] == 's/it' else 1 / rate if rate else None
+
+    pid = active.get(str(log))
+    probe_pid = running(f'section_gain.py .*section_gain/{name}/latest')
+    driver = drivers.get(name)
+    if pid:
+        st = running_text(pid, 'training')
+        idle = time.time() - log.stat().st_mtime
+        if idle > 300:
+            st.append(f'\nlog idle {fmt_secs(idle)}', style='bold red')
+    elif probe_pid:
+        st = running_text(probe_pid, 'probing')
+    elif 'Traceback' in chunk[-5000:] or 'out of memory' in chunk[-5000:]:
+        st = Text('CRASHED', style='bold red')
+    elif stopped:
+        st = Text('early stop', style='bold red')
+    elif total and it >= total:
+        st = Text('done', style='green')
+    elif driver:
+        st = running_text(driver[0], 'driver')
+    else:
+        st = Text('paused', style='dim')
+
+    args = header[2] if header else ''
+    max_min = float(m.group(1)) if (m := re.search(r'--max_minutes=([\d.]+)', args)) else 0.0
+    duty = float(m.group(1)) if (m := re.search(r'--gpu_duty=([\d.]+)', args)) else 1.0
+    lines = []
+    if header:
+        lines.append(f'{"chunk" if pid else "last chunk"} from {header[1][11:]}' +
+                     (f', {max_min:g} min' if max_min else '') + (f', GPU duty {duty:g}' if duty < 1 else ''))
+    if pid and max_min and header:
+        # the time limit counts from the training loop's start: the first step's elapsed time in this chunk, else the
+        # header plus the usual startup
+        loop_start = log.stat().st_mtime - hms(bars_now[-1][3]) if bars_now else \
+            time.mktime(time.strptime(header[1], '%Y-%m-%d %H:%M')) + LONG_STARTUP
+        end = loop_start + 60 * max_min
+        left = max(0.0, end - time.time())
+        lines.append(f'ends ~{time.strftime("%H:%M", time.localtime(end))} (in {fmt_secs(left)})')
+        if spi:
+            lines.append(f'≈ it {min(total, it + int(left / spi)):,} by then, then a probe')
+    elif not pid and saved:
+        lines.append(f'ckpt.pt at it {int(saved[-1]):,}')
+    if spi and total and it < total:
+        lines.append(f'{(total - it) * spi / 3600:.1f} h of training left at this speed')
+
+    ev = marks['eval'][1] if marks['eval'] else ''
+    m, g = EVAL_HEAD.search(ev), SEC_GAIN.search(ev)
+    last_eval = (f'step {int(m.group(1)):,}: {m.group(3)} CE {m.group(4)}' if m else '') + \
+        (f'\nsection gain {g.group(1)} / none {g.group(2)}\nlate {g.group(3)} / none {g.group(4)}' if g else '')
+    cells = (name, st, ProgressBar(total=max(1, total), completed=min(it, total)),
+             f'{it:,}/{total:,}\n{it / total:.0%}' if total else f'{it:,}/?', f'{spi:.2f} s/it' if spi else '',
+             '\n'.join(lines), last_eval)
+
+    if not probes and not stopped:
+        return cells, None
+    stop_at, min_gain = long_stop_rule(driver[1] if driver else '')
+    p = Table(title=f'{name}: gain of the section captions on the first 32 notes after a section change of >= 2 '
+                    'points (nats per note)' +
+                    (f' · early stop if vs shuffled < {min_gain:g} from it {stop_at:,}' if None not in (stop_at, min_gain)
+                     else ''), expand=True, title_justify='left')
+    for col in ('weights @it', 'probed', 'vs shuffled', 'vs none', 'no-change vs none', 'all notes vs none',
+                'excess CE'):
+        p.add_column(col, justify='right')
+    for r in probes:
+        style = '' if None in (stop_at, min_gain) else 'green' if r['gain_shuffled'] >= min_gain else \
+            'red' if r['iter'] >= stop_at else ''
+        p.add_row(f"{r['iter']:,}", r['time'][5:], Text(f"{r['gain_shuffled']:+.4f}", style=style),
+                  f"{r['gain_none']:+.4f}", f"{r['gain_none_nochange']:+.4f}", f"{r['all_none']:+.4f}",
+                  f"{r['excess']:+.3f}")
+    if stopped:
+        p.caption, p.caption_style = f'stopped: {stopped} (section_long.py --force trains on)', 'bold red'
+    return cells, p
+
+
+def long_runs_view():
+    """The long section runs: one row each (state, progress, the chunk in progress and its expected end, the last
+    evaluation) and their probe tables; None if there are none. Runs: logs with chunk headers in LONG_DIR, and
+    LONG_DIR/long_*.json states."""
+    names = sorted({p.stem for p in LONG_DIR.glob('*.log') if b'===== chunk ' in log_head(p)} |
+                   {p.stem for p in LONG_DIR.glob('long_*.json')})
+    if not names:
+        return None
+    t = Table(title='Long section runs (tools/sweeps/section_long.py)', expand=True, title_justify='left')
+    for col, kw in [('run', {}), ('state', {}), ('progress', {'ratio': 1}), ('step', {'justify': 'right'}),
+                    ('speed', {'justify': 'right'}), ('chunk', {'ratio': 2}), ('last evaluation', {'ratio': 2})]:
+        t.add_column(col, **kw)
+    active = {str(path): pid for pid, path, _ in active_train_logs().values()}
+    drivers = long_drivers()
+    probe_tables, unprobed = [], []
+    for name in names:
+        cells, probes = long_run_row(name, active, drivers)
+        t.add_row(*cells)
+        if probes is None:
+            unprobed.append(name)
+        else:
+            probe_tables.append(probes)
+    if unprobed:
+        t.caption = f'no probe yet: {", ".join(unprobed)} (the driver probes after each chunk)'
+    return Group(t, *probe_tables)
+
+
 def system_panel():
     try:
         out = subprocess.run(['nvidia-smi', '--query-gpu=utilization.gpu,memory.used,memory.total,power.draw,'
@@ -733,8 +964,9 @@ def system_panel():
 
 def render(show_all=False):
     # what is running comes first: the live view is cut at the terminal height
-    return Group(Text(time.strftime('%H:%M:%S'), style='dim'), system_panel(), pipeline_table(),
-                 training_table(None if show_all else 4), jobs_table(keep=6 if show_all else 2))
+    long_runs = long_runs_view()
+    return Group(Text(time.strftime('%H:%M:%S'), style='dim'), system_panel(), *([long_runs] if long_runs else []),
+                 pipeline_table(), training_table(None if show_all else 4), jobs_table(keep=6 if show_all else 2))
 
 
 def serve(port, interval, show_all, token):
@@ -778,7 +1010,11 @@ def main():
     parser.add_argument('--token', default='', help='access token of the web page (default: a random one)')
     parser.add_argument('--interval', type=float, default=5)
     parser.add_argument('--all', action='store_true', help='also show old finished runs and sampling jobs')
+    parser.add_argument('--long-dir', default='', help='directory of the long section runs (default logs/sections)')
     args = parser.parse_args()
+    if args.long_dir:
+        global LONG_DIR
+        LONG_DIR = Path(args.long_dir).resolve()
     if args.web:
         import secrets
         serve(args.web, max(args.interval, 10), args.all, args.token or secrets.token_urlsafe(8))

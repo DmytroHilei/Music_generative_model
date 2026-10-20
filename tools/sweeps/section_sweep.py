@@ -22,8 +22,10 @@ cross-attention after every / every 4th block ('xattn').
 --overnight: stage 1 -> probe + generation test (cfg 2, the arms + text_t2_v3_long; MIDI, MP3s at the end for the winner + baseline) -> winner -> stage 2 around it
 -> probe + generation test -> final winner among the stage-1 winner and its stage-2 arms; report
 logs/sections/overnight.md. Every arm trains --iters steps (same notes seen). A failed arm is logged and skipped.
-Winner (pick()): score = 0.5 x mean rank of the switch effects (6 pairs; the thing T2 can't do) + 0.25 x mean rank
-of the hold shifts in the last segment (10 prompts) + 0.25 x rank of the teacher-forced late section gain vs none;
+Winner (pick()): score = 0.5 x weighted mean rank of the switch effects (6 pairs, the thing T2 can't do; 'high' at
+half weight, SWITCH_WEIGHT: register is rare in the section captions, ~6% of sections each way and named in ~45% of
+those, so its effect is mostly noise) + 0.25 x mean rank of the hold shifts in the last segment (10 prompts) + 0.25 x
+rank of the teacher-forced late section gain vs none;
 arms whose runaway share (> 40 notes/s segments) is > 0.15 above text_t2_v3_long's are out; ctrl is the reference,
 never the winner.
 
@@ -33,7 +35,6 @@ skipped on a re-run.
 """
 
 import argparse
-import csv
 import json
 import math
 import re
@@ -64,6 +65,7 @@ EVAL_MIN = 0.25        # one evaluation (6 text val sets x 200 windows, ~13 s)
 OUT = ROOT / 'logs/sections'
 BASELINE = 'text_t2_v3_long'
 GEN_CFG = 2.0
+SWITCH_WEIGHT = {'high': 0.5}  # pick(): weight of a switch pair in the switch rank (default 1)
 STEP = re.compile(r'step (\d+): .*?heldout_labeled CE ([\d.]+) .*?\| text gain ([-+.\d]+) \(vs none ([-+.\d]+)\)'
                   r' \| late ([-+.\d]+) / none ([-+.\d]+)'
                   r'(?: \| section gain ([-+.\d]+) / none ([-+.\d]+), late ([-+.\d]+) / ([-+.\d]+) \| all text late'
@@ -137,9 +139,8 @@ def summary(arms, stage):
 
 
 def read_rows(path):
-    with open(path) as f:
-        return [{k: v if k in ('checkpoint', 'part', 'pool', 'prompt') else float(v) for k, v in r.items()}
-                for r in csv.DictReader(f)]
+    from section_follow import read_rows as read
+    return read(path)
 
 
 def rank(values):
@@ -168,9 +169,10 @@ def pick(arms, rows, seg=256, switch=1024):
     if not cand:
         return None, ['no arm with generation results']
     sw_rank = {a: 0.0 for a in cand}
+    weight = {pair: SWITCH_WEIGHT.get(pair, 1.0) for pair in SWITCH}
     for pair in SWITCH:
         for a, r in rank({a: sw[(f'sec_{a}', GEN_CFG)].get(pair, ([], math.nan, 0))[1] for a in cand}).items():
-            sw_rank[a] += r / len(SWITCH)
+            sw_rank[a] += weight[pair] * r / sum(weight.values())
     prompts = sorted({p for a in cand for p in hl.get((f'sec_{a}', GEN_CFG), {})})
     hold_rank = {a: 0.0 for a in cand}
     for pr in prompts:
@@ -182,7 +184,8 @@ def pick(arms, rows, seg=256, switch=1024):
     limit = runaway.get(BASELINE, 1.0) + 0.15
     ok = [a for a in cand if runaway.get(f'sec_{a}', 1.0) <= limit] or cand
     winner = min(ok, key=lambda a: (score[a], logs[a].get('ce', math.inf)))
-    lines = [f'| arm | score | switch rank | hold rank | teacher rank | ' + ' | '.join(SWITCH) +
+    lines = [f'| arm | score | switch rank | hold rank | teacher rank | '
+             + ' | '.join(p if weight[p] == 1 else f'{p} (x{weight[p]:g})' for p in SWITCH) +
              ' | runaway | val CE | late section gain vs none |', '|---|' + '---|' * (7 + len(SWITCH))]
     for a in sorted(cand, key=lambda a: score[a]):
         eff = sw[(f'sec_{a}', GEN_CFG)]

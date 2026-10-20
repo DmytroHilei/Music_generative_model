@@ -7,16 +7,26 @@ Do section captions steer a whole piece? (context/claude/text_control.md, "Secti
   switch: prompt A for the sections before note --switch, B after (and B then A): d = metric(A->B) - metric(B->A)
     per segment should flip sign at the switch; effect = (mean d after - mean d before) / 2, sign-corrected (> 0 =
     the music follows the change). With section_lead > 0 the change may start before the switch.
+Prompt wording (--prompts): 'section' (default) = SECTION_TEXT, the words of the section captions the model trained
+on (musicar/text/captions.py section_caption: pace busy / dense / sparse / minimal, dynamics loud / powerful / soft /
+gentle, register 'in a high / low register', the drum nouns, 'without drums', 'solo piano', named string
+instruments); 'file' = the file-caption prompts of text_eval.PROMPTS (the overnight sweep of 2026-10-20), whose 'slow'
+and 'high-pitched' land on other section captions (held-out check: the comment at SECTION_TEXT). The prompt
+names (and so the target metrics) are the same in both sets; the T2 baseline (no sections) gets the same texts as its
+file caption.
 
     python eval/compare/section_follow.py --checkpoints checkpoints/sec_A0,checkpoints/text_t2_v3_long \\
         --out results/section_follow/s1 --mp3
+    python eval/compare/section_follow.py --checkpoints checkpoints/sec_A0 --prompts file   # the old wording
 
-Writes <out>/rows.csv, <out>/summary.md and MIDI (+ MP3) of the first --midi rows per prompt
-(<out>/<checkpoint>/cfg<s>/<part>_<name>_<i>.mid).
+Writes <out>/rows.csv (column 'prompts' = the set; missing in older files = 'file'), <out>/prompts.json (the texts),
+<out>/summary.md and MIDI (+ MP3) of the first --midi rows per prompt (<out>/<checkpoint>/cfg<s>/<part>_<name>_<i>.mid).
+Default <out>: results/section_follow/run_<prompts>.
 """
 
 import argparse
 import csv
+import json
 import sys
 import time
 from pathlib import Path
@@ -36,7 +46,20 @@ from musicar.text.encoder import TextEncoder  # noqa: E402
 from text_eval import MEDIAN, PAIRS, PROMPTS, slug  # noqa: E402
 from text_follow import SOUNDFONT, segments, summarize as summarize_hold, write_midi  # noqa: E402
 
-TEXT = dict(PROMPTS)
+# section-worded prompts: same names (and target metrics, text_eval.PAIRS) as the file-caption prompts. Chosen by the
+# held-out check (LaBSE, ~4,300 section captions of the held-out store per sample): share of the 20 nearest captions
+# whose section has the asked attribute, old -> new, two samples: slow 45 / 35 -> 90 / 90%, high 10 / 25 -> 75 / 70%,
+# low 50 / 40 -> 85 / 80%, strings 50 / 35 -> 95 / 90%; the others were already 90-100% and stay there (base rates
+# 6-53%). Switch pairs differ only in the attribute words
+SECTION_TEXT = {
+    'fast+': 'a busy, dense piece', 'fast-': 'a sparse, minimal piece',
+    'loud+': 'a loud, powerful piece', 'loud-': 'a soft, gentle piece',
+    'high+': 'a piece in a high register', 'high-': 'a piece in a low register',
+    'drums+': 'a drum beat', 'nodrums+': 'a piece without drums',
+    'piano+': 'a solo piano piece', 'strings+': 'a piece with violin, viola and cello',
+    'uk_loud+': 'гучна потужна мелодія', 'uk_loud-': "тиха м'яка мелодія", 'uk_drums+': 'барабанний біт',
+}
+PROMPT_SETS = {'section': SECTION_TEXT, 'file': dict(PROMPTS)}
 HOLD = ['fast+', 'fast-', 'loud+', 'loud-', 'drums+', 'nodrums+', 'piano+', 'strings+', 'uk_loud-', 'uk_drums+']
 # name -> (prompt before, prompt after, metric); the 'after' prompt should raise the metric
 SWITCH = {
@@ -52,7 +75,9 @@ SWITCH = {
 def parse_args():
     p = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     p.add_argument('--checkpoints', required=True, help='comma-separated checkpoints / run dirs with text_dim')
-    p.add_argument('--out', default='results/section_follow/run')
+    p.add_argument('--out', default=None, help='default: results/section_follow/run_<prompts>')
+    p.add_argument('--prompts', default='section', choices=sorted(PROMPT_SETS),
+                   help="'section' = section-caption wording, 'file' = text_eval's file-caption prompts")
     p.add_argument('--parts', default='hold,switch')
     p.add_argument('--rows', type=int, default=16, help='rows per prompt')
     p.add_argument('--notes', type=int, default=2048, help='new notes from BOS')
@@ -68,7 +93,19 @@ def parse_args():
     p.add_argument('--seed', type=int, default=1234)
     p.add_argument('--device', default='cuda' if torch.cuda.is_available() else 'cpu')
     p.add_argument('--summarize', action='store_true', help='only rewrite <out>/summary.md from <out>/rows.csv')
-    return p.parse_args()
+    args = p.parse_args()
+    args.out = args.out or f'results/section_follow/run_{args.prompts}'
+    return args
+
+
+def read_rows(path):
+    """rows.csv -> rows (numbers as float); files from before --prompts used the file-caption set."""
+    with open(path) as f:
+        rows = [{k: v if k in ('checkpoint', 'part', 'pool', 'prompt', 'prompts') else float(v) for k, v in r.items()}
+                for r in csv.DictReader(f)]
+    for r in rows:
+        r.setdefault('prompts', 'file')
+    return rows
 
 
 def schedule(cfg, first, second, switch, n_notes):
@@ -139,7 +176,9 @@ def summarize_switch(rows, seg_len, switch):
 
 def summarize(rows, args):
     hold = [r for r in rows if r['part'] == 'hold']
-    return (summarize_hold(hold) if hold else '') + '\n' + summarize_switch(rows, args.seg, args.switch)
+    sets = sorted({r.get('prompts', 'file') for r in rows})
+    return (f'Prompt wording: {", ".join(sets)}\n\n' + (summarize_hold(hold) if hold else '') + '\n'
+            + summarize_switch(rows, args.seg, args.switch))
 
 
 def main():
@@ -147,9 +186,7 @@ def main():
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
     if args.summarize:
-        with open(out / 'rows.csv') as f:
-            rows = [{k: v if k in ('checkpoint', 'part', 'pool', 'prompt') else float(v) for k, v in r.items()}
-                    for r in csv.DictReader(f)]
+        rows = read_rows(out / 'rows.csv')
         (out / 'summary.md').write_text(summarize(rows, args))
         print(summarize(rows, args))
         return
@@ -158,9 +195,12 @@ def main():
     ckpts = [c for c in args.checkpoints.split(',') if c]
 
     names = sorted(set(HOLD) | {p for a, b, _ in SWITCH.values() for p in (a, b)})
+    text = PROMPT_SETS[args.prompts]
+    (out / 'prompts.json').write_text(json.dumps({'prompts': args.prompts, 'texts': {p: text[p] for p in names}},
+                                                 indent=1, ensure_ascii=False))
     encoder = TextEncoder(device=args.device)
-    file_states = dict(zip(names, encoder.encode([TEXT[p] for p in names], tokens=True)))
-    sec_states = dict(zip(names, encoder.encode([TEXT[p] for p in names], tokens=True,
+    file_states = dict(zip(names, encoder.encode([text[p] for p in names], tokens=True)))
+    sec_states = dict(zip(names, encoder.encode([text[p] for p in names], tokens=True,
                                                 max_length=args.section_max_length)))
     del encoder
     if args.device.startswith('cuda'):
@@ -202,7 +242,7 @@ def main():
                 for r in range(args.rows):
                     for si, m in enumerate(segments(arrays, r, 1, args.seg)):
                         rows.append(dict(checkpoint=name, iter=it, cfg=s, part=part, pool=pool, prompt=label, row=r,
-                                         segment=si, **m))
+                                         segment=si, prompts=args.prompts, **m))
                     if r < args.midi:
                         stem = f'{part}_{slug(label if pool == "-" else pool + "_" + label)}_{r}.mid'
                         write_midi(arrays, r, out / name / f'cfg{s:g}' / stem, args.mp3, args.soundfont)
