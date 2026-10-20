@@ -263,6 +263,19 @@ def section_attributes(tok, prog):
     return a
 
 
+def section_change(a, b):
+    """How much a section differs from the one before it (section_attributes dicts a, b): one point each for another
+    dynamics / pace / register level, another drums state (drums only / with drums / without), and instrument sets
+    that differ by >= 2 instruments (one instrument near the 2% threshold flips often). 0 when b has no notes."""
+    if not b:
+        return 0
+
+    def drums(x):
+        return 'only' if x.get('drums') else 'without' if x.get('no_drums') or x.get('solo') else 'with'
+    score = sum(a.get(k) != b.get(k) for k in ('dynamics', 'pace', 'register')) + (drums(a) != drums(b))
+    return score + (len(set(a.get('instruments', ())) ^ set(b.get('instruments', ()))) >= 2)
+
+
 def section_caption(tok, prog, rng=random, uk_share=UK_SHARE, lang=None):
     """A caption of a section from its own notes (section_attributes): a random subset (SECTION_P, at least one;
     instrument lists of <= 3 named whole with FULL_LIST, else 1-3 of them) rendered like the file captions. '' when

@@ -134,6 +134,8 @@ section_mode = 'prefix'
 section_xattn_every = 2
 section_dropout = 0.2     # training: share of section captions replaced by the null caption
 section_max_length = 48   # encoder tokens per section caption
+section_change_frac = 0.0  # training: share of windows around a section change (NoteWindowDataset change_frac)
+section_change_min = 2    # points of change (dynamics / pace / register / drums / instruments)
 late_from = 256           # validation with captions: also the CE over window positions >= late_from (val/*late*)
 
 # wandb logging
@@ -217,6 +219,7 @@ data_kw = dict(root_dir=root_dir, cache_dir=cache_dir, special_tokens=special_to
 train_dataset = NoteWindowDataset(csv_path, split='train', block_size=block_size, augment=True, **data_kw,
                                style_dropout=style_dropout, boundary_frac=boundary_frac, aug_tempo=aug_tempo,
                                pack_short=pack_short, caption_dropout=caption_dropout, section_dropout=section_dropout,
+                               change_frac=section_change_frac, change_min=section_change_min,
                                aug_stores=as_list(aug_stores, int), source_weights=as_list(source_weights, float))
 train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=num_workers, drop_last=True,
                           collate_fn=partial(collate_windows, extra_names=tuple(extra_names)),

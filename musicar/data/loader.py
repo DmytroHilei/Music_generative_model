@@ -33,6 +33,39 @@ def density_level(notes_per_s, n_density=16):
     return (1 + (2 * torch.log2(nps.clamp(min=1e-3)) + 2).floor().clamp(0, n_density - 2)).long()
 
 
+def section_change_scores(store, section_len, pad):
+    """musicar.text.captions.section_change of every section of every file of a token store vs the section before it
+    (int8, files in store order, ceil((notes + 2 * pad) / section_len) sections each; 0 for the first one and those
+    with < section_len / 2 notes); sections as in
+    NoteWindowDataset._section_notes. Cached in <store>/section_changes_<section_len>_<pad>.npy (~1 min for 168M
+    notes)."""
+    from musicar.text.captions import section_attributes, section_change
+    cache = Path(store) / f"section_changes_{section_len}_{pad}.npy"
+    if cache.exists():
+        return np.load(cache)
+    offsets = np.load(Path(store) / "offsets.npy")
+    n_total = int(offsets[-1])
+    tokens = np.memmap(Path(store) / "tokens.u16", dtype=np.uint16, mode="r", shape=(n_total, 4))
+    progs = np.memmap(Path(store) / "programs.u8", dtype=np.uint8, mode="r", shape=(n_total,)) \
+        if (Path(store) / "programs.u8").exists() else None
+    scores = []
+    for f in tqdm(range(len(offsets) - 1), desc=f"Section changes of {Path(store).name}"):
+        start, n = int(offsets[f]), int(offsets[f + 1] - offsets[f])
+        tok = np.asarray(tokens[start:start + n], dtype=np.int64)
+        prog = np.asarray(progs[start:start + n], dtype=np.int64) if progs is not None else np.zeros(n, np.int64)
+        prev = None
+        for k in range(-(-(n + 2 * pad) // section_len)):
+            lo = max(k * section_len - pad, 0)
+            hi = max(min((k + 1) * section_len - pad, n), lo)
+            attrs = section_attributes(tok[lo:hi], prog[lo:hi])
+            # a file's short last section (or a short file) has too few notes for its attributes to mean much
+            scores.append(0 if prev is None or hi - lo < section_len // 2 else section_change(prev, attrs))
+            prev = attrs
+    scores = np.array(scores, dtype=np.int8)
+    np.save(cache, scores)
+    return scores
+
+
 def window_conditions(pitch, delta_time, program, n_programs, n_density, drop_p=0.0, dt_seconds=0.02):
     """Conditioning of whole windows (B, T): instrument multi-hot (B, n_programs) and density level (B,), from the
     notes themselves (BOS/EOS rows ignored). drop_p: per row, both conditions are replaced by 'none' (zeros / 0)."""
@@ -108,6 +141,8 @@ class NoteWindowDataset(Dataset):
         section_lead=0,
         section_dropout=0.0,
         section_caption_mode='true',
+        change_frac=0.0,
+        change_min=2,
     ):
         """
         csv_path:    one or more sources separated by ',': a CSV (paths inside relative to root_dir or absolute),
@@ -159,6 +194,12 @@ class NoteWindowDataset(Dataset):
                      tensor of the window index each comes before; block_size + 1 = unused). section_dropout
                      (training): share of section captions replaced by ''. section_caption_mode (validation): 'true' /
                      'shuffled' (another file's sections) / 'none', fixed per file like caption_mode
+        change_frac: training only, with section_len: this share of windows is placed around a section boundary where
+                     the section differs from the one before by >= change_min points (section_change_scores: dynamics,
+                     pace, register, drums, instruments), uniform over such boundaries of the drawn store, the
+                     boundary at window index lead + margin .. block_size - margin (margin = min(64, block_size // 8)),
+                     so the new section's caption arrives inside the window after notes of the old section. Before
+                     boundary_frac, which applies to the rest
         """
         sources = [s.strip() for s in str(csv_path).split(',') if s.strip()]
         self.csv_paths = [Path(s) for s in sources if not s.startswith('store:')]
@@ -219,6 +260,7 @@ class NoteWindowDataset(Dataset):
         # the caption in force at the window start + at most one per section_len rows inside it (+ the one before
         # the note after the window)
         self.section_events = 2 + -(-block_size // section_len) if section_len else 0
+        self.change_frac = change_frac if section_len and not eval_stride else 0.0
 
         store_ids, starts, lengths, styles_kept, file_ids = [], [], [], [], []
         for i, store in enumerate(self.store_dirs):
@@ -271,6 +313,9 @@ class NoteWindowDataset(Dataset):
                 idx = np.flatnonzero((self.store_ids == i) & self.short)
                 self.short_files.append((idx, np.cumsum(self.lengths[idx])))
 
+        if self.change_frac:
+            self._find_changes(change_min)
+
         if eval_stride:
             # (file index, offset in the file's virtual sequence); order = sources in order, files in store order
             self.windows = np.concatenate([
@@ -279,6 +324,41 @@ class NoteWindowDataset(Dataset):
                 for r in [np.arange(0, n - self.block_size, eval_stride) if n > self.block_size
                           else np.zeros(1, np.int64)]
             ])
+
+    def _find_changes(self, change_min):
+        """self.changes: (file index, virtual row of the section start) of the boundaries with a section change of
+        >= change_min points in the long files (short ones are one window anyway), stores in order;
+        self.change_range: (first, end) of each store's."""
+        S, found = self.section_len, []
+        for i, store in enumerate(self.store_dirs):
+            scores = section_change_scores(store, S, self.pad)
+            n_sec = -(-(np.diff(np.load(store / "offsets.npy")) + 2 * self.pad) // S)
+            assert len(scores) == n_sec.sum(), f"{store}: stale section_changes cache"
+            fid = np.repeat(np.arange(len(n_sec)), n_sec)  # store file of every section
+            k = np.arange(len(scores)) - np.repeat(np.cumsum(n_sec) - n_sec, n_sec)
+            file_idx = np.full(len(n_sec), -1)
+            mine = np.flatnonzero((self.store_ids == i) & ~self.short)
+            file_idx[self.file_ids[mine]] = mine
+            hit = (scores >= change_min) & (k > 0) & (file_idx[fid] >= 0)
+            found.append(np.stack([file_idx[fid[hit]], k[hit] * S], 1))
+            print(f"{store.name}: {int(hit.sum()):,} section changes >= {change_min} "
+                  f"({hit.sum() / max(1, ((k > 0) & (file_idx[fid] >= 0)).sum()):.1%} of the boundaries)")
+        self.changes = np.concatenate(found)
+        ends = np.cumsum([len(c) for c in found])
+        self.change_range = list(zip(ends - [len(c) for c in found], ends))
+        assert len(self.changes), f"no section changes >= {change_min}"
+
+    def _change_window(self, sid):
+        """(file index, window start) around a random section change of store sid (None = any store); None if the
+        store has none."""
+        lo, hi = self.change_range[sid] if sid is not None else (0, len(self.changes))
+        if hi == lo:
+            return None
+        file_idx, row = (int(x) for x in self.changes[random.randrange(lo, hi)])
+        T = self.block_size
+        margin = min(64, T // 8)
+        offset = random.randint(min(self.section_lead + margin, T - margin), T - margin)
+        return file_idx, min(max(row - offset, 0), int(self.lengths[file_idx]) - T - 1)
 
     # ------------------------------------------------------------------ storage
 
@@ -417,17 +497,22 @@ class NoteWindowDataset(Dataset):
         if self.eval_stride:
             file_idx, v = (int(x) for x in self.windows[idx])
         else:
-            if self.source_weights is None:
+            sid = None if self.source_weights is None else \
+                random.choices(range(len(self.source_weights)), weights=self.source_weights)[0]
+            change = self._change_window(sid) if self.change_frac and random.random() < self.change_frac else None
+            if change is not None:
+                file_idx, v = change
+            elif sid is None:
                 pos = random.randrange(int(self.cum_valid[-1]))
             else:
-                sid = random.choices(range(len(self.source_weights)), weights=self.source_weights)[0]
                 lo, hi = self.store_file_range[sid]
                 base = int(self.cum_valid[lo - 1]) if lo > 0 else 0
                 pos = base + random.randrange(int(self.cum_valid[hi - 1]) - base)
-            file_idx = int(np.searchsorted(self.cum_valid, pos, side="right"))
-            prev = int(self.cum_valid[file_idx - 1]) if file_idx > 0 else 0
-            v = 0 if self.short[file_idx] else pos - prev
-            if self.boundary_frac and not self.short[file_idx]:
+            if change is None:
+                file_idx = int(np.searchsorted(self.cum_valid, pos, side="right"))
+                prev = int(self.cum_valid[file_idx - 1]) if file_idx > 0 else 0
+                v = 0 if self.short[file_idx] else pos - prev
+            if change is None and self.boundary_frac and not self.short[file_idx]:
                 r = random.random()
                 if r < self.boundary_frac / 2:
                     v = 0                                                   # starts with BOS

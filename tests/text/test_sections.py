@@ -1,5 +1,6 @@
 """Section captions (CPU, tiny models, synthetic stores): python tests/text/test_sections.py  (or pytest tests/)."""
 
+import random
 import sys
 import tempfile
 from pathlib import Path
@@ -14,7 +15,7 @@ from musicar.data.loader import NoteWindowDataset, collate_windows  # noqa: E402
 from musicar.generation.sampling import generate  # noqa: E402
 from musicar.model.checkpoint import merge_model_args  # noqa: E402
 from musicar.model.gpt import KVCache, section_layout, section_query_index  # noqa: E402
-from musicar.text.captions import section_attributes, section_caption  # noqa: E402
+from musicar.text.captions import section_attributes, section_caption, section_change  # noqa: E402
 from test_text import TINY, batch, make_store, tiny  # noqa: E402
 
 D = 8  # text_dim of the tiny models
@@ -177,6 +178,44 @@ def test_dataset_section_events():
                                               extra_names=('program', 'text', 'sec_text', 'sec_pos'))
         assert len(extra['sec_text']) == 4 and all(len(c) == 4 for c in extra['sec_text'])
         assert extra['sec_pos'].shape == (4, 4) and (extra['sec_pos'][:, 0] == 0).all()
+
+
+def test_section_change():
+    a = {'dynamics': 'low', 'instruments': ['piano', 'violin'], 'no_drums': True}
+    assert section_change(a, a) == 0 and section_change(a, {}) == 0
+    assert section_change(a, {**a, 'dynamics': 'high', 'register': 'high'}) == 2
+    assert section_change(a, {**a, 'instruments': ['piano', 'cello']}) == 1  # violin out, cello in
+    assert section_change(a, {**a, 'instruments': ['piano']}) == 0  # one instrument: below the threshold
+    assert section_change(a, {'dynamics': 'low', 'instruments': ['piano', 'violin', 'drums']}) == 1  # with drums
+
+
+def test_dataset_change_windows():
+    with tempfile.TemporaryDirectory() as d:
+        root = make_store(Path(d), notes=80)
+        store = root / 'cache' / 'toy_train'
+        tokens = np.fromfile(store / 'tokens.u16', np.uint16).reshape(-1, 4)
+        tokens[:, :2], tokens[:, 3] = (60, 10), 10  # even notes: no changes
+        tokens[80 + 47:160, :2] = (100, 31)  # file 1 from row 48 (section 3 of 16 rows): high register, loud
+        tokens.tofile(store / 'tokens.u16')
+        kw = dict(root_dir=d, block_size=32, special_tokens=True, programs=True, captions=str(root / 'labels'),
+                  cache_dir=str(root / 'cache'), section_len=16, augment=True, section_dropout=0.0)
+        src = f"store:{root / 'cache' / 'toy'}"
+        ds = NoteWindowDataset(src, split='train', change_frac=1.0, change_min=2, section_lead=8, **kw)
+        assert ds.changes.tolist() == [[1, 48]] and (store / 'section_changes_16_1.npy').exists()
+        for seed in range(20):
+            random.seed(seed)
+            x, _ = ds[0]
+            random.seed(seed)
+            random.random()  # the change_frac draw
+            file_idx, v = ds._change_window(None)
+            assert file_idx == 1 and 48 - 28 <= v <= 48 - 12  # boundary at window index lead + 4 .. 32 - 4
+            assert 40 - v in x[-1].tolist()  # its caption arrives inside the window, 8 rows early
+        np.save(store / 'section_changes_16_1.npy', np.zeros(36, np.int8))  # the cache is read, not recomputed
+        try:
+            NoteWindowDataset(src, split='train', change_frac=1.0, change_min=2, **kw)
+            raise RuntimeError('expected no section changes')
+        except AssertionError as e:
+            assert 'no section changes' in str(e)
 
 
 def test_merge_model_args_adds_sections():
