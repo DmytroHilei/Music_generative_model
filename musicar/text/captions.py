@@ -32,6 +32,8 @@ MIDICAPS_FULL = 0.4
 UK_SHARE = 0.3
 P_ATTR = dict(mood=0.8, genre=0.8, drums=1.0, ballad=1.0, instruments=0.7, use=0.6, solo=1.0,
               no_drums=0.4)  # other attributes: 0.5
+NOT_ALONE = {'ballad', 'solo'}  # don't count as the one kept attribute: 'ballad' only sets the noun, 'solo' needs
+                                # the instrument
 FULL_LIST = 0.8   # files with <= 3 instruments: all of them named
 KEEP_DRUMS = 0.7  # more than 3: drums kept in the named subset
 MAX_ADJ = 3
@@ -159,8 +161,8 @@ class StoreCaptions:
         if not attrs:
             return ''
         keep = {k: v for k, v in attrs.items() if rng.random() < P_ATTR.get(k, 0.5)}
-        if not set(keep) - {'ballad'}:
-            k = rng.choice([k for k in attrs if k != 'ballad'] or list(attrs))
+        if not set(keep) - NOT_ALONE:
+            k = rng.choice([k for k in attrs if k not in NOT_ALONE] or list(attrs))
             keep[k] = attrs[k]
         _resolve_clashes(keep)
         return render_en(keep, rng) if lang == 'en' else render_uk(keep, rng)
@@ -344,11 +346,11 @@ def render_en(a, rng):
         noun = rng.choice(V.DRUM_NOUNS_EN)
     elif a.get('ballad'):
         noun = 'ballad'
-    else:
-        noun = 'music' if rng.random() < 0.15 else rng.choice(V.NOUNS_EN)
+    else:  # no 'music' next to a length word: 'short music' reads oddly
+        noun = 'music' if rng.random() < 0.15 and 'length' not in a else rng.choice(V.NOUNS_EN)
     adjs, post = [], []
     feel = []  # mood words that may move into 'that feels ...'
-    if 'length' in a and noun != 'music':  # 'short music' reads oddly
+    if 'length' in a:
         adjs.append(rng.choice(V.LENGTH[a['length']]['en']))
     for m in a.get('mood', []) + a.get('use', []):
         e = V.MOOD[m]
@@ -442,12 +444,12 @@ def render_uk(a, rng):
         nom, acc, gender = rng.choice(V.DRUM_NOUNS_UK)
     elif a.get('ballad'):
         nom, acc, gender = 'балада', 'баладу', 'f'
-    else:
-        nom, acc, gender = V.MUSIC_UK if rng.random() < 0.15 else rng.choice(V.NOUNS_UK)
+    else:  # no 'музика' next to a length word
+        nom, acc, gender = V.MUSIC_UK if rng.random() < 0.15 and 'length' not in a else rng.choice(V.NOUNS_UK)
     fem = gender == 'f'
     adjs, post, tags = [], [], []  # adjs: (m, f) pairs
 
-    if 'length' in a and nom != 'музика':
+    if 'length' in a:
         adjs.append(rng.choice(V.LENGTH[a['length']]['uk']))
     for m in a.get('mood', []) + a.get('use', []):
         e = V.MOOD[m]

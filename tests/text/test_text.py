@@ -274,6 +274,25 @@ def test_fix_uk_captions():
     assert fix('Класичний твір, який')[0] == 'Класичний твір, який'
 
 
+def test_no_bare_captions():
+    """Kept attributes that say nothing alone ('solo' without its instrument, a length word next to 'music') must not
+    leave a bare noun ('Трек', 'a piece')."""
+    with tempfile.TemporaryDirectory() as d:
+        bits = np.zeros((2, 136), np.uint8)
+        bits[0, 0] = 1  # file 0: solo piano and nothing else to say; file 1: no instruments, long
+        feats = dict(programs=np.packbits(bits, axis=1, bitorder='little'), seconds=np.array([60, 300], np.float32),
+                     ops=np.full(2, 5.0, np.float32), vel_mean=np.full(2, 21.0, np.float32),
+                     pitch_mean=np.full(2, 60.0, np.float32), key=np.full(2, -1, np.int16),
+                     key_conf=np.zeros(2, np.float32), drums=np.zeros(2, np.float32))
+        np.savez(Path(d) / 'toy.features.npz', **feats)
+        c = StoreCaptions('toy', d)
+        rng = random.Random(0)
+        for lang, piano, long in (('en', 'piano', 'long|lengthy'), ('uk', 'фортепіано|піаніно', 'довг')):
+            for i, word in ((0, piano), (1, long)):
+                caps = [c.caption(i, rng, lang) for _ in range(300)]
+                assert all(re.search(word, x.lower()) for x in caps), [x for x in caps if not re.search(word, x.lower())]
+
+
 def test_gigamidi_styles():
     from musicar.text import vocab as V
     from musicar.text.captions import gigamidi_ids
