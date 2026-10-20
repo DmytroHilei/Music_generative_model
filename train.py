@@ -137,6 +137,7 @@ section_mode = 'prefix'
 section_xattn_every = 2
 section_dropout = 0.2     # training: share of section captions replaced by the null caption
 section_max_length = 48   # encoder tokens per section caption
+section_style = 'plain'   # 'change': section captions always name what changed vs the previous section
 section_change_frac = 0.0  # training: share of windows around a section change (NoteWindowDataset change_frac)
 section_change_min = 2    # points of change (dynamics / pace / register / drums / instruments)
 late_from = 256           # validation with captions: also the CE over window positions >= late_from (val/*late*)
@@ -217,7 +218,7 @@ extra_names = (['program'] if n_programs else []) + (['style'] if styles else []
     + (['sec_text', 'sec_pos'] if section_len else [])
 data_kw = dict(root_dir=root_dir, cache_dir=cache_dir, special_tokens=special_tokens, styles=styles,
                programs=n_programs > 0, pad_short=pad_short, min_notes=min_notes, captions=captions or None,
-               caption_uk=caption_uk, section_len=section_len, section_lead=section_lead)
+               caption_uk=caption_uk, section_len=section_len, section_lead=section_lead, section_style=section_style)
 # train: random windows (uniform over all note positions of all files), with augmentation
 train_dataset = NoteWindowDataset(csv_path, split='train', block_size=block_size, augment=True, **data_kw,
                                style_dropout=style_dropout, boundary_frac=boundary_frac, aug_tempo=aug_tempo,

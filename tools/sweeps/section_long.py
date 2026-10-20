@@ -16,7 +16,13 @@ sections without a change (the fresh null caption, not content).
     .venv/bin/python tools/sweeps/section_long.py --chunks 0                  # to the end (overnight), probe per chunk
     .venv/bin/python tools/sweeps/section_long.py --probe-only                # probe the current weights
     .venv/bin/python tools/sweeps/section_long.py -- --section_change_frac=0.7   # extra train.py arguments
+    # the change-aware caption arm (config/pilots/section_long_change.py), comparable with long_A256:
+    .venv/bin/python tools/sweeps/section_long.py --name long_A256_change --out-dir checkpoints/long_A256_change \
+        --config config/pilots/section_long_change.py --minutes 90
 
+Every chunk of a run must train with the same config files and extra train.py arguments (else e.g. a chunk without
+section_style=change would train on plain captions): the first chunk records them in the state json, a later chunk
+with others is refused (--force overrides).
 Ctrl+C during training: train.py saves ckpt.pt after the current step and exits; the driver stops too.
 Log logs/sections/long_A256.log (appended), probe results/section_gain/long_A256/it<N>, table logs/sections/
 long_A256.md, state logs/sections/long_A256.json.
@@ -48,7 +54,9 @@ def parse_args():
     p.add_argument('--min-gain', type=float, default=0.005, help='nats per note on the first 32 notes after changes')
     p.add_argument('--windows', type=int, default=512, help='probe windows around changes')
     p.add_argument('--probe-only', action='store_true')
-    p.add_argument('--force', action='store_true', help='train on after an early stop')
+    p.add_argument('--config', action='append', default=[], help='extra train.py config file(s) after CONFIGS')
+    p.add_argument('--force', action='store_true',
+                   help='train on after an early stop, or with other settings than the first chunk')
     p.add_argument('--dry-run', action='store_true', help='print the commands only')
     p.add_argument('--name', default=NAME, help='log / table / probe names (another name = a separate run)')
     p.add_argument('--out-dir', default=str(OUT_DIR), help="train.py out_dir (passed on when it isn't the default)")
@@ -59,6 +67,8 @@ def parse_args():
     PROBE = ROOT / 'results/section_gain' / args.name
     if Path(args.out_dir) != OUT_DIR:
         args.train_args.append(f'--out_dir={args.out_dir}')
+    if not Path(args.out_dir).is_absolute():  # train.py runs in ROOT
+        args.out_dir = str(ROOT / args.out_dir)
     if args.max_iters != MAX_ITERS:
         args.train_args += [f'--max_iters={args.max_iters}', f'--lr_decay_iters={args.max_iters}']
     OUT_DIR, MAX_ITERS = Path(args.out_dir), args.max_iters
@@ -83,8 +93,8 @@ def trained_iters():
 
 
 def train_chunk(args):
-    cmd = ['.venv/bin/python', 'train.py', *CONFIGS, f'--max_minutes={args.minutes:g}', f'--gpu_duty={args.duty:g}',
-           *args.train_args]
+    cmd = ['.venv/bin/python', 'train.py', *CONFIGS, *args.config, f'--max_minutes={args.minutes:g}',
+           f'--gpu_duty={args.duty:g}', *args.train_args]
     if (OUT_DIR / 'ckpt.pt').exists():
         cmd.append('--init_from=resume')
     print(f'{time.strftime("%H:%M")} train from iter {trained_iters()}: ' + ' '.join(cmd[2:]), flush=True)
@@ -158,6 +168,13 @@ def main():
         write_table(state, args)
         print(json.dumps(row, indent=1) if row else '', f'-> {TABLE}')
         return
+    settings = {'configs': CONFIGS + args.config, 'train_args': args.train_args}
+    if state.get('settings', settings) != settings and not args.force:
+        sys.exit(f"{args.name} was trained with {state['settings']}, not {settings}: every chunk needs the same "
+                 f"config files and train.py arguments (--force to train on anyway)")
+    if 'settings' not in state and not args.dry_run:
+        state['settings'] = settings
+        save_state(state)
     n = 0
     while args.chunks == 0 or n < args.chunks:
         if state['stopped'] and not args.force:
@@ -174,8 +191,9 @@ def main():
             if row['iter'] >= args.stop_at and row['gain_shuffled'] < args.min_gain:
                 state['stopped'] = (f"iter {row['iter']}: change-start gain vs shuffled {row['gain_shuffled']:+.4f} "
                                     f"< {args.min_gain}")
-        save_state(state)
-        write_table(state, args)
+        if not args.dry_run:
+            save_state(state)
+            write_table(state, args)
         if code != 0:
             sys.exit(f'train.py exited with {code}' + (' (interrupted, ckpt.pt saved)' if code in (130, 143) else ''))
         if args.dry_run:

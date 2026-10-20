@@ -141,6 +141,7 @@ class NoteWindowDataset(Dataset):
         section_lead=0,
         section_dropout=0.0,
         section_caption_mode='true',
+        section_style='plain',
         change_frac=0.0,
         change_min=2,
     ):
@@ -193,7 +194,10 @@ class NoteWindowDataset(Dataset):
                      then those arriving inside it, '' = unused or dropped) and their positions (a (section_events,)
                      tensor of the window index each comes before; block_size + 1 = unused). section_dropout
                      (training): share of section captions replaced by ''. section_caption_mode (validation): 'true' /
-                     'shuffled' (another file's sections) / 'none', fixed per file like caption_mode
+                     'shuffled' (another file's sections) / 'none', fixed per file like caption_mode.
+                     section_style: 'plain' = each section described on its own; 'change' = what changed vs the
+                     section before is always named (musicar.text.captions.section_changed), e.g. the instrument that
+                     entered or 'loud' after a soft section (the first section of a file stays plain)
         change_frac: training only, with section_len: this share of windows is placed around a section boundary where
                      the section differs from the one before by >= change_min points (section_change_scores: dynamics,
                      pace, register, drums, instruments), uniform over such boundaries of the drawn store, the
@@ -255,6 +259,8 @@ class NoteWindowDataset(Dataset):
         self.caption_uk = caption_uk
         self.section_len, self.section_lead = section_len, section_lead
         self.section_dropout, self.section_caption_mode = section_dropout, section_caption_mode
+        assert section_style in ('plain', 'change'), section_style
+        self.section_style = section_style
         assert not section_len or (captions and not self.pack_short), 'section captions need captions, no pack_short'
         assert 0 <= section_lead <= section_len
         # the caption in force at the window start + at most one per section_len rows inside it (+ the one before
@@ -602,8 +608,10 @@ class NoteWindowDataset(Dataset):
             rng = random.Random((store_id * 10_000_000 + fid) * 1_000 + k)
         elif self.augment and random.random() < self.section_dropout:
             return ''
-        from musicar.text.captions import section_caption
-        return section_caption(*self._section_notes(file_idx, k), rng, uk_share=self.caption_uk)
+        from musicar.text.captions import section_attributes, section_caption
+        prev = section_attributes(*self._section_notes(file_idx, k - 1)) if self.section_style == 'change' and k > 0 \
+            else None
+        return section_caption(*self._section_notes(file_idx, k), rng, uk_share=self.caption_uk, prev=prev)
 
     def _section_notes(self, file_idx, k):
         """Tokens (n, 4) and programs (n,) of the real notes in rows k * section_len .. (k + 1) * section_len - 1 of

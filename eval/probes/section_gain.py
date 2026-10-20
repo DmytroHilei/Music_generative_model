@@ -32,7 +32,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
 from musicar.data.loader import NoteWindowDataset, collate_windows, section_change_scores  # noqa: E402
-from musicar.model.checkpoint import load_model  # noqa: E402
+from musicar.model.checkpoint import load_model, resolve_checkpoint  # noqa: E402
 from musicar.model.gpt import STREAM_ORDER  # noqa: E402
 from musicar.text.encoder import TextEncoder  # noqa: E402
 
@@ -54,6 +54,8 @@ def parse_args():
     p.add_argument('--out', default='results/section_gain/run')
     p.add_argument('--windows', type=int, default=256, help='held-out windows (evenly thinned, same for every mode)')
     p.add_argument('--at-changes', action='store_true', help='windows around section changes of >= 2 points')
+    p.add_argument('--section-style', default=None, choices=('plain', 'change'),
+                   help="section captions as in training ('change' = name what changed); default: the checkpoint's")
     p.add_argument('--batch', type=int, default=8)
     p.add_argument('--block', type=int, default=1024)
     p.add_argument('--section-max-length', type=int, default=48)
@@ -91,15 +93,21 @@ def bucket_means(gain, key, valid, buckets):
     return out
 
 
+def train_setting(ck, name, default):
+    """A train.py setting saved in the checkpoint's config (default for checkpoints from before it existed)."""
+    return torch.load(resolve_checkpoint(ck), map_location='cpu', mmap=True).get('config', {}).get(name, default)
+
+
 def probe(ck, encoder, args):
     model, it = load_model(ck, args.device, torch.bfloat16 if args.device.startswith('cuda') else torch.float32)
     cfg = model.config
     if not cfg.section_len:
         return None
     S = cfg.section_len
+    style = args.section_style or train_setting(ck, 'section_style', 'plain')
     kw = dict(root_dir=str(ROOT), split='validation', block_size=args.block, eval_stride=args.block,
               special_tokens=True, programs=True, pad_short=True, captions=str(ROOT / 'data/labels'), caption_uk=0.3,
-              section_len=S, section_lead=cfg.section_lead)
+              section_len=S, section_lead=cfg.section_lead, section_style=style)
     sets = {m: NoteWindowDataset(VAL_SOURCE, section_caption_mode=m, **kw) for m in MODES}
     ds = sets['true']
     if args.at_changes:
@@ -142,7 +150,7 @@ def probe(ck, encoder, args):
     cat = {m: torch.cat(v) for m, v in ce.items()}
     valid, pin, since, wpos, change = (torch.cat(v) for v in (valid, pin, since, wpos, change))
     res = {'checkpoint': str(ck), 'iter': it, 'section_len': S, 'section_lead': cfg.section_lead,
-           'section_mode': cfg.section_mode, 'windows': len(idx), 'at_changes': args.at_changes}
+           'section_mode': cfg.section_mode, 'windows': len(idx), 'at_changes': args.at_changes, 'section_style': style}
     # the CE itself with the own captions (headroom: how much worse the first notes after a change are predicted)
     # (notes with >= 128 notes of context: a window's first notes are predicted badly whatever their section)
     ctx = valid & (wpos >= 128)
@@ -169,7 +177,8 @@ def summarize(results):
     for r in results:
         name = Path(r['checkpoint']).name if Path(r['checkpoint']).is_dir() else Path(r['checkpoint']).parent.name
         lines += [f"## {name} ({r['section_mode']}, section {r['section_len']}, lead {r['section_lead']}, "
-                  f"@{r['iter']}, {r['windows']} windows{' around changes' if r.get('at_changes') else ''})", '',
+                  f"@{r['iter']}, {r['windows']} windows{' around changes' if r.get('at_changes') else ''}"
+                  f"{', change-aware captions' if r.get('section_style') == 'change' else ''})", '',
                   f"all positions: vs shuffled {r['shuffled']['all']:+.4f}, vs none {r['none']['all']:+.4f}", '']
         for table, title in (('in_section', 'position in section'), ('since_arrival', 'notes since the caption'),
                              ('window', 'window position'), ('change', 'change score of the section'),

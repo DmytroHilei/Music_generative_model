@@ -5,6 +5,7 @@
 # early stop):
 #   python train.py config/pilots/text_pilot.py config/pilots/section_pilot.py config/pilots/section_long.py \
 #       --max_minutes=60 [--init_from=resume]
+# The same arm with change-aware section captions: config/pilots/section_long_change.py on top.
 section_lead = 256
 section_mode = 'prefix'
 section_change_frac = 0.5

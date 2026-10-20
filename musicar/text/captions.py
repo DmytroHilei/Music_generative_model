@@ -47,6 +47,12 @@ UK_VOWELS = set('аеєиіїоуюя')
 # section captions: what can change inside a piece, read from the section's own notes (the file caption keeps mood,
 # genre, key, length); per attribute the chance of naming it
 SECTION_P = dict(instruments=0.7, pace=0.6, dynamics=0.6, register=0.5, drums=1.0, solo=1.0, no_drums=0.5)
+# change-aware section captions (section_caption prev=, loader section_style 'change'): what changed vs the previous
+# section is always named (entering instruments first, at most CHANGE_INSTRUMENTS), the rest subsampled with these
+# chances (register is rare: ~7% of sections each way); the tags form also names the drum noun and the register
+SECTION_P_CHANGE = dict(SECTION_P, register=0.8)
+CHANGE_INSTRUMENTS = 2
+REGISTER_TAG = {'low': ('low register', 'низький регістр'), 'high': ('high register', 'високий регістр')}
 DT = 0.02  # seconds per time bin
 DRUM_PROGRAM = 128
 
@@ -263,26 +269,53 @@ def section_attributes(tok, prog):
     return a
 
 
+def _drums_state(a):
+    """'only' / 'without' / 'with' drums of section_attributes a."""
+    return 'only' if a.get('drums') else 'without' if a.get('no_drums') or a.get('solo') else 'with'
+
+
 def section_change(a, b):
     """How much a section differs from the one before it (section_attributes dicts a, b): one point each for another
     dynamics / pace / register level, another drums state (drums only / with drums / without), and instrument sets
     that differ by >= 2 instruments (one instrument near the 2% threshold flips often). 0 when b has no notes."""
     if not b:
         return 0
-
-    def drums(x):
-        return 'only' if x.get('drums') else 'without' if x.get('no_drums') or x.get('solo') else 'with'
-    score = sum(a.get(k) != b.get(k) for k in ('dynamics', 'pace', 'register')) + (drums(a) != drums(b))
+    score = sum(a.get(k) != b.get(k) for k in ('dynamics', 'pace', 'register')) + (_drums_state(a) != _drums_state(b))
     return score + (len(set(a.get('instruments', ())) ^ set(b.get('instruments', ()))) >= 2)
 
 
-def section_caption(tok, prog, rng=random, uk_share=UK_SHARE, lang=None):
+def section_changed(prev, new):
+    """What section `new` has that the one before it (`prev`; section_attributes dicts) didn't, as far as there are
+    words for it: pace / dynamics / register at a named level (low / high) other than before, 'drums' (now drums only),
+    'no_drums' or 'solo' (the drums stopped), 'instruments': those that entered (drums first, at most
+    CHANGE_INSTRUMENTS). A change to the middle level or an instrument that left can't be named."""
+    out = {}
+    if not new:
+        return out
+    for k in ('pace', 'dynamics', 'register'):
+        if new.get(k) and new.get(k) != prev.get(k):
+            out[k] = new[k]
+    if new.get('drums') and not prev.get('drums'):
+        out['drums'] = True
+    elif _drums_state(new) == 'without' and _drums_state(prev) != 'without':
+        out['no_drums' if new.get('no_drums') else 'solo'] = True
+    entered = sorted((i for i in new.get('instruments', ()) if i not in prev.get('instruments', ())),
+                     key=lambda i: i != 'drums')
+    if entered:
+        out['instruments'] = entered[:CHANGE_INSTRUMENTS]
+    return out
+
+
+def section_caption(tok, prog, rng=random, uk_share=UK_SHARE, lang=None, prev=None):
     """A caption of a section from its own notes (section_attributes): a random subset (SECTION_P, at least one;
     instrument lists of <= 3 named whole with FULL_LIST, else 1-3 of them) rendered like the file captions. '' when
-    nothing describes it."""
+    nothing describes it. prev: the section_attributes of the section before (loader section_style 'change'): what
+    changed (section_changed) is always named, see _change_caption; None = the plain caption."""
     attrs = section_attributes(tok, prog)
     if not attrs:
         return ''
+    if prev is not None:
+        return _change_caption(attrs, section_changed(prev, attrs), rng, uk_share, lang)
     lang = lang or ('uk' if rng.random() < uk_share else 'en')
     ids = attrs.get('instruments')
     if ids and not (len(ids) <= 3 and rng.random() < FULL_LIST):
@@ -296,6 +329,26 @@ def section_caption(tok, prog, rng=random, uk_share=UK_SHARE, lang=None):
     if keep.get('solo') and 'instruments' not in keep:
         keep['instruments'] = attrs['instruments']
     return render_en(keep, rng) if lang == 'en' else render_uk(keep, rng)
+
+
+def _change_caption(attrs, changed, rng, uk_share, lang):
+    """section_caption with what changed (section_changed) always kept: entering instruments lead the named ones (a
+    list of at most 3 unless more entered), the other attributes subsampled with SECTION_P_CHANGE; the tags form names
+    the drum noun and the register too."""
+    lang = lang or ('uk' if rng.random() < uk_share else 'en')
+    ids = attrs.get('instruments')
+    if ids:
+        named = rng.sample(ids, len(ids)) if len(ids) <= 3 and rng.random() < FULL_LIST else \
+            rng.sample(ids, min(len(ids), rng.randint(1, 3)))
+        new = changed.get('instruments', [])
+        attrs['instruments'] = (new + [i for i in named if i not in new])[:max(3, len(new))]
+    keep = {k: v for k, v in attrs.items() if k in changed or rng.random() < SECTION_P_CHANGE.get(k, 0.5)}
+    if not keep:
+        k = rng.choice(list(attrs))
+        keep[k] = attrs[k]
+    if keep.get('solo') and 'instruments' not in keep:
+        keep['instruments'] = attrs['instruments']
+    return render_en(keep, rng, tags_all=True) if lang == 'en' else render_uk(keep, rng, tags_all=True)
 
 
 def _resolve_clashes(a):
@@ -313,7 +366,8 @@ def _resolve_clashes(a):
 
 # ---------------------------------------------------------------- English
 
-def render_en(a, rng):
+def render_en(a, rng, tags_all=False):
+    """tags_all (change-aware section captions): the tags form also names the drum noun and the register."""
     if a.get('drums'):
         noun = rng.choice(V.DRUM_NOUNS_EN)
     elif a.get('ballad'):
@@ -372,6 +426,10 @@ def render_en(a, rng):
         + (['no drums'] if a.get('no_drums') else []) + ([f'{a["key"][0]} {a["key"][1]}'] if 'key' in a else [])
     if 'tempo' in a and a['tempo'][1] and not any(t in V.TEMPO[a['tempo'][0]]['en'] for t in tags):
         tags.append(a['tempo'][1])
+    if tags_all:  # no draws here: the plain captions keep their random sequence
+        tags = ([noun] if a.get('drums') else []) + tags
+        if 'register' in a and not any(w in tags for w in V.REGISTER[a['register']]['en']):
+            tags.append(REGISTER_TAG[a['register']][0])
     form = rng.random()
     if form < 0.2 and len(_dedupe(tags)) > 1:  # tags: "sad, jazz, piano, D minor"
         return _finish_en(', '.join(_dedupe(tags)), rng)
@@ -410,7 +468,8 @@ def _finish_en(text, rng, capital=None):
 
 # ---------------------------------------------------------------- Ukrainian
 
-def render_uk(a, rng):
+def render_uk(a, rng, tags_all=False):
+    """tags_all (change-aware section captions): the tags form also names the drum noun and the register."""
     if a.get('drums'):
         nom, acc, gender = rng.choice(V.DRUM_NOUNS_UK)
     elif a.get('ballad'):
@@ -479,6 +538,8 @@ def render_uk(a, rng):
                                [f'у тональності {tonic_uk} {mode_nom}', f'у {tonic_uk} {mode_loc}',
                                 f', {tonic_uk} {mode_nom}']))
 
+    if tags_all:  # no draws here: the plain captions keep their random sequence
+        tags = ([nom] if a.get('drums') else []) + tags + ([REGISTER_TAG[a['register']][1]] if 'register' in a else [])
     form = rng.random()
     if form < 0.2 and len(_dedupe(tags)) > 1:  # tags: "сумний, джаз, фортепіано, ре мінор"
         return _finish_uk(', '.join(_dedupe(tags)), rng)

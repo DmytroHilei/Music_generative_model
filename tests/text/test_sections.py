@@ -1,5 +1,6 @@
 """Section captions (CPU, tiny models, synthetic stores): python tests/text/test_sections.py  (or pytest tests/)."""
 
+import hashlib
 import random
 import sys
 import tempfile
@@ -15,7 +16,7 @@ from musicar.data.loader import NoteWindowDataset, collate_windows  # noqa: E402
 from musicar.generation.sampling import generate  # noqa: E402
 from musicar.model.checkpoint import merge_model_args  # noqa: E402
 from musicar.model.gpt import KVCache, section_layout, section_query_index  # noqa: E402
-from musicar.text.captions import section_attributes, section_caption, section_change  # noqa: E402
+from musicar.text.captions import section_attributes, section_caption, section_change, section_changed  # noqa: E402
 from test_text import TINY, batch, make_store, tiny  # noqa: E402
 
 D = 8  # text_dim of the tiny models
@@ -189,6 +190,59 @@ def test_section_change():
     assert section_change(a, {'dynamics': 'low', 'instruments': ['piano', 'violin', 'drums']}) == 1  # with drums
 
 
+def caption_sections(n=200, seed=0):
+    """Random sections (tokens, programs) of 20-300 notes: piano, a band, drums only, a large band."""
+    g = np.random.default_rng(seed)
+    out = []
+    for i in range(n):
+        m = int(g.integers(20, 300))
+        tok = np.stack([g.integers(30, 100, m), g.integers(int(g.integers(0, 20)), int(g.integers(20, 32)), m),
+                        g.integers(1, 60, m), g.integers(0, int(g.integers(2, 40)), m)], 1)
+        progs = [[0], [0, 33, 128], [128], [40, 41, 42, 0, 33, 25, 128]][i % 4]
+        out.append((tok.astype(np.int64), g.choice(progs, m).astype(np.int64)))
+    return out
+
+
+def test_plain_section_captions_unchanged():
+    # the plain captions (and their draws) as before the change-aware option (2026-10-20): a run resumed across the
+    # change (long_A256) keeps its training and fixed validation captions
+    caps = [section_caption(tok, prog, random.Random(i * 10 + s), uk_share=0.3)
+            for i, (tok, prog) in enumerate(caption_sections()) for s in (0, 1)]
+    assert hashlib.sha1('\n'.join(caps).encode()).hexdigest() == 'bc2b2b097256ef7031b931e5bb4612af7e24aa19'
+
+
+def test_section_changed():
+    soft = {'dynamics': 'low', 'pace': 'high', 'instruments': ['piano'], 'solo': True}
+    assert section_changed(soft, soft) == {} and section_changed(soft, {}) == {}
+    loud = {'dynamics': 'high', 'instruments': ['piano', 'violin', 'drums']}
+    assert section_changed(soft, loud) == {'dynamics': 'high', 'instruments': ['drums', 'violin']}
+    assert section_changed(loud, soft) == {'dynamics': 'low', 'pace': 'high', 'solo': True}  # drums stopped
+    band = {'instruments': ['piano', 'bass'], 'no_drums': True}
+    assert section_changed(loud, band) == {'no_drums': True, 'instruments': ['bass']}  # middle dynamics: no word
+    assert section_changed(band, {'drums': True}) == {'drums': True}
+
+
+def test_change_captions_name_the_change():
+    from musicar.text import vocab as V
+    n = 256
+    tok = np.stack([np.full(n, 60), np.full(n, 10), np.full(n, 10), np.full(n, 10)], 1)  # soft, low notes
+    piano = np.zeros(n, np.int64)
+    prev = section_attributes(tok, piano)
+    loud = tok.copy()
+    loud[:, 0], loud[:, 1] = 90, 31  # loud, high register
+    band = np.array([0, 40] * (n // 2))  # piano + violin
+    assert section_changed(prev, section_attributes(loud, band)).keys() >= {'dynamics', 'register', 'instruments'}
+    violin = V.INSTRUMENT['violin'][0] + [f[0][:6] for f in V.INSTRUMENT['violin'][1]]
+    for i in range(60):
+        for lang in ('en', 'uk'):
+            c = section_caption(loud, band, random.Random(i), lang=lang, prev=prev).lower()
+            assert any(w in c for w in ('loud', 'powerful', 'гучн', 'потужн')), c
+            assert any(w in c for w in ('high register', 'high-pitched', 'bright', 'регістр')), c
+            assert any(w in c for w in violin), c
+    # the first section of a file (prev None) and an unchanged section read like plain captions
+    assert section_caption(loud, band, random.Random(0)) == section_caption(loud, band, random.Random(0), prev=None)
+
+
 def test_dataset_change_windows():
     with tempfile.TemporaryDirectory() as d:
         root = make_store(Path(d), notes=80)
@@ -216,6 +270,26 @@ def test_dataset_change_windows():
             raise RuntimeError('expected no section changes')
         except AssertionError as e:
             assert 'no section changes' in str(e)
+
+
+def test_dataset_section_style():
+    with tempfile.TemporaryDirectory() as d:
+        root = make_store(Path(d), notes=80)
+        store = root / 'cache' / 'toy_train'
+        tokens = np.fromfile(store / 'tokens.u16', np.uint16).reshape(-1, 4)
+        tokens[:, :2], tokens[:, 3] = (60, 10), 10
+        tokens[80 + 47:160, :2] = (100, 31)  # file 1 from row 48 (section 3): high register, loud
+        tokens.tofile(store / 'tokens.u16')
+        kw = dict(root_dir=d, block_size=32, special_tokens=True, programs=True, captions=str(root / 'labels'),
+                  cache_dir=str(root / 'cache'), section_len=16, eval_stride=32)
+        src = f"store:{root / 'cache' / 'toy'}"
+        plain = NoteWindowDataset(src, split='train', **kw)
+        change = NoteWindowDataset(src, split='train', section_style='change', **kw)
+        assert plain._section_caption(1, 0) == change._section_caption(1, 0), 'first section: plain'
+        assert plain._section_caption(1, 2) == change._section_caption(1, 2), 'nothing changed: plain'
+        c = change._section_caption(1, 3).lower()
+        assert any(w in c for w in ('loud', 'powerful', 'гучн', 'потужн')), c
+        assert any(w in c for w in ('high register', 'high-pitched', 'bright', 'регістр')), c
 
 
 def test_merge_model_args_adds_sections():
