@@ -2,7 +2,8 @@
 Captions per file of a token store, for text control (context/claude/text_control.md, build step 5).
 
 Per file it reads data/labels/<store>.*:
-  .jsonl         MidiCaps fields + full caption, XMIDI (emotion, genre) labels         (tier 1, data_prep/labels/build_labels.py)
+  .jsonl         MidiCaps fields + full caption, XMIDI (emotion, genre) labels, GigaMIDI v2 metadata (styles, artist,
+                 title; styles -> genre / mood ids through vocab.GIGAMIDI_STYLE)  (tier 1, data_prep/labels/build_labels.py)
   .features.npz  key, onsets/s, register, velocity, length, instruments, drum share    (every file, song_features.py)
   .pseudo.npz    confident predicted mood group / genre (pseudo_labels.py), used only for files >= 20 s that are
                  not drum-only (out-of-distribution files get confident nonsense) and only without true labels
@@ -67,7 +68,8 @@ def _join(items, last=' and '):
 
 def _article(word):
     w = word.lstrip("'").lower()
-    return 'an' if w[:1] in 'aeiou' and not w.startswith(('eu', 'uni', 'use')) else 'a'
+    vowel = w[:1] in 'aeiou' and not w.startswith(('eu', 'uni', 'use')) or w.startswith(('8', '11', '18'))
+    return 'an' if vowel else 'a'
 
 
 def _uk_acc(phrase):
@@ -92,9 +94,23 @@ def _dedupe(words):
     return out
 
 
+def gigamidi_ids(gm):
+    """GigaMIDI metadata of a file ({'styles': [...], 'artist': ...}) -> {'genre' / 'mood' / 'use': ids}. An era
+    (Baroque, ...) replaces 'classical'; eras and decades come first ("a Baroque piece", "a '70s rock song")."""
+    ids = [i for s in gm.get('styles', ()) for i in V.GIGAMIDI_STYLE.get(s, ())]
+    ids = _dedupe(ids + V.GIGAMIDI_ARTIST.get(str(gm.get('artist') or '').lower(), []))
+    if set(ids) & V.ERAS:
+        ids = [i for i in ids if i != 'classical']
+    out = {}
+    for i in sorted(ids, key=lambda i: i not in V.ERAS | V.DECADES):
+        kind = 'genre' if i in V.GENRE else V.MOOD[i].get('kind', 'mood')
+        out.setdefault(kind, []).append(i)
+    return out
+
+
 class StoreCaptions:
     """Captions of the files of one token store (file index = position in the store). Missing label files -> every
-    caption is ''. labeled(i): the file has MidiCaps or XMIDI labels (tier 1)."""
+    caption is ''. labeled(i): the file has MidiCaps or XMIDI labels or a mapped GigaMIDI style (tier 1)."""
 
     def __init__(self, store_name, labels_dir='data/labels', uk_share=UK_SHARE, captions_dir='data/captions'):
         d = Path(labels_dir)
@@ -105,6 +121,8 @@ class StoreCaptions:
             for line in (d / f'{store_name}.jsonl').read_text().splitlines():
                 row = json.loads(line)
                 self.labels[row['file']] = row
+        self.gm_ids = {i: ids for i, row in self.labels.items()
+                       if 'gigamidi' in row and (ids := gigamidi_ids(row['gigamidi']))}
         self.uk_full = {}
         uk = Path(captions_dir) / f'{store_name}.uk.fixed.jsonl'
         if uk.exists():
@@ -125,7 +143,7 @@ class StoreCaptions:
 
     def labeled(self, i):
         row = self.labels.get(int(i))
-        return bool(row and ('midicaps' in row or 'xmidi' in row))
+        return bool(row and ('midicaps' in row or 'xmidi' in row or int(i) in self.gm_ids))
 
     def caption(self, i, rng=random, lang=None):
         """A caption for file i, drawn with rng (random.Random or the random module); lang 'en' / 'uk' / None (drawn:
@@ -181,6 +199,14 @@ class StoreCaptions:
             names = [n for n in names if n in V.INSTRUMENT]
             if names:
                 a['instruments'] = rng.sample(names, min(len(names), rng.randint(1, 3)))
+        gm = self.gm_ids.get(i)
+        if gm:  # site / Musicmap genres replace MidiCaps' tagger genres; moods only where MidiCaps has none
+            if gm.get('genre'):
+                g = gm['genre']
+                a['genre'] = [g[j] for j in sorted(rng.sample(range(len(g)), min(len(g), rng.choice([1, 1, 2]))))]
+            for kind in ('mood', 'use'):
+                if gm.get(kind) and kind not in a:
+                    a[kind] = [rng.choice(gm[kind])]
         if xm:
             emotion, genre = rng.choice(xm)
             a['mood'] = [f'x_{emotion}']
@@ -205,7 +231,7 @@ class StoreCaptions:
                     a['solo'] = True
                 elif 'drums' not in ids:
                     a['no_drums'] = True
-        pseudo_ok = (not mc and not xm and self.pseudo is not None and not drum_only
+        pseudo_ok = (not mc and not xm and not gm and self.pseudo is not None and not drum_only
                      and f['seconds'][i] >= PSEUDO_MIN_SECONDS)
         if pseudo_ok:
             if self.pseudo['xmidi_mood_keep'][i]:
@@ -354,7 +380,8 @@ def render_en(a, rng):
     adjs = _dedupe(adjs)[:MAX_ADJ]
     feel = [w for w in feel if w in adjs]
     genres = _dedupe(rng.choice(V.GENRE[g]['en']) for g in a.get('genre', []))
-    genre = ' '.join(genres) if len(genres) < 2 or rng.random() < 0.5 else ' and '.join(genres)
+    era = set(a.get('genre', [])) & (V.ERAS | V.DECADES)  # "a '70s rock song", not "a '70s and rock song"
+    genre = ' '.join(genres) if len(genres) < 2 or rng.random() < 0.5 or era else ' and '.join(genres)
     instruments = [rng.choice(V.INSTRUMENT[i][0]) for i in a.get('instruments', [])]
     solo = a.get('solo') and len(instruments) == 1
     if a.get('no_drums'):
@@ -520,11 +547,16 @@ if __name__ == '__main__':
     p.add_argument('--lang', default=None, help="'en' / 'uk' (default: drawn)")
     p.add_argument('--seed', type=int, default=0)
     p.add_argument('--no-full', action='store_true', help='templates only (no MidiCaps full captions)')
+    p.add_argument('--labels-dir', default='data/labels')
+    p.add_argument('--files', default='all', help="'all' / 'gigamidi': only files with a mapped GigaMIDI style")
     args = p.parse_args()
     if args.no_full:
         MIDICAPS_FULL = 0.0
-    c = StoreCaptions(args.store)
+    c = StoreCaptions(args.store, args.labels_dir)
     rng = random.Random(args.seed)
     n_files = len(c.features['seconds']) if c.features is not None else max(c.labels) + 1
+    pool = sorted(c.gm_ids) if args.files == 'gigamidi' else range(n_files)
     for _ in range(args.n):
-        print(c.caption(rng.randrange(n_files), rng, args.lang) or "''")
+        i = rng.choice(pool)
+        text = c.caption(i, rng, args.lang) or "''"
+        print(f"{text}    [{', '.join(c.labels[i]['gigamidi'].get('styles', []))}]" if args.files == 'gigamidi' else text)

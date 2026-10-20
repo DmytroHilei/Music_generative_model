@@ -274,6 +274,47 @@ def test_fix_uk_captions():
     assert fix('Класичний твір, який')[0] == 'Класичний твір, який'
 
 
+def test_gigamidi_styles():
+    from musicar.text import vocab as V
+    from musicar.text.captions import gigamidi_ids
+    for key, ids in [*V.GIGAMIDI_STYLE.items(), *V.GIGAMIDI_ARTIST.items()]:
+        assert ids and all((i in V.GENRE) != (i in V.MOOD) for i in ids), key
+    assert not set(V.GIGAMIDI_STYLE) & V.GIGAMIDI_SKIP and (V.ERAS | V.DECADES) <= set(V.GENRE)
+    for g, e in V.GENRE.items():
+        assert e['en'] and e['uk_tag'] and (e.get('uk') or e.get('prefix') or e.get('uk_post')), g
+    assert gigamidi_ids({'styles': ['classical', 'baroque']}) == {'genre': ['baroque']}
+    assert gigamidi_ids({'styles': ['rock', 'hits of the 1970s', 'christmas festive']}) == \
+        {'genre': ['70s', 'rock'], 'use': ['christmas']}
+    assert gigamidi_ids({'styles': ['love songs'], 'artist': 'Video Games'}) == {'mood': ['love'], 'use': ['game']}
+    assert gigamidi_ids({'styles': ['midi karaoke'], 'artist': 'Queen'}) == {}
+    with tempfile.TemporaryDirectory() as d:
+        rows = [dict(file=0, md5='a', gigamidi=dict(styles=['classical', 'baroque'], artist='Bach, Johann Sebastian')),
+                dict(file=1, md5='b', gigamidi=dict(artist='Queen', title='Bohemian Rhapsody')),
+                dict(file=2, md5='c', gigamidi=dict(styles=['hits of the 1980s', 'pop', 'rock']))]
+        (Path(d) / 'toy.jsonl').write_text('\n'.join(json.dumps(r) for r in rows) + '\n')
+        c = StoreCaptions('toy', d)
+        assert c.labeled(0) and not c.labeled(1) and c.labeled(2)
+        rng = random.Random(0)
+        bach = [c.caption(0, rng, 'en') for _ in range(100)]
+        assert all('baroque' in x.lower() for x in bach) and not any('classical' in x for x in bach), bach
+        pop = [c.caption(2, rng, 'en') for _ in range(200)]
+        assert any("an '80s" in x for x in pop), pop
+        assert not any(re.search(r"\ba '80s|'80s and", x, re.I) for x in pop), pop
+        uk = [c.caption(i, rng, 'uk') for i in (0, 2) for _ in range(100)]
+        assert not any(re.search('[A-Za-z]', x) for x in uk), uk
+        assert any('барок' in x for x in uk) and any('80-х' in x for x in uk), uk
+        assert c.caption(1, rng, 'en') == ''
+
+
+def test_gigamidi_meta_styles():
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'data_prep' / 'labels'))
+    from gigamidi_meta import _clean, styles_of
+    row = {'music_styles_curated': float('nan'), 'music_style_scraped': 'italian%2cfrench%2cspanish,midi karaoke',
+           'music_style_audio_text_Discogs': 'HEAVY_METAL', 'music_style_audio_text_Lastfm': 'HEAVY_METAL'}
+    assert styles_of(row) == ['italian,french,spanish', 'midi karaoke', 'heavy metal']
+    assert _clean('Pink\nFloyd ') == 'Pink Floyd' and _clean('  ') is None and _clean(float('nan')) is None
+
+
 def test_text_encoder():
     try:
         from musicar.text.encoder import TextEncoder

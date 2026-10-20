@@ -12,11 +12,11 @@ scripts run).
 | `maestro-v3.0.0/` | MAESTRO v3 MIDI (year folders); `maestro-v3.0.0.csv/.json`, `LICENSE`, `README` tracked | `data_prep/datasets/download_maestro.py` |
 | `giantmidi/` | GiantMIDI-Piano MIDI + `giantmidi.csv` | `data_prep/datasets/prepare_giantmidi.py` |
 | `aria/` | Aria-MIDI metadata per store (`<name>.csv`: file_id, segment, split, genre, ...) | `data_prep/datasets/prepare_aria.py`, `subset_aria.py` |
-| `gigamidi/` | GigaMIDI file list, note hashes and dedupe stats | `data_prep/datasets/prepare_gigamidi.py`, `dedupe_val.py` |
+| `gigamidi/` | GigaMIDI file list, note hashes and dedupe stats; v2 metadata `Final-Metadata-Extended-GigaMIDI-Dataset-updated.csv` (1.25 GB, CC BY-NC 4.0) and its label columns `gigamidi_meta.parquet` (md5, artist, title, style tokens, Spotify / MusicBrainz ids) | `data_prep/datasets/prepare_gigamidi.py`, `dedupe_val.py`; CSV from Hugging Face `Metacreation/GigaMIDI`, `data_prep/labels/gigamidi_meta.py` |
 | `discover/` | Discover MIDI file list and progress | `data_prep/datasets/prepare_discover.py` |
 | `midicaps/` | MidiCaps: `train.json` (168k captions + features, keyed by Lakh md5 = GigaMIDI file name), the Lakh MIDI tarball was deleted 2026-10-15 (all but 31 files are GigaMIDI files). CC-BY-SA 4.0 | download from Hugging Face `amaai-lab/MidiCaps` |
 | `xmidi/` | XMIDI: `XMIDI.zip` (108k `XMIDI_<emotion>_<genre>_<id>.midi`, not unpacked). No license stated: research use, don't redistribute | Google Drive link in `github.com/xmusic-project/XMIDI_Dataset` |
-| `labels/` | Per store: `<store>.jsonl`, one line per file with a MidiCaps caption / XMIDI labels (`file` = index in the store, `md5`); `<store>.features.npz`, per-file features of every file (key, tempo, density, register, dynamics, instruments) | `data_prep/labels/build_labels.py`, `data_prep/labels/song_features.py` |
+| `labels/` | Per store: `<store>.jsonl`, one line per file with a MidiCaps caption / XMIDI labels / GigaMIDI v2 metadata (`file` = index in the store, `md5`); `<store>.features.npz`, per-file features of every file (key, tempo, density, register, dynamics, instruments) | `data_prep/labels/build_labels.py`, `data_prep/labels/song_features.py` |
 | `audio/` | Downloaded studio songs, `<artist>/*.mp3` + `songs.csv` | `data_prep/songs/fetch_songs.py`, `redownload.py` |
 | `covers/`, `covers_fresh/` | Solo piano covers (mp3) and their transcriptions, `<artist>/midi/` | `data_prep/songs/fetch_songs.py --mode covers`, `transcribe_covers.py` |
 | `finetune/` | Piano reductions / multi-track MIDI per artist and the fine-tune CSVs (`ukrainian_*.csv`); `exclude.txt` tracked | `data_prep/songs/audio_to_piano.py`, `prepare_finetune.py`, `prepare_fresh_covers.py` |
