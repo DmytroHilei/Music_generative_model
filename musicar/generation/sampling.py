@@ -3,7 +3,7 @@
 import torch
 from torch.nn import functional as F
 
-from musicar.data.loader import BOS_PITCH, EOS_PITCH, window_conditions
+from musicar.data.loader import BOS_PITCH, DRUM_PROGRAM, EOS_PITCH, window_conditions
 from musicar.model.gpt import KVCache, STREAM_ORDER
 
 # one side stream per device for the CUDA-graph warm-up and capture: cuBLAS keeps a workspace for every
@@ -90,6 +90,8 @@ def generate(model, pitch, velocity, duration, delta_time, max_new_tokens, tempe
     Bo = pitch.size(0)  # rows asked for; with guidance the model runs 2 * Bo (conditional, then unconditional)
     guided = cfg_scale != 1.0 and (style is not None or text is not None or sections is not None)
     assert not (guided and target_nps is not None), "guidance with a density target isn't supported"
+    if programs is not None:  # prompt drum notes as in training: duration 0 (MIDI-tokenized prompts keep theirs)
+        duration = torch.where(programs == DRUM_PROGRAM, 0, duration)
     if guided:
         pitch, velocity, duration, delta_time = (torch.cat([t, t]) for t in (pitch, velocity, duration, delta_time))
     B, n0 = pitch.shape
@@ -161,8 +163,11 @@ def generate(model, pitch, velocity, duration, delta_time, max_new_tokens, tempe
         prog_mask = torch.full((n_prog,), -float('Inf'), device=device)
         prog_mask[torch.as_tensor(list(allowed_programs), device=device)] = 0.0
 
+    note_program = [None]  # the instrument just sampled for the note being decided (the cascade samples it first)
+
     def sample(logits, name=None):  # (B, 1, vocab) → (B, 1)
         if name == 'program' and not sample_programs:
+            note_program[0] = fixed_program
             return fixed_program
         logits = logits[:, -1, :].float()
         if name == 'program' and prog_mask is not None:
@@ -192,7 +197,14 @@ def generate(model, pitch, velocity, duration, delta_time, max_new_tokens, tempe
             probs = probs / probs.sum(-1, keepdim=True).clamp(min=1e-12) * (1 - p_eos)
             probs[:, EOS_PITCH] = p_eos.squeeze(-1)
         nxt = torch.multinomial(probs, num_samples=1)
-        return torch.cat([nxt, nxt]) if guided else nxt
+        nxt = torch.cat([nxt, nxt]) if guided else nxt
+        if name == 'program':
+            note_program[0] = nxt
+        elif name == 'duration' and note_program[0] is not None:
+            # drum notes are trained with duration 0 as input (and as the cascade condition: masked target -> 0);
+            # the duration head never learned them, so a sampled value would feed the model unseen inputs
+            nxt = torch.where(note_program[0] == DRUM_PROGRAM, 0, nxt)
+        return nxt
 
     dtype = next(model.parameters()).dtype
     if device.type == 'cuda' and torch.is_autocast_enabled():

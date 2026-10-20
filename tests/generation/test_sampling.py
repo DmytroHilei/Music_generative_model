@@ -67,6 +67,21 @@ def test_programs():
     assert set(out[4][:, 4:].unique().tolist()) <= set(allowed)
 
 
+def test_drum_durations_zero():
+    # drum notes are trained with duration 0 as input: sampled drums and prompt drums both get it
+    m = tiny(n_programs=129)
+    streams, program, _ = batch(B=2, T=4, n_programs=129)
+    program[:, 1] = DRUM_PROGRAM
+    streams[2][:, 1] = 7
+    torch.manual_seed(0)
+    out = generate(m, *streams, max_new_tokens=60, program=None, programs=program, allowed_programs=[0, DRUM_PROGRAM],
+                   return_programs=True, temperature=1.0, **KW)
+    drums = out[4] == DRUM_PROGRAM
+    assert drums[:, 4:].any() and (~drums[:, 4:]).any()
+    assert torch.all(out[2][drums] == 0) and torch.all(out[2][:, 1] == 0)
+    assert (out[2][:, 4:][~drums[:, 4:]] != 0).any(), 'other instruments keep their sampled durations'
+
+
 def test_dt_bias_and_density_target():
     m = tiny()
     streams, _, _ = batch(B=4, T=4)
