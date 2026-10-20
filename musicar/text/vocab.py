@@ -131,7 +131,90 @@ GENRE = {
     '90s': dict(en=["'90s"], uk_post=['у стилі 90-х'], uk_tag='музика 90-х'),
     'blues': dict(en=['blues'], uk_post=['у стилі блюз'], uk_tag='блюз'),
     'traditional': dict(en=['folk', 'traditional'], uk=[('народний', 'народна')], uk_tag='народна музика'),
+    # GigaMIDI v2 styles (GIGAMIDI_STYLE): eras of classical music, decades, more genres
+    'medieval': dict(en=['medieval'], uk=[('середньовічний', 'середньовічна')], uk_tag='середньовічна музика'),
+    'renaissance': dict(en=['Renaissance'], uk=[('ренесансний', 'ренесансна')], uk_tag='ренесанс'),
+    'baroque': dict(en=['Baroque'], uk=[('бароковий', 'барокова')], uk_tag='бароко'),
+    'romanticera': dict(en=['Romantic-era'], uk_post=['доби романтизму'], uk_tag='романтизм'),
+    'modernclassical': dict(en=['modern classical', 'contemporary classical'],
+                            uk_post=['у сучасному академічному стилі'], uk_tag='сучасна академічна музика'),
+    '50s': dict(en=["'50s"], uk_post=['у стилі 50-х'], uk_tag='музика 50-х'),
+    '60s': dict(en=["'60s"], uk_post=['у стилі 60-х'], uk_tag='музика 60-х'),
+    '70s': dict(en=["'70s"], uk_post=['у стилі 70-х'], uk_tag='музика 70-х'),
+    '80s': dict(en=["'80s"], uk_post=['у стилі 80-х'], uk_tag='музика 80-х'),
+    '2000s': dict(en=['2000s'], uk_post=['у стилі 2000-х'], uk_tag='музика 2000-х'),
+    '2010s': dict(en=['2010s'], uk_post=['у стилі 2010-х'], uk_tag='музика 2010-х'),
+    'hiphop': dict(en=['hip-hop'], prefix='хіп-хоп', uk_tag='хіп-хоп'),
+    'rnb': dict(en=['rhythm and blues', 'soul'], uk_post=['у стилі ритм-енд-блюз', 'у стилі соул'],
+                uk_tag='ритм-енд-блюз'),
+    'disco': dict(en=['disco'], prefix='диско', uk_tag='диско'),
+    'christian': dict(en=['gospel', 'Christian', 'worship'], uk=[('християнський', 'християнська')],
+                      uk_tag='християнська музика'),
+    'musical': dict(en=['musical theatre', 'Broadway'], uk_post=['з мюзиклу'], uk_tag='мюзикл'),
+    'grunge': dict(en=['grunge'], prefix='гранж', uk_tag='гранж'),
+    'ska': dict(en=['ska'], prefix='ска', uk_tag='ска'),
+    'bluegrass': dict(en=['bluegrass'], uk_post=['у стилі блюграс'], uk_tag='блюграс'),
+    'rocknroll': dict(en=["rock 'n' roll", 'rock and roll'], uk_post=['у стилі рок-н-рол'], uk_tag='рок-н-рол'),
+    'celtic': dict(en=['Celtic', 'Irish'], uk=[('кельтський', 'кельтська'), ('ірландський', 'ірландська')],
+                   uk_tag='кельтська музика'),
+    'dnb': dict(en=['drum and bass'], uk_post=['у стилі драм-енд-бейс'], uk_tag='драм-енд-бейс'),
+    'breakbeat': dict(en=['breakbeat'], prefix='брейкбіт', uk_tag='брейкбіт'),
+    'industrial': dict(en=['industrial'], prefix='індастріал', uk_tag='індастріал'),
+    # Aria genres not covered above
+    'ragtime': dict(en=['ragtime'], uk_post=['у стилі регтайм'], uk_tag='регтайм'),
+    'atonal': dict(en=['atonal'], uk=[('атональний', 'атональна')], uk_tag='атональна музика'),
 }
+ERAS = {'medieval', 'renaissance', 'baroque', 'romanticera', 'modernclassical'}  # replace 'classical', come first
+DECADES = {'50s', '60s', '70s', '80s', '90s', '2000s', '2010s'}  # come first, never joined with 'and'
+
+# ---------------------------------------------------------------- GigaMIDI v2 metadata (data_prep/labels/gigamidi_meta.py)
+# style token (curated Musicmap genres, scraped site categories, audio-matched Discogs / Last.fm / Tagtraum classes,
+# normalized) -> GENRE / MOOD ids; checked against the top artists of each token (2026-10-20): 'romantic' and 'modern'
+# are classical eras, 'italian,french,spanish' is Italian pop, curated 'game' is video-game music
+GIGAMIDI_STYLE = {
+    'classical': ['classical'], 'classical music': ['classical'], 'opera': ['classical'], 'game': ['game'],
+    'rock': ['rock'], 'classic rock': ['rock'], 'contemporary rock': ['rock'], 'metal': ['metal'],
+    'heavy metal': ['metal'], 'punk': ['punkrock'], 'punk rock': ['punkrock'], 'hardcore punk': ['punkrock'],
+    'hardcore': ['punkrock'], 'pop': ['pop'], 'k pop': ['pop'], 'chinese pop': ['pop'], 'italian,french,spanish': ['pop'],
+    'alternative': ['alternative'], 'alternative rock': ['alternative', 'rock'], 'alternative-indie': ['alternative', 'indie'],
+    'grunge': ['grunge'], 'grundge': ['grunge'], 'rock n roll': ['rocknroll'], 'rockabilly': ['rocknroll'],
+    'world': ['world'], 'non-western classical': ['world'], 'greek': ['world'], 'jewish': ['world'], 'indian': ['world'],
+    'calypso': ['world'], 'caribbean': ['world'], 'latin': ['latin'], 'latino': ['latin'], 'mexican': ['latin'],
+    'brazil': ['latin'], 'folk': ['folk'], 'traditional (folk)': ['folk'], 'traditional': ['traditional'],
+    'irish': ['celtic'], 'celtic': ['celtic'], 'country': ['country'], 'honky-tonk': ['country'],
+    'line dance': ['country'], 'bluegrass': ['bluegrass'], 'jazz': ['jazz'], 'fusion': ['jazz'], 'swing': ['swing'],
+    'big band swing': ['swing'], 'big-band': ['swing'], 'blues': ['blues'], 'blues contemporary': ['blues'],
+    'randb': ['rnb'], 'rnb-soul': ['rnb'], 'classic modern rb': ['rnb'], 'songs of motown': ['rnb'], 'doo-wop': ['rnb'],
+    'funk': ['funk'], 'disco': ['disco'], 'rap': ['hiphop'], 'hip hop': ['hiphop'], 'hip-hop-rap': ['hiphop'],
+    'hip hop rap': ['hiphop'], 'reggae': ['reggae'], 'reggae-ska': ['reggae', 'ska'], 'ska': ['ska'],
+    'gospel': ['christian'], 'christian-gospel': ['christian'], 'praise and worship': ['christian'],
+    'dance': ['dance'], 'dance-eletric': ['dance', 'electronic'], 'edm': ['electronic', 'dance'],
+    'electronica': ['electronic'], 'techno electronic': ['techno', 'electronic'], 'house': ['house'],
+    'techno': ['techno'], 'hardcore techno': ['techno'], 'trance': ['trance'], 'ambient': ['ambient'],
+    'downtempo': ['chillout'], 'drum&bass': ['dnb'], 'drum n bass': ['dnb'], 'breakbeat': ['breakbeat'],
+    'industrial': ['industrial'], 'newage': ['newage'], 'easylistening': ['easylistening'],
+    'ultra lounge': ['easylistening'], 'ballroom and standards': ['easylistening'],
+    'soundtrack': ['soundtrack'], 'film': ['soundtrack'], 'film/tv': ['soundtrack'],
+    'tv and movie soundtracks': ['soundtrack'], 'musical,film,tv': ['soundtrack'], 'broadway and stage': ['musical'],
+    'medieval': ['medieval'], 'renaissance': ['renaissance'], 'baroque': ['baroque'], 'romantic': ['romanticera'],
+    'modern': ['modernclassical'], 'early 20th century': ['modernclassical'],
+    'hits of the 1950s': ['50s'], 'hits of the 1960s': ['60s'], 'hits of the 1970s': ['70s'],
+    'hits of the 1980s': ['80s'], 'hits of the 1990s': ['90s'], 'hits of the 2000s': ['2000s'],
+    'hits of 2011 2020': ['2010s'], 'golden oldies': ['retro'], 'oldies': ['retro'],
+    'christmas festive': ['christmas'], 'love songs': ['love'], 'party songs sing a longs': ['party'],
+    'childrens songs': ['children'], 'football and sports themes': ['sport'],
+}
+# tokens left out on purpose: formats, nationalities of the artist, artist names, mixed bags, fragments
+GIGAMIDI_SKIP = {
+    'midi karaoke', 'instrumental', 'instrumentals', 'medley', 'medleys', 'duets', 'vocal', 'piano', 'waltz', 'musette',
+    'best of british', 'australian artists', 'danish', 'the netherlands', 'italian', 'french', 'german', 'croatian',
+    'slovenia', 'japanese', 'international songs', 'the beatles', 'elvis presley', 'hits of abba', 'pf',
+    'one hit wonders', 'pride playlist', 'wedding songs', 'novelty songs', 'halloween songs', 'national anthems',
+    'unconfirmed category', 'unknown era', 'composer', 'ancient', 'ro', 'sou', 'utility',
+}
+# artist fields that name a category, not an artist (lower case)
+GIGAMIDI_ARTIST = {'video games': ['game'], 'movie themes': ['soundtrack'], 'tv themes': ['soundtrack'],
+                   'trad.': ['traditional'], 'trad': ['traditional'], 'traditional': ['traditional']}
 
 # ---------------------------------------------------------------- tempo (MidiCaps tempo_word) -> class, Italian term
 TEMPO_WORD = {'Grave': ('slow', 'grave'), 'Largo': ('slow', 'largo'), 'Adagio': ('slow', 'adagio'),

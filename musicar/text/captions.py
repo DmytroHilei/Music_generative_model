@@ -2,7 +2,10 @@
 Captions per file of a token store, for text control (context/claude/text_control.md, build step 5).
 
 Per file it reads data/labels/<store>.*:
-  .jsonl         MidiCaps fields + full caption, XMIDI (emotion, genre) labels         (tier 1, data_prep/labels/build_labels.py)
+  .jsonl         MidiCaps fields + full caption, XMIDI (emotion, genre) labels, GigaMIDI v2 metadata (styles, artist,
+                 title; styles -> genre / mood ids through vocab.GIGAMIDI_STYLE)  (tier 1, data_prep/labels/build_labels.py);
+                 for Aria stores the genre / composer metadata (data_prep/labels/aria_labels.py). Artists and composers
+                 known to musicar/text/artists.py are named ('a piece by Chopin', "п'єса Шопена", 'у стилі гурту Queen')
   .features.npz  key, onsets/s, register, velocity, length, instruments, drum share    (every file, song_features.py)
   .pseudo.npz    confident predicted mood group / genre (pseudo_labels.py), used only for files >= 20 s that are
                  not drum-only (out-of-distribution files get confident nonsense) and only without true labels
@@ -24,6 +27,7 @@ from pathlib import Path
 
 import numpy as np
 
+from musicar.text import artists as A
 from musicar.text import vocab as V
 
 NOTE_NAMES = ['C', 'C#', 'D', 'Eb', 'E', 'F', 'F#', 'G', 'Ab', 'A', 'Bb', 'B']
@@ -31,6 +35,8 @@ MIDICAPS_FULL = 0.4
 UK_SHARE = 0.3
 P_ATTR = dict(mood=0.8, genre=0.8, drums=1.0, ballad=1.0, instruments=0.7, use=0.6, solo=1.0,
               no_drums=0.4)  # other attributes: 0.5
+NOT_ALONE = {'ballad', 'solo'}  # don't count as the one kept attribute: 'ballad' only sets the noun, 'solo' needs
+                                # the instrument
 FULL_LIST = 0.8   # files with <= 3 instruments: all of them named
 KEEP_DRUMS = 0.7  # more than 3: drums kept in the named subset
 MAX_ADJ = 3
@@ -73,7 +79,8 @@ def _join(items, last=' and '):
 
 def _article(word):
     w = word.lstrip("'").lower()
-    return 'an' if w[:1] in 'aeiou' and not w.startswith(('eu', 'uni', 'use')) else 'a'
+    vowel = w[:1] in 'aeiou' and not w.startswith(('eu', 'uni', 'use')) or w.startswith(('8', '11', '18'))
+    return 'an' if vowel else 'a'
 
 
 def _uk_acc(phrase):
@@ -98,9 +105,23 @@ def _dedupe(words):
     return out
 
 
+def gigamidi_ids(gm):
+    """GigaMIDI metadata of a file ({'styles': [...], 'artist': ...}) -> {'genre' / 'mood' / 'use': ids}. An era
+    (Baroque, ...) replaces 'classical'; eras and decades come first ("a Baroque piece", "a '70s rock song")."""
+    ids = [i for s in gm.get('styles', ()) for i in V.GIGAMIDI_STYLE.get(s, ())]
+    ids = _dedupe(ids + V.GIGAMIDI_ARTIST.get(str(gm.get('artist') or '').lower(), []))
+    if set(ids) & V.ERAS:
+        ids = [i for i in ids if i != 'classical']
+    out = {}
+    for i in sorted(ids, key=lambda i: i not in V.ERAS | V.DECADES):
+        kind = 'genre' if i in V.GENRE else V.MOOD[i].get('kind', 'mood')
+        out.setdefault(kind, []).append(i)
+    return out
+
+
 class StoreCaptions:
     """Captions of the files of one token store (file index = position in the store). Missing label files -> every
-    caption is ''. labeled(i): the file has MidiCaps or XMIDI labels (tier 1)."""
+    caption is ''. labeled(i): the file has MidiCaps or XMIDI labels or a mapped GigaMIDI style (tier 1)."""
 
     def __init__(self, store_name, labels_dir='data/labels', uk_share=UK_SHARE, captions_dir='data/captions'):
         d = Path(labels_dir)
@@ -111,6 +132,16 @@ class StoreCaptions:
             for line in (d / f'{store_name}.jsonl').read_text().splitlines():
                 row = json.loads(line)
                 self.labels[row['file']] = row
+        self.gm_ids = {i: ids for i, row in self.labels.items()
+                       if 'gigamidi' in row and (ids := gigamidi_ids(row['gigamidi']))}
+        self.artist = {}  # file -> artists.ARTISTS id
+        for i, row in self.labels.items():
+            if 'aria' in row:
+                artist = A.resolve(row['aria'].get('composer'), 'aria')
+            else:
+                artist = A.resolve((row.get('gigamidi') or {}).get('artist'))
+            if artist:
+                self.artist[i] = artist
         self.uk_full = {}
         uk = Path(captions_dir) / f'{store_name}.uk.fixed.jsonl'
         if uk.exists():
@@ -130,8 +161,10 @@ class StoreCaptions:
             self.instruments = bits
 
     def labeled(self, i):
-        row = self.labels.get(int(i))
-        return bool(row and ('midicaps' in row or 'xmidi' in row))
+        i = int(i)
+        row = self.labels.get(i)
+        return bool(row and ('midicaps' in row or 'xmidi' in row or i in self.gm_ids or i in self.artist
+                             or (row.get('aria') or {}).get('genre') in V.GENRE))
 
     def caption(self, i, rng=random, lang=None):
         """A caption for file i, drawn with rng (random.Random or the random module); lang 'en' / 'uk' / None (drawn:
@@ -144,11 +177,13 @@ class StoreCaptions:
         if full and rng.random() < MIDICAPS_FULL:
             return full
         attrs = self._attributes(i, row, rng)
+        if lang == 'uk' and 'artist' in attrs and not A.named_in_uk(attrs['artist']):
+            del attrs['artist']  # English-only name
         if not attrs:
             return ''
         keep = {k: v for k, v in attrs.items() if rng.random() < P_ATTR.get(k, 0.5)}
-        if not set(keep) - {'ballad'}:
-            k = rng.choice([k for k in attrs if k != 'ballad'] or list(attrs))
+        if not set(keep) - NOT_ALONE:
+            k = rng.choice([k for k in attrs if k not in NOT_ALONE] or list(attrs))
             keep[k] = attrs[k]
         _resolve_clashes(keep)
         return render_en(keep, rng) if lang == 'en' else render_uk(keep, rng)
@@ -187,6 +222,19 @@ class StoreCaptions:
             names = [n for n in names if n in V.INSTRUMENT]
             if names:
                 a['instruments'] = rng.sample(names, min(len(names), rng.randint(1, 3)))
+        gm = self.gm_ids.get(i)
+        if gm:  # site / Musicmap genres replace MidiCaps' tagger genres; moods only where MidiCaps has none
+            if gm.get('genre'):
+                g = gm['genre']
+                a['genre'] = [g[j] for j in sorted(rng.sample(range(len(g)), min(len(g), rng.choice([1, 1, 2]))))]
+            for kind in ('mood', 'use'):
+                if gm.get(kind) and kind not in a:
+                    a[kind] = [rng.choice(gm[kind])]
+        aria_genre = (row.get('aria') or {}).get('genre')
+        if aria_genre in V.GENRE:
+            a['genre'] = [aria_genre]
+        if i in self.artist:
+            a['artist'] = self.artist[i]
         if xm:
             emotion, genre = rng.choice(xm)
             a['mood'] = [f'x_{emotion}']
@@ -211,7 +259,8 @@ class StoreCaptions:
                     a['solo'] = True
                 elif 'drums' not in ids:
                     a['no_drums'] = True
-        pseudo_ok = (not mc and not xm and self.pseudo is not None and not drum_only
+        pseudo_ok = (not mc and not xm and not gm and aria_genre not in V.GENRE and self.pseudo is not None
+                     and not drum_only
                      and f['seconds'][i] >= PSEUDO_MIN_SECONDS)
         if pseudo_ok:
             if self.pseudo['xmidi_mood_keep'][i]:
@@ -372,11 +421,11 @@ def render_en(a, rng, tags_all=False):
         noun = rng.choice(V.DRUM_NOUNS_EN)
     elif a.get('ballad'):
         noun = 'ballad'
-    else:
-        noun = 'music' if rng.random() < 0.15 else rng.choice(V.NOUNS_EN)
+    else:  # no 'music' next to a length word: 'short music' reads oddly
+        noun = 'music' if rng.random() < 0.15 and 'length' not in a else rng.choice(V.NOUNS_EN)
     adjs, post = [], []
     feel = []  # mood words that may move into 'that feels ...'
-    if 'length' in a and noun != 'music':  # 'short music' reads oddly
+    if 'length' in a:
         adjs.append(rng.choice(V.LENGTH[a['length']]['en']))
     for m in a.get('mood', []) + a.get('use', []):
         e = V.MOOD[m]
@@ -408,9 +457,14 @@ def render_en(a, rng, tags_all=False):
     adjs = _dedupe(adjs)[:MAX_ADJ]
     feel = [w for w in feel if w in adjs]
     genres = _dedupe(rng.choice(V.GENRE[g]['en']) for g in a.get('genre', []))
-    genre = ' '.join(genres) if len(genres) < 2 or rng.random() < 0.5 else ' and '.join(genres)
+    era = set(a.get('genre', [])) & (V.ERAS | V.DECADES)  # "a '70s rock song", not "a '70s and rock song"
+    genre = ' '.join(genres) if len(genres) < 2 or rng.random() < 0.5 or era else ' and '.join(genres)
     instruments = [rng.choice(V.INSTRUMENT[i][0]) for i in a.get('instruments', [])]
     solo = a.get('solo') and len(instruments) == 1
+    artist = []
+    if 'artist' in a:  # "a piece by Chopin", "in the style of the Beatles"
+        artist = [rng.choice(A.ARTISTS[a['artist']]['en'])]
+        post.append(rng.choice([f'by {artist[0]}', f'in the style of {artist[0]}']))
     if a.get('no_drums'):
         post.append(rng.choice(['without drums', 'with no drums']))
     if 'time_sig' in a:
@@ -422,7 +476,7 @@ def render_en(a, rng, tags_all=False):
         post.append(rng.choice([f'in a {mode} key'] if rng.random() < 0.25 else
                                [f'in {key}', f'in the key of {key}', f', {key}']))
 
-    tags = adjs + genres + ([f'solo {instruments[0]}'] if solo else instruments) \
+    tags = adjs + genres + artist + ([f'solo {instruments[0]}'] if solo else instruments) \
         + (['no drums'] if a.get('no_drums') else []) + ([f'{a["key"][0]} {a["key"][1]}'] if 'key' in a else [])
     if 'tempo' in a and a['tempo'][1] and not any(t in V.TEMPO[a['tempo'][0]]['en'] for t in tags):
         tags.append(a['tempo'][1])
@@ -474,12 +528,12 @@ def render_uk(a, rng, tags_all=False):
         nom, acc, gender = rng.choice(V.DRUM_NOUNS_UK)
     elif a.get('ballad'):
         nom, acc, gender = 'балада', 'баладу', 'f'
-    else:
-        nom, acc, gender = V.MUSIC_UK if rng.random() < 0.15 else rng.choice(V.NOUNS_UK)
+    else:  # no 'музика' next to a length word
+        nom, acc, gender = V.MUSIC_UK if rng.random() < 0.15 and 'length' not in a else rng.choice(V.NOUNS_UK)
     fem = gender == 'f'
     adjs, post, tags = [], [], []  # adjs: (m, f) pairs
 
-    if 'length' in a and nom != 'музика':
+    if 'length' in a:
         adjs.append(rng.choice(V.LENGTH[a['length']]['uk']))
     for m in a.get('mood', []) + a.get('use', []):
         e = V.MOOD[m]
@@ -521,6 +575,20 @@ def render_uk(a, rng, tags_all=False):
                 prefix = g['prefix'] + '-'
         if g.get('uk_post'):
             post.append(rng.choice(g['uk_post']))
+    after_noun = ''  # genitive right after the noun: "п'єса Шопена", "пісня гурту Queen"
+    if 'artist' in a:
+        e = A.ARTISTS[a['artist']]
+        if e['uk']:
+            name, gen = rng.choice(e['uk'])
+        else:  # a band: the Latin name, not declined
+            name = rng.choice(e['en'])
+            name = name[0].upper() + name[1:]
+            gen = f'гурту {name}' if rng.random() < 0.5 else name
+        tags.append(name)
+        if rng.random() < 0.5:
+            after_noun = gen
+        else:
+            post.append(f'у стилі {gen}')
     instruments = [rng.choice(V.INSTRUMENT[i][1]) for i in a.get('instruments', [])]
     solo = a.get('solo') and len(instruments) == 1
     tags += [f'{instruments[0][0]} соло'] if solo else [ins[0] for ins in instruments]
@@ -545,7 +613,7 @@ def render_uk(a, rng, tags_all=False):
         return _finish_uk(', '.join(_dedupe(tags)), rng)
     request = rng.random() < 0.35
     words = [(_uk_acc(f) if request else f) if fem else m for m, f in adjs]
-    head = ' '.join(words + [prefix + (acc if request else nom)])
+    head = ' '.join(words + [prefix + (acc if request else nom)] + ([after_noun] if after_noun else []))
     if solo:
         head += f' для {instruments[0][1]} соло'
     elif instruments:
@@ -581,11 +649,16 @@ if __name__ == '__main__':
     p.add_argument('--lang', default=None, help="'en' / 'uk' (default: drawn)")
     p.add_argument('--seed', type=int, default=0)
     p.add_argument('--no-full', action='store_true', help='templates only (no MidiCaps full captions)')
+    p.add_argument('--labels-dir', default='data/labels')
+    p.add_argument('--files', default='all', help="'all' / 'gigamidi': only files with a mapped GigaMIDI style")
     args = p.parse_args()
     if args.no_full:
         MIDICAPS_FULL = 0.0
-    c = StoreCaptions(args.store)
+    c = StoreCaptions(args.store, args.labels_dir)
     rng = random.Random(args.seed)
     n_files = len(c.features['seconds']) if c.features is not None else max(c.labels) + 1
+    pool = sorted(c.gm_ids) if args.files == 'gigamidi' else range(n_files)
     for _ in range(args.n):
-        print(c.caption(rng.randrange(n_files), rng, args.lang) or "''")
+        i = rng.choice(pool)
+        text = c.caption(i, rng, args.lang) or "''"
+        print(f"{text}    [{', '.join(c.labels[i]['gigamidi'].get('styles', []))}]" if args.files == 'gigamidi' else text)
