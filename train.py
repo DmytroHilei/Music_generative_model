@@ -57,6 +57,9 @@ checkpoint_format = 'full'  # 'full' = fp32 weights + optimizer (resumable), 'bf
                             # not resumable; fine for generation and for init_from='finetune')
 init_from = 'scratch'     # 'scratch' | 'resume' | 'finetune'
 ckpt_interval_min = 0.0    # >0: also write a full resumable out_dir/ckpt.pt every N minutes and at the end (atomic)
+max_minutes = 0.0          # >0: after this many minutes of the loop, save the resumable out_dir/ckpt.pt and exit 0
+                           # (a run in chunks: the same command with --init_from=resume continues it)
+gpu_duty = 1.0             # < 1: after each step, idle so the GPU works this share of the time (quieter, slower)
 save_pre_cooldown = True   # wsd: full resumable state to out_dir/pre_cooldown.pt just before the cooldown starts, so a
                            # later stage can continue the constant-LR phase on more data and do its own cooldown
 init_ckpt = 'checkpoints/ckpt.pt'  # used by 'finetune'
@@ -500,11 +503,12 @@ def accumulate(X, Y, net):
     return X, Y, sums
 
 
+assert 0 < gpu_duty <= 1, gpu_duty
 if ckpt_interval_min > 0:
     signal.signal(signal.SIGTERM, request_stop)
     signal.signal(signal.SIGINT, request_stop)
 t0 = time.time()
-last_resumable = time.time()
+t_start = last_resumable = t0
 
 pbar = tqdm(range(iter_num, max_iters), desc="Training", initial=iter_num, total=max_iters)
 for iter_num in pbar:
@@ -607,18 +611,27 @@ for iter_num in pbar:
     if fp8 and fp8_cache_weights:
         refresh_fp8_weights(raw_model)  # the cached fp8 weights must follow every update
 
+    out_of_time = max_minutes > 0 and time.time() - t_start > 60 * max_minutes and iter_num < max_iters - 1
     if ckpt_interval_min > 0 and (time.time() - last_resumable > 60 * ckpt_interval_min or iter_num == max_iters - 1
-                                  or stop_signal):
+                                  or stop_signal) or out_of_time:
         save_resumable(iter_num + 1)
         last_resumable = time.time()
         if stop_signal:
             if wandb_log:
                 wandb.finish(exit_code=143)
             sys.exit(143)
+        if out_of_time:
+            tqdm.write(f"max_minutes={max_minutes:g} reached: stopped before iter {iter_num + 1} of {max_iters}; "
+                       f"continue with the same command and --init_from=resume")
+            if wandb_log:
+                wandb.finish()
+            sys.exit(0)
 
     t1 = time.time()
+    if gpu_duty < 1:
+        time.sleep((t1 - t0) * (1 / gpu_duty - 1))
     pbar.set_postfix(loss=f"{train_sums['loss'] / train_n:.3f}", lr=f"{lr:.1e}", ms=f"{(t1 - t0) * 1000:.0f}",
                      **({'gb': f"{torch.cuda.max_memory_allocated() / 2**30:.2f}"} if device_type == 'cuda' else {}))
     if device_type == 'cuda':
         torch.cuda.reset_peak_memory_stats()
-    t0 = t1
+    t0 = time.time() if gpu_duty < 1 else t1  # ms = the step itself, without the idle time

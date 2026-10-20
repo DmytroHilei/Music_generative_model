@@ -6,9 +6,15 @@ file caption kept in all three. Gain = CE(other) - CE(own) per predicted note, a
     should already help in the last notes of the previous section (the model prepares the change), one that comes
     with the section only from its first note on;
   - notes since the latest caption arrived (the decay after arrival; T2's file caption fades ~1,000x by note 128);
-  - the window position (comparable with the T2 table in text_control.md).
+  - the window position (comparable with the T2 table in text_control.md);
+  - the change score of the note's section vs the one before (musicar.text.captions.section_change: dynamics, pace,
+    register, drums, instruments), over the whole section and over its first 32 notes: where the caption says
+    something the previous notes don't.
+--at-changes: the windows are placed around section boundaries with a change of >= 2 points (the boundary at window
+index block / 2), instead of evenly over the held-out files (where ~1 in 5 windows has one).
 
     python eval/probes/section_gain.py --checkpoints checkpoints/sec_A0,checkpoints/sec_A128 --out results/section_gain/s1
+    python eval/probes/section_gain.py --checkpoints checkpoints/sec_A256 --at-changes --out results/section_gain/a256_ch
 
 Writes <out>/summary.md (also printed) and <out>/gain.json.
 """
@@ -25,7 +31,7 @@ import torch.nn.functional as F
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
-from musicar.data.loader import NoteWindowDataset, collate_windows  # noqa: E402
+from musicar.data.loader import NoteWindowDataset, collate_windows, section_change_scores  # noqa: E402
 from musicar.model.checkpoint import load_model  # noqa: E402
 from musicar.model.gpt import STREAM_ORDER  # noqa: E402
 from musicar.text.encoder import TextEncoder  # noqa: E402
@@ -34,6 +40,7 @@ VAL_SOURCE = 'store:data/cache/gigamidi_heldout#labeled'
 MODES = ('true', 'shuffled', 'none')
 SINCE = [(0, 1), (1, 8), (8, 32), (32, 128), (128, 512), (512, 2048)]
 WINDOW = [(0, 8), (8, 32), (32, 128), (128, 512), (512, 1024)]
+CHANGE = [(0, 1), (1, 2), (2, 3), (3, 6)]
 
 
 def in_section(S):
@@ -46,6 +53,7 @@ def parse_args():
     p.add_argument('--checkpoints', required=True, help='comma-separated checkpoints / run dirs with section_len')
     p.add_argument('--out', default='results/section_gain/run')
     p.add_argument('--windows', type=int, default=256, help='held-out windows (evenly thinned, same for every mode)')
+    p.add_argument('--at-changes', action='store_true', help='windows around section changes of >= 2 points')
     p.add_argument('--batch', type=int, default=8)
     p.add_argument('--block', type=int, default=1024)
     p.add_argument('--section-max-length', type=int, default=48)
@@ -93,10 +101,23 @@ def probe(ck, encoder, args):
               special_tokens=True, programs=True, pad_short=True, captions=str(ROOT / 'data/labels'), caption_uk=0.3,
               section_len=S, section_lead=cfg.section_lead)
     sets = {m: NoteWindowDataset(VAL_SOURCE, section_caption_mode=m, **kw) for m in MODES}
-    n = len(sets['true'])
+    ds = sets['true']
+    if args.at_changes:
+        ds._find_changes(2)
+        windows = np.array([(f, min(max(row - args.block // 2, 0), int(ds.lengths[f]) - args.block - 1))
+                            for f, row in ds.changes])
+        for m in MODES:
+            sets[m].windows = windows
+    n = len(ds)
     idx = [int(i * n / args.windows) for i in range(min(args.windows, n))]
+    # change score of every section of every file: (store, file in store) -> its first section's index in scores
+    scores = [section_change_scores(store, S, ds.pad) for store in ds.store_dirs]
+    first_sec = []
+    for store in ds.store_dirs:
+        n_sec = -(-(np.diff(np.load(store / 'offsets.npy')) + 2 * ds.pad) // S)
+        first_sec.append(np.cumsum(n_sec) - n_sec)
     ce = {m: [] for m in MODES}
-    valid, pin, since, wpos = [], [], [], []
+    valid, pin, since, wpos, change = [], [], [], [], []
     for b in range(0, len(idx), args.batch):
         chunk = idx[b:b + args.batch]
         for m in MODES:
@@ -110,16 +131,33 @@ def probe(ck, encoder, args):
         latest = torch.where(pos[:, None, :] <= tgt_i[None, :, None], pos[:, None, :], -1).amax(-1)
         since.append(tgt_i[None] - latest)
         wpos.append(tgt_i[None].expand(len(chunk), -1) - 1)
+        rows = []
+        for i, start in zip(chunk, starts.tolist()):
+            f = int(ds.windows[i][0])
+            sid, fid = int(ds.store_ids[f]), int(ds.file_ids[f])
+            last = -(-int(ds.lengths[f]) // S) - 1
+            k = np.minimum((start + tgt_i.numpy()) // S, last)  # rows past the file (padding) are masked anyway
+            rows.append(scores[sid][first_sec[sid][fid] + k].astype(np.int64))
+        change.append(torch.from_numpy(np.stack(rows)))
     cat = {m: torch.cat(v) for m, v in ce.items()}
-    valid, pin, since, wpos = (torch.cat(v) for v in (valid, pin, since, wpos))
+    valid, pin, since, wpos, change = (torch.cat(v) for v in (valid, pin, since, wpos, change))
     res = {'checkpoint': str(ck), 'iter': it, 'section_len': S, 'section_lead': cfg.section_lead,
-           'section_mode': cfg.section_mode, 'windows': len(idx)}
+           'section_mode': cfg.section_mode, 'windows': len(idx), 'at_changes': args.at_changes}
+    # the CE itself with the own captions (headroom: how much worse the first notes after a change are predicted)
+    # (notes with >= 128 notes of context: a window's first notes are predicted badly whatever their section)
+    ctx = valid & (wpos >= 128)
+    res['ce'] = {'change': bucket_means(cat['true'], change, ctx, CHANGE),
+                 'change_start': bucket_means(cat['true'], change, ctx & (pin < 32), CHANGE),
+                 'change_first8': bucket_means(cat['true'], change, ctx & (pin < 8), CHANGE),
+                 'change_rest': bucket_means(cat['true'], change, ctx & (pin >= 32), CHANGE)}
     for other in ('shuffled', 'none'):
         gain = cat[other] - cat['true']
         res[other] = {'all': float(gain[valid].mean()),
                       'in_section': bucket_means(gain, pin, valid, in_section(S)),
                       'since_arrival': bucket_means(gain, since, valid, SINCE),
-                      'window': bucket_means(gain, wpos, valid, WINDOW)}
+                      'window': bucket_means(gain, wpos, valid, WINDOW),
+                      'change': bucket_means(gain, change, valid, CHANGE),
+                      'change_start': bucket_means(gain, change, valid & (pin < 32), CHANGE)}
     del model
     if args.device.startswith('cuda'):
         torch.cuda.empty_cache()
@@ -131,13 +169,22 @@ def summarize(results):
     for r in results:
         name = Path(r['checkpoint']).name if Path(r['checkpoint']).is_dir() else Path(r['checkpoint']).parent.name
         lines += [f"## {name} ({r['section_mode']}, section {r['section_len']}, lead {r['section_lead']}, "
-                  f"@{r['iter']}, {r['windows']} windows)", '',
+                  f"@{r['iter']}, {r['windows']} windows{' around changes' if r.get('at_changes') else ''})", '',
                   f"all positions: vs shuffled {r['shuffled']['all']:+.4f}, vs none {r['none']['all']:+.4f}", '']
         for table, title in (('in_section', 'position in section'), ('since_arrival', 'notes since the caption'),
-                             ('window', 'window position')):
+                             ('window', 'window position'), ('change', 'change score of the section'),
+                             ('change_start', 'change score, first 32 notes of the section')):
+            if table not in r['shuffled']:
+                continue
             lines += [f'| {title} | notes | vs shuffled | vs none |', '|---|---|---|---|']
             for (b, cnt, gs), (_, _, gn) in zip(r['shuffled'][table], r['none'][table]):
                 lines.append(f'| {b} | {cnt:,} | {gs:+.4f} | {gn:+.4f} |')
+            lines.append('')
+        if 'ce' in r:
+            lines += ['| CE (own captions, >= 128 notes of context) by change score | whole section | first 8 notes | first 32 | rest |',
+                      '|---|---|---|---|---|']
+            for row in zip(*(r['ce'][t] for t in ('change', 'change_first8', 'change_start', 'change_rest'))):
+                lines.append(f'| {row[0][0]} | ' + ' | '.join(f'{ce:.3f} ({cnt:,})' for _, cnt, ce in row) + ' |')
             lines.append('')
     return '\n'.join(lines)
 
