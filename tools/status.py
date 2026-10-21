@@ -4,7 +4,8 @@ Live dashboard of everything running in this project: training runs, song downlo
     .venv/bin/python tools/status.py            # refreshes every 5 s, Ctrl+C to quit
     .venv/bin/python tools/status.py --once     # print once
     .venv/bin/python tools/status.py --web 8765 # no terminal view: serve it as a web page (phone on the same network:
-                                                # http://<laptop ip>:8765/?t=<token>, the token is printed)
+                                                # http://<laptop ip>:8765/?t=<token>, the token is printed);
+                                                # the project to-do list at /todo?t=<token> (tools/todo_web.py)
 
 Everything is read from files (logs/*.log, data/audio, data/finetune) and nvidia-smi, so it never touches
 the running jobs. Long section runs (tools/sweeps/section_long.py, train.py in chunks) get their own table: the chunk
@@ -971,21 +972,37 @@ def render(show_all=False):
 
 def serve(port, interval, show_all, token):
     """The dashboard as a self-refreshing HTML page (rich's own HTML export of the same view) on port, for every
-    address of this machine; requests without ?t=<token> get 403."""
+    address of this machine, and the to-do page (tools/todo_web.py); requests without ?t=<token> get 403."""
     import io
     import threading
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    from urllib.parse import parse_qs, urlsplit
     from rich.console import Console
+    import todo_web
     page = [b'starting']
 
     class Handler(BaseHTTPRequestHandler):
-        def do_GET(self):
-            ok = f't={token}' in self.path
-            body = page[0] if ok else b'forbidden'
-            self.send_response(200 if ok else 403)
-            self.send_header('Content-Type', 'text/html; charset=utf-8')
+        def reply(self, code, ctype, body):
+            self.send_response(code)
+            self.send_header('Content-Type', ctype)
+            self.send_header('Content-Length', str(len(body)))
             self.end_headers()
             self.wfile.write(body)
+
+        def allowed(self):
+            if parse_qs(urlsplit(self.path).query).get('t') == [token]:
+                return True
+            self.reply(403, 'text/plain', b'forbidden')
+            return False
+
+        def do_GET(self):
+            if self.allowed():
+                self.reply(*(todo_web.handle('GET', self.path) or (200, 'text/html; charset=utf-8', page[0])))
+
+        def do_POST(self):
+            if self.allowed():
+                body = self.rfile.read(min(int(self.headers.get('Content-Length') or 0), 1 << 20))
+                self.reply(*(todo_web.handle('POST', self.path, body) or (404, 'text/plain', b'not found')))
 
         def log_message(self, *args):
             pass
@@ -996,10 +1013,13 @@ def serve(port, interval, show_all, token):
     print('dashboard on ' + ', '.join(f'http://{ip}:{port}/?t={token}' for ip in ips), flush=True)
     head = (f'<meta http-equiv="refresh" content="{max(5, int(interval))}">'
             '<meta name="viewport" content="width=device-width, initial-scale=1">')
+    link = (f'<body><p style="font:15px system-ui,sans-serif;margin:8px"><a href="/todo?t={token}" '
+            'style="color:#60a5fa">Project to-do &rarr;</a></p>')
     while True:
         console = Console(record=True, width=140, file=io.StringIO(), color_system='truecolor')
         console.print(render(show_all))
-        page[0] = console.export_html(inline_styles=True).replace('<head>', '<head>' + head, 1).encode()
+        html = console.export_html(inline_styles=True).replace('<head>', '<head>' + head, 1)
+        page[0] = html.replace('<body>', link, 1).encode()
         time.sleep(interval)
 
 
