@@ -15,7 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from musicar.data.loader import NoteWindowDataset, collate_windows  # noqa: E402
 from musicar.generation.sampling import generate  # noqa: E402
 from musicar.model.checkpoint import merge_model_args  # noqa: E402
-from musicar.model.gpt import KVCache, section_layout, section_query_index  # noqa: E402
+from musicar.model.gpt import STREAM_ORDER, KVCache, section_layout, section_query_index  # noqa: E402
 from musicar.text.captions import section_attributes, section_caption, section_change, section_changed  # noqa: E402
 from test_text import TINY, batch, make_store, tiny  # noqa: E402
 
@@ -138,6 +138,75 @@ def test_generate_with_sections():
             same = generate(m, *start, max_new_tokens=30, sections=secs, **kw)
             first = 8 - lead  # the second caption comes before note 8 - lead (index in the output incl. BOS)
             assert torch.equal(changed[0][:, :first], same[0][:, :first]), (mode, lead)
+
+
+def greedy_sections(m, text, secs, n_new, slide):
+    """Greedy decoding with a full forward per note on generate()'s window (refilled to L - slide notes when full),
+    the section captions laid out like NoteWindowDataset._sections: the one in force at the window start, then those
+    arriving inside it."""
+    L, S, lead = m.config.block_size, m.config.section_len, m.config.section_lead
+    B = text.size(0)
+    out = [torch.full((B, 1), 128)] + [torch.zeros(B, 1, dtype=torch.long)] * 3
+    prog = torch.zeros(B, 1, dtype=torch.long)
+    vecs = m.section_vectors(secs)
+    at = [max(0, k * S - lead) for k in range(len(secs))]
+    a = 0
+    for _ in range(n_new):
+        n = out[0].size(1)
+        if n - a > L:
+            a = n - (L - slide)
+        events = [(0, max(k for k, p in enumerate(at) if p <= a))] + [(p - a, k) for k, p in enumerate(at)
+                                                                      if a < p <= n]
+        sec = (torch.stack([vecs[k] for _, k in events], 1), torch.tensor([p for p, _ in events]).expand(B, -1))
+        h = m.encode(*(o[:, a:n] for o in out), program=prog[:, a:n], text=text, sections=sec)[:, [-1]]
+        picked = {}
+
+        def pick(logits, name):
+            logits = logits[:, -1].clone()
+            if name == 'pitch':
+                logits[:, 128] = -float('Inf')  # BOS is never sampled
+            nxt = logits.argmax(-1, keepdim=True)
+            if name == 'duration':
+                nxt = torch.where(picked['program'] == 128, 0, nxt)
+            picked[name] = nxt
+            return nxt
+        nxt = m.cascade.sample(h, pick)
+        out = [torch.cat([o, nxt[name]], 1) for o, name in zip(out, STREAM_ORDER)]
+        prog = torch.cat([prog, nxt['program']], 1)
+    return out
+
+
+def test_refills_match_training_layout():
+    """Past block_size (refills, with section starts on and off the refill points), generate() feeds the captions a
+    training window at the same start gets."""
+    B, n_new = 2, 100
+    text = torch.randn(B, 5, D)
+    secs = torch.randn(n_new // 8 + 2, B, 5, D)
+    start = [torch.full((B, 1), 128)] + [torch.zeros(B, 1, dtype=torch.long)] * 3
+    for mode in ('prefix', 'xattn'):
+        for lead in (0, 4):
+            m = section_model(mode, section_lead=lead)
+            for slide in (8, 12):
+                got = generate(m, *start, max_new_tokens=n_new, top_k=1, text=text, sections=secs, slide=slide,
+                               program=None, cuda_graph=False)
+                with torch.no_grad():
+                    want = greedy_sections(m, text, secs, n_new, slide)
+                assert all(torch.equal(g, w) for g, w in zip(got, want)), (mode, lead, slide)
+
+
+def test_guidance_negatives():
+    """text_neg / sections_neg equal to the conditional captions: guidance changes nothing; a different negative
+    does."""
+    start = [torch.full((2, 1), 128)] + [torch.zeros(2, 1, dtype=torch.long)] * 3
+    kw = dict(max_new_tokens=40, top_k=1, program=None, cuda_graph=False)
+    m = section_model('prefix')
+    text, secs = torch.randn(5, D), torch.randn(6, 5, D)
+    plain = generate(m, *start, text=text, sections=secs, **kw)
+    same = generate(m, *start, text=text, sections=secs, cfg_scale=3.0, text_neg=text, sections_neg=secs, **kw)
+    assert all(torch.equal(a, b) for a, b in zip(plain, same))
+    prev = torch.cat([secs[:2], torch.zeros(4, 5, D)])  # contrast only the first two sections
+    other = generate(m, *start, text=text, sections=secs, cfg_scale=3.0, text_neg=text, sections_neg=prev, **kw)
+    assert not all(torch.equal(a, b) for a, b in zip(plain, other))
 
 
 def test_section_caption_from_notes():

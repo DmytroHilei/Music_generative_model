@@ -14,6 +14,14 @@ instruments); 'file' = the file-caption prompts of text_eval.PROMPTS (the overni
 and 'high-pitched' land on other section captions (held-out check: the comment at SECTION_TEXT). The prompt
 names (and so the target metrics) are the same in both sets; the T2 baseline (no sections) gets the same texts as its
 file caption.
+Variants (switch tests of text_control.md "Next: hypotheses and tests", section-caption models only):
+  --contrast prev: guidance of the sections after the switch against the previous prompt instead of against none
+    (uncond + s * (cond - uncond) with the old caption as uncond; before the switch against none as usual), for
+    --contrast-sections sections (0 = to the end).
+  --file-caption TEXT: every row also gets this file caption, in both halves of the guidance (only the section
+    captions are guided); 'none' gets it too.
+  --slide N: notes made room for at every cache refill (generate's slide). With the default (block_size // 4 = 256 =
+    section_len) every section start from note block_size on falls on a refill.
 
     python eval/compare/section_follow.py --checkpoints checkpoints/sec_A0,checkpoints/text_t2_v3_long \\
         --out results/section_follow/s1 --mp3
@@ -87,6 +95,11 @@ def parse_args():
     p.add_argument('--temperature', type=float, default=0.9)
     p.add_argument('--top-p', type=float, default=0.9)
     p.add_argument('--section-max-length', type=int, default=48)
+    p.add_argument('--contrast', default='null', choices=['null', 'prev'],
+                   help="switch: the sections after the switch are guided against none or the previous prompt")
+    p.add_argument('--contrast-sections', type=int, default=0, help='--contrast prev for this many sections (0 = all)')
+    p.add_argument('--file-caption', default='', help='file caption of every row (section models), in both halves')
+    p.add_argument('--slide', type=int, default=None, help="generate's slide (default block_size // 4)")
     p.add_argument('--midi', type=int, default=1, help='MIDI files written per prompt and scale')
     p.add_argument('--mp3', action='store_true', help='also render the MIDI files to MP3 (fluidsynth)')
     p.add_argument('--soundfont', default=SOUNDFONT)
@@ -112,6 +125,22 @@ def schedule(cfg, first, second, switch, n_notes):
     """Section caption names, one per section of the model: `first` for sections starting before note `switch`."""
     S = cfg.section_len
     return [first if k * S < switch else second for k in range(n_notes // S + 2)]
+
+
+def contrast_schedule(cfg, first, switch, n_notes, n_sections):
+    """The unconditional half's section captions for --contrast prev: `first` (the previous prompt) for the
+    n_sections sections (0 = all) starting at or after note `switch`, None (= null) for the others."""
+    S = cfg.section_len
+    return [first if k * S >= switch and (not n_sections or k * S < switch + n_sections * S) else None
+            for k in range(n_notes // S + 2)]
+
+
+def settings(args):
+    contrast = getattr(args, 'contrast', 'null')  # namespaces from before these options (tests)
+    n = args.contrast_sections if contrast == 'prev' else 0
+    return (f'switch at note {args.switch}, contrast {contrast}' + (f' for {n} section(s)' if n else '')
+            + f", file caption {getattr(args, 'file_caption', '')!r}, slide "
+            + str(getattr(args, 'slide', None) or 'block_size // 4'))
 
 
 def agg(rows, metric, seg):
@@ -177,7 +206,7 @@ def summarize_switch(rows, seg_len, switch):
 def summarize(rows, args):
     hold = [r for r in rows if r['part'] == 'hold']
     sets = sorted({r.get('prompts', 'file') for r in rows})
-    return (f'Prompt wording: {", ".join(sets)}\n\n' + (summarize_hold(hold) if hold else '') + '\n'
+    return (f'Prompt wording: {", ".join(sets)}; {settings(args)}\n\n' + (summarize_hold(hold) if hold else '') + '\n'
             + summarize_switch(rows, args.seg, args.switch))
 
 
@@ -196,12 +225,13 @@ def main():
 
     names = sorted(set(HOLD) | {p for a, b, _ in SWITCH.values() for p in (a, b)})
     text = PROMPT_SETS[args.prompts]
-    (out / 'prompts.json').write_text(json.dumps({'prompts': args.prompts, 'texts': {p: text[p] for p in names}},
-                                                 indent=1, ensure_ascii=False))
+    (out / 'prompts.json').write_text(json.dumps({'prompts': args.prompts, 'texts': {p: text[p] for p in names},
+                                                  'settings': settings(args)}, indent=1, ensure_ascii=False))
     encoder = TextEncoder(device=args.device)
     file_states = dict(zip(names, encoder.encode([text[p] for p in names], tokens=True)))
     sec_states = dict(zip(names, encoder.encode([text[p] for p in names], tokens=True,
                                                 max_length=args.section_max_length)))
+    file_cap = encoder.encode([args.file_caption], tokens=True)[0] if args.file_caption else None
     del encoder
     if args.device.startswith('cuda'):
         torch.cuda.empty_cache()
@@ -228,16 +258,23 @@ def main():
                     done += 1
                     continue
                 kw = {}
+                if file_cap is not None and cfg.section_len:
+                    kw['text'] = kw['text_neg'] = file_cap.to(args.device)
                 if caps is not None and cfg.section_len:
                     sched = schedule(cfg, caps[0], caps[1], args.switch, args.notes)
                     kw['sections'] = torch.stack([sec_states[c] for c in sched]).to(args.device)
+                    if part == 'switch' and args.contrast == 'prev':
+                        neg = contrast_schedule(cfg, caps[0], args.switch, args.notes, args.contrast_sections)
+                        zero = torch.zeros_like(sec_states[caps[0]])
+                        kw['sections_neg'] = torch.stack([zero if c is None else sec_states[c]
+                                                          for c in neg]).to(args.device)
                 elif caps is not None:
                     kw['text'] = file_states[caps[0]].to(args.device)  # no sections: the file caption holds it
                 torch.manual_seed(args.seed)
                 streams = [t.to(args.device) for t in bos]
                 res = generate(model, *streams[:4], max_new_tokens=args.notes, temperature=args.temperature,
-                               top_p=args.top_p, program=None, programs=streams[4], return_programs=True,
-                               min_new=args.notes, cfg_scale=1.0 if caps is None else s, **kw)
+                               top_p=args.top_p, slide=args.slide, program=None, programs=streams[4],
+                               return_programs=True, min_new=args.notes, cfg_scale=1.0 if caps is None else s, **kw)
                 arrays = [t.cpu().numpy() for t in res]
                 for r in range(args.rows):
                     for si, m in enumerate(segments(arrays, r, 1, args.seg)):

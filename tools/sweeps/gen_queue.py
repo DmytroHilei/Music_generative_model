@@ -8,6 +8,14 @@ re-run into new out dirs next to the old ones:
                    A256_slots8), cfg 2 as in the sweep                                               ~30 min
   section_follow   the same with the old file-caption prompts for T2 v3_long and A256 (separates
                    the effect of the prompt wording from the fix)                                    ~12 min
+Switch tests of v2_A0 (text_control.md "Next: hypotheses and tests", A1 / A7 / A8; section-worded prompts, the
+baseline is results/section_follow/v2_A0_section: cfg 2, switch at note 1024 = the first cache refill):
+  a1_contrast      the sections after the switch guided against the previous prompt, cfg 2 and 3      ~8 min
+  a1_contrast_1sec the same for the first section after the switch only (then against none)         ~8 min
+  a7_switch768     switch at note 768, before the first refill (1024)                                ~4 min
+  a7_switch1280    switch at note 1280, on a refill (slide 256)                                       ~4 min
+  a7_switch1280_slide192  switch at note 1280 between refills (slide 192: 1024, 1216, 1408, ...)        ~4 min
+  a8_file_caption  hold + switch with the file caption 'a piece of music' in both guidance halves     ~7 min
 Jobs run one after another; a job whose <out>/summary.md exists is skipped (re-run: delete it or --redo). The queue
 refuses to start while train.py runs (--force overrides) and stops after the current job when a training process
 appears. Logs logs/gen_queue/<job>.log, progress on the dashboard (JobStatus 'gen_queue').
@@ -45,6 +53,24 @@ JOBS = {
                              '--prompts', 'file'],
                             'results/section_follow/drumfix_file', 12),
 }
+V2 = ['--checkpoints', 'checkpoints/v2_A0', '--cfg', '2', '--prompts', 'section', '--mp3']
+JOBS.update({
+    'a1_contrast': ('eval/compare/section_follow.py', V2 + ['--parts', 'switch', '--contrast', 'prev', '--cfg', '2,3'],
+                    'results/section_follow/v2_A0_a1_contrast', 8),
+    'a1_contrast_1sec': ('eval/compare/section_follow.py',
+                         V2 + ['--parts', 'switch', '--contrast', 'prev', '--contrast-sections', '1', '--cfg', '2,3'],
+                         'results/section_follow/v2_A0_a1_contrast_1sec', 8),
+    'a7_switch768': ('eval/compare/section_follow.py', V2 + ['--parts', 'switch', '--switch', '768'],
+                     'results/section_follow/v2_A0_a7_switch768', 4),
+    'a7_switch1280': ('eval/compare/section_follow.py', V2 + ['--parts', 'switch', '--switch', '1280'],
+                      'results/section_follow/v2_A0_a7_switch1280', 4),
+    'a7_switch1280_slide192': ('eval/compare/section_follow.py',
+                               V2 + ['--parts', 'switch', '--switch', '1280', '--slide', '192'],
+                               'results/section_follow/v2_A0_a7_switch1280_slide192', 4),
+    'a8_file_caption': ('eval/compare/section_follow.py',
+                        V2 + ['--parts', 'hold,switch', '--file-caption', 'a piece of music'],
+                        'results/section_follow/v2_A0_a8_file_caption', 7),
+})
 
 
 def parse_args():

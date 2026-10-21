@@ -41,7 +41,7 @@ def generate(model, pitch, velocity, duration, delta_time, max_new_tokens, tempe
              anchor=0, slide=None, progress=None, dt_bias=0.0, target_nps=None, dt_seconds=0.02,
              cuda_graph=True, style=None, min_new=0, program=0, top_p=None, cfg_scale=1.0,
              eos_t1=False, programs=None, allowed_programs=None, return_programs=False, program_temperature=None,
-             cond=None, text=None, sections=None):
+             cond=None, text=None, sections=None, text_neg=None, sections_neg=None):
     """
     Batched sampling (B rows, same prompt length) with a preallocated KV cache: each new note costs one position
     through the model, not a full re-run. On CUDA the one-note transformer step is captured once as a CUDA graph
@@ -77,6 +77,10 @@ def generate(model, pitch, velocity, duration, delta_time, max_new_tokens, tempe
     cfg_scale != 1 (needs a style, a text or sections): classifier-free guidance. The batch runs twice, with the style / text
       and with style 0 / no text (none, which style and caption dropout trained), and every head samples from
       uncond + s * (cond - uncond); both halves are fed the same note. Not combined with target_nps.
+    text_neg / sections_neg: with guidance, what the unconditional half gets instead of no caption (shaped like text /
+      sections, same number of sections; all-zero entries = null): e.g. the file caption in both halves so only the
+      section captions are guided, or the previous section caption after a switch (contrastive guidance: the new
+      caption against the old one instead of against none).
     eos_t1: EOS keeps its probability at temperature 1 (and outside top-k/top-p); the other pitches use the
       tempered distribution, rescaled to the remaining mass. Lower temperatures otherwise starve the rare EOS.
     Special tokens (pitch vocab 130): BOS is never sampled; EOS (end of piece) not before min_new notes. Rows keep
@@ -124,7 +128,11 @@ def generate(model, pitch, velocity, duration, delta_time, max_new_tokens, tempe
         text = text.reshape((-1,) + text.shape[-2 if k_pre else -1:])
         text = text.expand(Bo, *text.shape[1:]).contiguous()
         if guided:
-            text = torch.cat([text, torch.zeros_like(text)])
+            neg = torch.zeros_like(text)
+            if text_neg is not None:
+                neg = torch.as_tensor(text_neg, dtype=torch.float32, device=device)
+                neg = neg.reshape(-1, *text.shape[1:]).expand_as(text)
+            text = torch.cat([text, neg])
     S = model.config.section_len
     sec_vecs = None
     if S:
@@ -135,7 +143,12 @@ def generate(model, pitch, velocity, duration, delta_time, max_new_tokens, tempe
         sections = sections.reshape(sections.size(0), -1, *sections.shape[-2:])
         sections = sections.expand(-1, Bo, -1, -1).contiguous()
         if guided:
-            sections = torch.cat([sections, torch.zeros_like(sections)], 1)
+            neg = torch.zeros_like(sections)
+            if sections_neg is not None:
+                neg = torch.as_tensor(sections_neg, dtype=torch.float32, device=device)
+                neg = neg.reshape(neg.size(0), -1, *neg.shape[-2:]).expand(-1, Bo, -1, -1)
+                assert neg.shape == sections.shape, (neg.shape, sections.shape)
+            sections = torch.cat([sections, neg], 1)
         sec_vecs = model.section_vectors(sections)  # (n, B, slots, C)
         sec_at = lambda k: max(0, k * S - model.config.section_lead)  # noqa: E731
         sec_vec = lambda k: sec_vecs[min(k, sec_vecs.size(0) - 1)]  # noqa: E731
