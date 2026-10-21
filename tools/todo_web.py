@@ -1,14 +1,17 @@
 """
 The project to-do list as a page of the web dashboard (tools/status.py --web): /todo?t=<token>, grouped by track,
 open items by priority, done and rejected items in collapsible lists. Everything can be edited from the page (add,
-edit, status, move, delete); the list lives in context/todo.json, which agents edit too (keep the format).
+edit, status, move, delete); the list lives in context/todo.json, which agents edit too (keep the format). Papers
+(title, link, one-line idea) are a list of their own; items name theirs in 'papers' (ids), the page shows them under
+the item and all of them in a 'Papers' section.
 
     GET  /todo?t=<token>        the page
     GET  /api/todo?t=<token>    the list as JSON
     POST /api/todo?t=<token>    one operation, JSON: {"op": "add" | "update" | "delete" | "move", ...} -> the new list
 
 Operations apply to the file as it is on disk (agent edits in between are kept): add {item}, update {id, fields},
-delete {id}, move {id, dir: -1 | 1} (within the item's track and priority).
+delete {id}, move {id, dir: -1 | 1} (within the item's track and priority); paper_add {paper}, paper_update {id,
+fields}, paper_delete {id} (also removed from the items).
 """
 
 import json
@@ -23,13 +26,14 @@ TODO = ROOT / 'context/todo.json'
 STATUSES = ('todo', 'doing', 'done', 'rejected')
 PRIORITIES = ('P0', 'P1', 'P2', 'P3', '')
 FIELDS = ('track', 'title', 'priority', 'status', 'cost', 'note', 'evidence')
+PAPER_FIELDS = ('title', 'url', 'idea')
 _lock = threading.Lock()
 
 
 def load():
-    if not TODO.exists():
-        return {'tracks': [], 'items': []}
-    return json.loads(TODO.read_text())
+    data = json.loads(TODO.read_text()) if TODO.exists() else {'tracks': [], 'items': []}
+    data.setdefault('papers', [])
+    return data
 
 
 def save(data):
@@ -38,9 +42,38 @@ def save(data):
     os.replace(tmp, TODO)
 
 
-def clean(fields):
-    """Only known fields, as strings; status / priority / track checked by apply()."""
-    return {k: str(fields[k]).strip() for k in FIELDS if k in fields and fields[k] is not None}
+def clean(fields, names=FIELDS):
+    """Only known fields, as strings ('papers': a list of ids); status / priority / track / papers checked by
+    apply()."""
+    out = {k: str(fields[k]).strip() for k in names if k in fields and fields[k] is not None}
+    if 'papers' in fields and names is FIELDS:
+        out['papers'] = [str(x) for x in (fields['papers'] or []) if str(x)]
+    return out
+
+
+def apply_paper(data, req):
+    """paper_add / paper_update / paper_delete."""
+    papers = data['papers']
+    op = req['op']
+    if op == 'paper_add':
+        paper = clean(req.get('paper', {}), PAPER_FIELDS)
+        paper['id'] = secrets.token_hex(4)
+        papers.append(paper)
+    else:
+        paper = next((x for x in papers if x['id'] == req.get('id')), None)
+        if paper is None:
+            raise ValueError('no such paper (deleted or changed elsewhere: reload)')
+        if op == 'paper_delete':
+            papers.remove(paper)
+            for it in data['items']:
+                if paper['id'] in it.get('papers', []):
+                    it['papers'].remove(paper['id'])
+            return
+        paper.update(clean(req.get('fields', {}), PAPER_FIELDS))
+    if not paper.get('title'):
+        raise ValueError('title required')
+    if paper.get('url') and not paper['url'].startswith(('https://', 'http://')):
+        raise ValueError('the link must start with https:// or http://')
 
 
 def apply(data, req):
@@ -48,6 +81,8 @@ def apply(data, req):
     items, tracks = data['items'], {t['id'] for t in data['tracks']}
     by_id = {it['id']: it for it in items}
     op = req.get('op')
+    if str(op).startswith('paper_'):
+        return apply_paper(data, req)
     today = time.strftime('%Y-%m-%d')
     if op == 'add':
         it = clean(req.get('item', {}))
@@ -88,6 +123,9 @@ def apply(data, req):
         raise ValueError(f'priority must be one of {PRIORITIES}')
     if target.get('track') not in tracks:
         raise ValueError('unknown track')
+    known = {x['id'] for x in data['papers']}
+    if any(x not in known for x in target.get('papers', [])):
+        raise ValueError('unknown paper')
     if op == 'add':
         items.append(target)
 
@@ -166,6 +204,15 @@ textarea{min-height:60px;resize:vertical}
 #err{position:fixed;bottom:12px;left:16px;right:16px;max-width:620px;margin:auto;background:var(--p0);color:#fff;
  padding:8px 12px;border-radius:8px;display:none}
 .empty{padding:8px 12px;color:var(--muted);font-size:13px}
+.refs{margin:6px 0 2px;padding:0;list-style:none}
+.refs li{margin:4px 0}
+a.paper{color:var(--accent);text-decoration:none;font-weight:500}
+.idea{color:var(--muted);font-size:13px}
+.np{font-size:11px;color:var(--muted)}
+select[multiple]{min-height:120px}
+.prow{padding:8px 12px;border-top:1px solid var(--line)}
+.prow:first-child{border-top:0}
+.prow .bar{margin-top:4px}
 </style></head>
 <body>
 <header><h1>Project to-do</h1><a id="runs" href="#">Runs dashboard</a><span id="sum"></span></header>
@@ -177,7 +224,18 @@ const API = '/api/todo?t=' + encodeURIComponent(T);
 document.getElementById('runs').href = '/?t=' + encodeURIComponent(T);
 const PRI = ['P0', 'P1', 'P2', 'P3', ''];
 const ST = ['todo', 'doing', 'done', 'rejected'];
-let data = null, open = new Set(), editing = null, adding = null;
+let data = null, open = new Set(), editing = null, adding = null, pEditing = null, pAdding = false;
+const safe = u => /^https?:\/\//.test(u || '') ? u : undefined;
+const paper = id => (data.papers || []).find(p => p.id === id);
+function refs(ids) {
+  const ul = el('ul', {class: 'refs'});
+  for (const id of ids || []) {
+    const p = paper(id); if (!p) continue;
+    ul.append(el('li', {}, el('a', {class: 'paper', href: safe(p.url), target: '_blank', rel: 'noopener'}, p.title),
+      p.idea ? el('div', {class: 'idea'}, p.idea) : null));
+  }
+  return ul;
+}
 const el = (tag, attrs = {}, ...kids) => {
   const e = document.createElement(tag);
   for (const [k, v] of Object.entries(attrs)) {
@@ -203,7 +261,8 @@ async function op(body) {
 const rank = it => PRI.indexOf(it.priority || '') * 1e6 + (it.order || 0);
 const trackName = id => (data.tracks.find(t => t.id === id) || {name: id}).name;
 function form(it, onSave, onCancel) {
-  const f = el('form', {onsubmit: e => { e.preventDefault(); onSave(Object.fromEntries(new FormData(f))); }});
+  const f = el('form', {onsubmit: e => { e.preventDefault(); const fd = new FormData(f);
+    onSave({...Object.fromEntries(fd), papers: fd.getAll('papers')}); }});
   const sel = (name, opts, val) => el('select', {name}, ...opts.map(([v, l]) => {
     const o = el('option', {value: v}, l); if (v === (val || '')) o.selected = true; return o; }));
   f.append(
@@ -215,6 +274,10 @@ function form(it, onSave, onCancel) {
     el('input', {name: 'cost', placeholder: 'Cost (e.g. ~2 h, CPU, €5)', value: it.cost || ''}),
     el('textarea', {name: 'note', placeholder: 'Note / plan'}, it.note || ''),
     el('input', {name: 'evidence', placeholder: 'Evidence / source / result', value: it.evidence || ''}),
+    el('label', {class: 'k'}, 'Papers (Ctrl / long-press for several)'),
+    el('select', {name: 'papers', multiple: ''}, ...(data.papers || []).map(p => {
+      const o = el('option', {value: p.id}, p.title); if ((it.papers || []).includes(p.id)) o.selected = true;
+      return o; })),
     el('div', {class: 'bar'}, el('button', {type: 'submit', class: 'on'}, 'Save'),
       el('button', {type: 'button', onclick: onCancel}, 'Cancel')));
   return f;
@@ -226,6 +289,7 @@ function row(it, showTrack) {
     el('span', {class: 'pri ' + (it.priority || '')}, it.priority || '·'),
     el('span', {class: 'dot ' + it.status, title: it.status}),
     el('span', {class: 'title'}, showTrack ? el('span', {class: 'tag'}, trackName(it.track)) : null, it.title),
+    (it.papers || []).length ? el('span', {class: 'np', title: 'papers'}, '📄' + it.papers.length) : null,
     el('span', {class: 'cost'}, it.cost || ''));
   wrap.append(r);
   if (!open.has(it.id)) return wrap;
@@ -236,6 +300,7 @@ function row(it, showTrack) {
   } else {
     if (it.note) d.append(el('p', {}, it.note));
     if (it.evidence) d.append(el('p', {}, el('span', {class: 'k'}, 'Evidence: '), it.evidence));
+    if ((it.papers || []).length) d.append(refs(it.papers));
     d.append(el('p', {class: 'k'}, 'Updated ' + (it.updated || '?')));
     d.append(el('div', {class: 'bar'},
       ...ST.map(s => el('button', {class: s === it.status ? 'on' : '',
@@ -279,8 +344,48 @@ function render() {
     const list = el('div', {class: 'list'}); its.forEach(i => list.append(row(i, true)));
     det.append(list); app.append(det);
   });
+  app.append(papersSection(keep[2]));
+}
+function paperForm(p, onSave, onCancel) {
+  const f = el('form', {onsubmit: e => { e.preventDefault(); onSave(Object.fromEntries(new FormData(f))); }});
+  f.append(el('input', {name: 'title', placeholder: 'Title', value: p.title || '', required: ''}),
+    el('input', {name: 'url', placeholder: 'https://arxiv.org/abs/…', value: p.url || ''}),
+    el('textarea', {name: 'idea', placeholder: 'The idea in a sentence or two'}, p.idea || ''),
+    el('div', {class: 'bar'}, el('button', {type: 'submit', class: 'on'}, 'Save'),
+      el('button', {type: 'button', onclick: onCancel}, 'Cancel')));
+  return f;
+}
+function papersSection(wasOpen) {
+  const ps = [...(data.papers || [])].sort((a, b) => a.title.localeCompare(b.title));
+  const det = el('details', {}, el('summary', {}, `Papers (${ps.length})`));
+  if (wasOpen) det.open = true;
+  const list = el('div', {class: 'list'});
+  const add = el('div', {class: 'prow'});
+  if (pAdding) add.append(paperForm({}, f => op({op: 'paper_add', paper: f}).then(ok => { if (ok) pAdding = false;
+    render(); }), () => { pAdding = false; render(); }));
+  else add.append(el('button', {onclick: () => { pAdding = true; render(); }}, '+ Add paper'));
+  list.append(add);
+  for (const p of ps) {
+    const users = data.items.filter(i => (i.papers || []).includes(p.id));
+    const r = el('div', {class: 'prow'});
+    if (pEditing === p.id) {
+      r.append(paperForm(p, f => op({op: 'paper_update', id: p.id, fields: f}).then(ok => { if (ok) pEditing = null;
+        render(); }), () => { pEditing = null; render(); }));
+    } else {
+      r.append(el('a', {class: 'paper', href: safe(p.url), target: '_blank', rel: 'noopener'}, p.title),
+        p.idea ? el('div', {class: 'idea'}, p.idea) : null,
+        users.length ? el('div', {class: 'np'}, 'Used by: ' + users.map(i => i.title).join(' · ')) : null,
+        el('div', {class: 'bar'}, el('button', {onclick: () => { pEditing = p.id; render(); }}, 'Edit'),
+          el('button', {class: 'del', onclick: () => confirm('Delete paper "' + p.title + '"?') &&
+            op({op: 'paper_delete', id: p.id})}, 'Delete')));
+    }
+    list.append(r);
+  }
+  det.append(list);
+  return det;
 }
 load();
-setInterval(() => { if (!editing && !adding && document.visibilityState === 'visible') load(); }, 30000);
+setInterval(() => { if (!editing && !adding && !pEditing && !pAdding && document.visibilityState === 'visible') load(); },
+  30000);
 </script></body></html>
 """
