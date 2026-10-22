@@ -20,6 +20,10 @@ stage-2 model_bf16.pt (probes, generation) and all logs / probe results stay.
     .venv/bin/python tools/sweeps/linear_convert.py --dry-run
     .venv/bin/python tools/sweeps/linear_convert.py                 # ~3-4 h on the laptop
     .venv/bin/python tools/sweeps/linear_convert.py --table-only
+    .venv/bin/python tools/sweeps/linear_convert.py --arms h4 --quick   # ~30 min check (GPU path, speed, early CE)
+
+--quick: stage 1 = 150 it (at most 10 min), stage 2 = one 12-minute chunk with evaluations every 200 it, runs named
+linear_<arm>_quick*, no clean-up; table logs/sections/linear_quick.md with forget_ctrl at step 500 as the reference.
 """
 
 import argparse
@@ -49,14 +53,17 @@ def parse_args():
     p = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     p.add_argument('--arms', default=','.join(ARMS))
     p.add_argument('--minutes', type=float, default=240, help='training minutes per stage (one chunk)')
+    p.add_argument('--quick', action='store_true', help='~30-minute check instead of the full arms')
     p.add_argument('--table-only', action='store_true')
     p.add_argument('--dry-run', action='store_true')
     return p.parse_args()
 
 
-def run_stage(name, iters, extra, args):
+def run_stage(name, iters, extra, args, minutes=None):
+    chunks = '1' if args.quick else '0'
     cmd = ['.venv/bin/python', 'tools/sweeps/section_long.py', '--name', name, '--out-dir', f'checkpoints/{name}',
-           '--max-iters', str(iters), '--minutes', f'{args.minutes:g}', '--chunks', '0', '--stop-at', '100000']
+           '--max-iters', str(iters), '--minutes', f'{minutes or args.minutes:g}', '--chunks', chunks,
+           '--stop-at', '100000']
     for c in CONFIGS:
         cmd += ['--config', c]
     cmd += ['--', *extra, f'--wandb_run_name=sec-{name.replace("_", "-")}']
@@ -75,18 +82,25 @@ def log_text(name):
     return path.read_text(encoding='utf-8', errors='ignore') if path.exists() else ''
 
 
+def run_name(arm, args):
+    return f'linear_{arm}_quick' if args.quick else f'linear_{arm}'
+
+
 def train_arm(arm, args):
     spec = ARMS[arm]
-    name = f'linear_{arm}'
+    name = run_name(arm, args)
+    s1_iters = 150 if args.quick else S1_ITERS
     extra = [f'--linear_attn={spec["linear_attn"]}']
     if spec['transfer']:
         s1 = probe_row(f'{name}_s1')
-        if not (s1 and s1['iter'] >= S1_ITERS - 1):
-            code = run_stage(f'{name}_s1', S1_ITERS, extra + S1_ARGS, args)
+        if not (s1 and s1['iter'] >= s1_iters - 1):
+            code = run_stage(f'{name}_s1', s1_iters, extra + S1_ARGS, args, minutes=10 if args.quick else None)
             if code != 0:
                 return code
         extra.append(f'--init_ckpt=checkpoints/{name}_s1/ckpt.pt')
-    return run_stage(name, MAX_ITERS, extra, args)
+    if args.quick:
+        extra.append('--eval_interval=200')
+    return run_stage(name, MAX_ITERS, extra, args, minutes=12 if args.quick else None)
 
 
 def clean_up(arm, args):
@@ -100,8 +114,10 @@ def clean_up(arm, args):
                 shutil.rmtree(path) if path.is_dir() else path.unlink()
 
 
-def write_table(arms):
-    lines = ['# Attention -> Gated DeltaNet conversion (107M v2_A0, 1,500 it of the forgetting-sweep recipe)', '',
+def write_table(arms, args):
+    table = TABLE.with_name('linear_quick.md') if args.quick else TABLE
+    lines = ['# Attention -> Gated DeltaNet conversion (107M v2_A0, 1,500 it of the forgetting-sweep recipe)'
+             + (': 30-minute check, reference at step 500' if args.quick else ''), '',
              f'Updated {time.strftime("%Y-%m-%d %H:%M")}. hybrid4 = linear attention in 10 of 14 blocks (full in 3, 7, '
              '11, 13). Reference: forget_ctrl (full attention, same data and iterations). Val: last evaluation (200 '
              'held-out windows). Probe: 512 held-out windows around section changes of >= 2 points, gain on the first '
@@ -111,8 +127,10 @@ def write_table(arms):
              '| arm | stage 1: MSE start -> end, held-out CE | iter | held-out CE | Aria CE | val sec gain vs shuffled / '
              'none / prev | probe vs shuffled | vs none | vs previous | s/it |', '|---' * 10 + '|']
     for arm in [REFERENCE] + arms:
-        name = arm if arm == REFERENCE else f'linear_{arm}'
+        name = arm if arm == REFERENCE else run_name(arm, args)
         found = STEP.findall(log_text(name))
+        if args.quick and arm == REFERENCE:
+            found = [f for f in found if f[0] == '500']
         ev = found[-1] if found else None
         s1 = STEP.findall(log_text(f'{name}_s1')) if arm != REFERENCE and ARMS[arm]['transfer'] else []
         stage1 = f'{s1[1][1]} -> {s1[-1][1]}, {s1[-1][2]}' if len(s1) > 1 else ''
@@ -122,7 +140,7 @@ def write_table(arms):
                      f"{' / '.join(ev[4:]) if ev else ''} | "
                      + (f"{pr['gain_shuffled']:+.4f} | {pr['gain_none']:+.4f} | {pr.get('gain_prev', float('nan')):+.4f}"
                         if pr else ' | | ') + f" | {speed[-1] if speed else ''} |")
-    TABLE.write_text('\n'.join(lines) + '\n')
+    table.write_text('\n'.join(lines) + '\n')
     print('\n'.join(lines), flush=True)
 
 
@@ -132,17 +150,17 @@ def main():
     assert all(a in ARMS for a in arms), arms
     if not args.table_only:
         for arm in arms:
-            row = probe_row(f'linear_{arm}')
-            if not (row and row['iter'] >= MAX_ITERS - 1):
+            row = probe_row(run_name(arm, args))
+            if args.quick or not (row and row['iter'] >= MAX_ITERS - 1):
                 code = train_arm(arm, args)
                 print(f'{time.strftime("%H:%M")} {arm}: exit {code}', flush=True)
-                row = probe_row(f'linear_{arm}')
-            if row and row['iter'] >= MAX_ITERS - 1:
+                row = probe_row(run_name(arm, args))
+            if not args.quick and row and row['iter'] >= MAX_ITERS - 1:
                 clean_up(arm, args)
             if not args.dry_run:
-                write_table(arms)
+                write_table(arms, args)
     if not args.dry_run:
-        write_table(arms)
+        write_table(arms, args)
 
 
 if __name__ == '__main__':

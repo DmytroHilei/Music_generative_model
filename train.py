@@ -338,6 +338,14 @@ if attn_transfer:
 if fp8 and not fp8_supported(device_type):
     print("fp8 needs an sm_89+ GPU, falling back to bf16")
     fp8 = False
+# fp8 matmuls need rows x positions divisible by 16. The trunk pads its sequence to a multiple of 16 (pad_multiple
+# below) except in section_mode 'xattn', where the caption vectors stay outside the sequence: there the length
+# (text prefix + notes) itself must be a multiple of 16, since row counts vary (cf rows, the last val batch)
+if fp8 and model.config.section_len and model.config.section_mode == 'xattn' \
+        and (model.config.text_prefix + block_size) % 16:
+    print(f"fp8 off: {model.config.text_prefix} + {block_size} positions per row in section_mode 'xattn' "
+          "are not a multiple of 16, falling back to bf16")
+    fp8 = False
 if fp8:
     # only the transformer blocks: embeddings, heads and LayerNorms stay bf16/fp32
     # the per-head gate projections of linear attention (2 x n_head outputs) are too narrow for fp8 matmuls
@@ -346,6 +354,7 @@ if fp8:
     refresh_fp8_weights(model)  # no-op without fp8_cache_weights
     if not compile:
         print("WARNING: fp8 without compile is about 2x SLOWER (unfused scaling kernels)")
+model.pad_multiple = 16 if fp8 else 0  # fp8 matmuls: rows x positions divisible by 16
 scaler = torch.amp.GradScaler(device_type, enabled=(dtype == 'float16'))
 if freeze:
     freeze_params(model, freeze)

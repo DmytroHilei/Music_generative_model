@@ -451,6 +451,10 @@ class GPT(nn.Module):
         # (musicar.training.memory.SAC_OPS: 'attn' = attention output, ~16 MB per block at 4 x 2048 x 1024; 'attn,mm' = also the matmuls)
         self.act_ckpt = 0
         self.act_ckpt_save = ''
+        # pad_multiple (training only, not saved): the trunk's sequence is padded at the end to a multiple of this
+        # (fp8 matmuls need rows x positions divisible by 16, e.g. one counterfactual row of 1,124 positions); causal
+        # attention keeps the padding out of every real position, and it is cut off before the output
+        self.pad_multiple = 0
 
         assert config.pos_emb in ('learned', 'rope'), config.pos_emb
         self.transformer = nn.ModuleDict(dict(
@@ -640,6 +644,12 @@ class GPT(nn.Module):
                 k_ev = torch.arange(mem.size(1), device=device) // self.config.section_slots
                 mask = (q_ev[:, :, None] == k_ev[None, None, :])[:, None]       # (B, 1, N, E * slots)
         x = self.transformer.drop(x)
+        n_real = x.size(1)
+        pad = (-n_real) % self.pad_multiple if self.pad_multiple and cache is None and mem is None else 0
+        if pad:
+            x = F.pad(x, (0, 0, 0, pad))
+            if rope is not None:
+                rope = rope_tables(torch.arange(n_real + pad, device=device), hs, self.config.rope_base)
         n_ckpt = len(self.transformer.h) if self.act_ckpt < 0 else self.act_ckpt
         ckpt_kw = dict(context_fn=partial(sac_context, self.act_ckpt_save)) if self.act_ckpt_save else {}
         for i, block in enumerate(self.transformer.h):
@@ -650,6 +660,8 @@ class GPT(nn.Module):
                 x = block(x, cache, i, rope)
             if mem is not None and str(i) in self.transformer['section_xattn']:
                 x = self.transformer['section_xattn'][str(i)](x, mem, mask)
+        if pad:
+            x = x[:, :n_real]
         if read is not None:
             return self.transformer.ln_f(x.gather(1, read[..., None].expand(-1, -1, x.size(-1))))
         return self.transformer.ln_f(x[:, k_pre:] if k_pre else x)

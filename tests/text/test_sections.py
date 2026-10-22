@@ -75,6 +75,24 @@ def test_section_forward_both_modes():
         assert torch.allclose(h[1:], h2[1:], atol=1e-5)
 
 
+def test_pad_multiple_is_exact():
+    """Padding the trunk's sequence at the end (fp8: positions divisible by 16) changes no output, and gradients are
+    the same; the window here is 4 prefix + 16 notes + 3 x 2 section slots = 26 positions."""
+    streams, program, targets = batch()
+    states, pos = sections_input()
+    text = torch.randn(3, 5, D)
+    m = section_model('prefix')
+    outs = []
+    for pad in (0, 16):
+        m.pad_multiple = pad
+        m.zero_grad()
+        parts, loss = m(*streams, program=program, targets=targets, text=text, sections=(states, pos))
+        loss.backward()
+        outs.append((loss.detach(), m.transformer.h[0].attn.c_attn.weight.grad.clone()))
+    assert torch.allclose(outs[0][0], outs[1][0], atol=1e-6)
+    assert torch.allclose(outs[0][1], outs[1][1], atol=1e-6)
+
+
 def test_xattn_zero_gate_is_function_preserving():
     m = tiny(text_dim=D, text_prefix=4, section_len=8, section_slots=2, section_mode='xattn')
     streams, program, _ = batch()
