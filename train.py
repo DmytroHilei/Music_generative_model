@@ -143,6 +143,10 @@ section_style = 'plain'   # 'change': section captions always name what changed 
 section_change_frac = 0.0  # training: share of windows around a section change (NoteWindowDataset change_frac)
 section_change_min = 2    # points of change (dynamics / pace / register / drums / instruments)
 section_repeat = 0        # > 0: a section's caption arrives again every this many notes inside it (MusicConfig)
+linear_attn = ''          # MusicConfig.linear_attn: on a finetune, these blocks' attention becomes a Gated DeltaNet
+                          # ('hybrid4' = 3 linear : 1 full; musicar/model/linear_attn.py)
+attn_transfer = False     # stage 1 of that conversion: only the linear layers train, on the relative MSE to the
+                          # output of the attention they replace (forward's loss); needs compile=False
 # section-caption forgetting (context/claude/roadmap.md P0): counterfactual loss with the previous section caption
 # (GPT.forward cf) on change / splice windows, a recognition head, spliced windows (NoteWindowDataset splice_frac)
 section_cf_weight = 0.0   # > 0: loss += weight * max(0, eta - (NLL with the previous caption - NLL with the true one))
@@ -150,6 +154,7 @@ section_cf_eta = 0.05     # margin in nats per note (summed over the heads), ove
 section_cf_notes = 32
 section_cf_rows = 4       # rows per micro-batch in the second forward (fixed shape; change / splice rows first)
 section_cls_weight = 0.0  # > 0 (with section_cf_weight): BCE of the recognition head, true vs previous caption
+section_cf_from = 0.0     # cf loss and recognition head from this share of lr_decay_iters on (0.8 = WSD cooldown only)
 section_splice_frac = 0.0  # training: share of spliced windows (section of another file, its caption)
 late_from = 256           # validation with captions: also the CE over window positions >= late_from (val/*late*)
 
@@ -233,6 +238,7 @@ data_kw = dict(root_dir=root_dir, cache_dir=cache_dir, special_tokens=special_to
                section_repeat=section_repeat)
 assert not section_cf_weight or section_len, 'section_cf_weight needs section captions'
 cf_names = ['cf_text', 'cf_event', 'cf_start'] if section_cf_weight else []
+cf_from_iter = int(section_cf_from * lr_decay_iters)
 # train: random windows (uniform over all note positions of all files), with augmentation
 train_dataset = NoteWindowDataset(csv_path, split='train', block_size=block_size, augment=True, **data_kw,
                                style_dropout=style_dropout, boundary_frac=boundary_frac, aug_tempo=aug_tempo,
@@ -322,6 +328,11 @@ if block_size < model.config.block_size:
 model.to(device)
 model.act_ckpt = act_ckpt
 model.act_ckpt_save = act_ckpt_save
+if attn_transfer:
+    assert not compile, 'attn_transfer: the linear layers hand their loss over as an attribute (set compile=False)'
+    transfer_keep = model.attach_attn_teachers()
+    assert transfer_keep, 'attn_transfer needs linear_attn layers'
+    freeze_params(model, '*', except_prefixes=','.join(transfer_keep))
 
 # before the optimizer is built: fp8 conversion swaps the Linear modules
 if fp8 and not fp8_supported(device_type):
@@ -329,7 +340,9 @@ if fp8 and not fp8_supported(device_type):
     fp8 = False
 if fp8:
     # only the transformer blocks: embeddings, heads and LayerNorms stay bf16/fp32
-    convert_fp8(model.transformer.h, fp8_recipe, fp8_skip, cache_weights=fp8_cache_weights)
+    # the per-head gate projections of linear attention (2 x n_head outputs) are too narrow for fp8 matmuls
+    convert_fp8(model.transformer.h, fp8_recipe, ','.join(filter(None, [fp8_skip, 'attn.ab_proj'])),
+                cache_weights=fp8_cache_weights)
     refresh_fp8_weights(model)  # no-op without fp8_cache_weights
     if not compile:
         print("WARNING: fp8 without compile is about 2x SLOWER (unfused scaling kernels)")
@@ -376,7 +389,7 @@ def prepare(X, Y, cond_drop_p):
         states = encoder.encode([c for row in caps for c in row], tokens=True, max_length=section_max_length)
         extra['sections'] = (states.view(len(caps), len(caps[0]), *states.shape[1:]),
                              X[1]['sec_pos'].to(device, non_blocking=True))
-    if 'cf_text' in X[1]:  # counterfactual rows: change / splice rows first, a fixed number
+    if 'cf_text' in X[1] and iter_num >= cf_from_iter:  # counterfactual rows: change / splice rows first, a fixed number
         start = X[1]['cf_start']
         rows = torch.argsort((start < 0).int(), stable=True)[:section_cf_rows]
         states = extra['sections'][0][rows.to(device)].clone()

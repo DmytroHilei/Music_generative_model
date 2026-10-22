@@ -10,13 +10,13 @@ from torch.nn import functional as F
 ARCH_KEYS = ('n_layer', 'n_head', 'n_embd', 'block_size', 'bias', 'pitch_size', 'velocity_size', 'duration_size',
              'delta_time_size', 'n_styles', 'n_programs', 'pos_emb', 'rope_base', 'norm', 'mlp', 'qk_norm', 'cond_inst',
              'n_density', 'text_dim', 'text_center', 'text_prefix', 'section_len', 'section_lead', 'section_slots',
-             'section_mode', 'section_xattn_every', 'section_repeat')
+             'section_mode', 'section_xattn_every', 'section_repeat', 'linear_attn')
 # what checkpoints that predate a key actually used
 LEGACY_DEFAULTS = {'n_styles': 0, 'n_programs': 0, 'pos_emb': 'learned', 'rope_base': 10000.0, 'norm': 'layernorm',
                    'mlp': 'gelu', 'qk_norm': False, 'cond_inst': False, 'n_density': 0,
                    'text_dim': 0, 'text_center': False, 'text_prefix': 0, 'section_len': 0, 'section_lead': 0,
                    'section_slots': 4, 'section_mode': 'prefix', 'section_xattn_every': 2,
-                   'section_repeat': 0}
+                   'section_repeat': 0, 'linear_attn': ''}
 
 
 def resolve_checkpoint(path):
@@ -66,7 +66,8 @@ def load_expanded(model, state_dict):
 def merge_model_args(saved, wanted, finetune, block_size):
     """Model args for a resume / finetune: the checkpoint's own (`saved`; LEGACY_DEFAULTS, then `wanted`, for keys it
     predates). A finetune may change what load_expanded can map: grow pitch_size / n_styles / n_programs, add the
-    text input (text_dim 0 -> the encoder's width), its centering (text_center) or the T2 prefix (text_prefix), switch to RoPE, and set block_size (RoPE: any; learned positions:
+    text input (text_dim 0 -> the encoder's width), its centering (text_center) or the T2 prefix (text_prefix), convert
+    attention layers to linear attention (linear_attn), switch to RoPE, and set block_size (RoPE: any; learned positions:
     larger, the table is stretched)."""
     args = {}
     add_sections = finetune and not saved.get('section_len', 0)
@@ -84,6 +85,8 @@ def merge_model_args(saved, wanted, finetune, block_size):
             args[k] = wanted.get(k, args[k])  # add section captions (fresh adapter; 'xattn' starts as the old model)
         if finetune and k == 'section_repeat' and wanted.get(k):
             args[k] = wanted[k]  # repeat the section caption (no new parameters, only more inserted vectors)
+        if finetune and k == 'linear_attn' and wanted.get(k) and not args[k]:
+            args[k] = wanted[k]  # convert attention layers to linear attention (c_attn / c_proj carry over)
         if finetune and k == 'pos_emb' and wanted[k] == 'rope':
             args[k] = 'rope'  # switch to RoPE: the position table is dropped (not function-preserving)
     if finetune and args['pos_emb'] == 'rope':

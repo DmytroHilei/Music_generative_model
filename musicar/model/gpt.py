@@ -12,6 +12,7 @@ import torch
 import torch.utils.checkpoint
 from torch.nn import functional as F
 
+from musicar.model.linear_attn import GatedDeltaNet, linear_layers
 from musicar.training.memory import sac_context
 
 
@@ -161,10 +162,13 @@ class SwiGLU(nn.Module):
 
 class Block(nn.Module):
 
-    def __init__(self, config):
+    def __init__(self, config, layer=0):
         super().__init__()
         self.ln_1 = block_norm(config)
-        self.attn = CausalSelfAttention(config)
+        if layer in linear_layers(config.linear_attn, config.n_layer):
+            self.attn = GatedDeltaNet(config)
+        else:
+            self.attn = CausalSelfAttention(config)
         self.ln_2 = block_norm(config)
         self.mlp = SwiGLU(config) if config.mlp == 'swiglu' else MLP(config)
 
@@ -235,6 +239,9 @@ class MusicConfig:
     # section_repeat > 0: the caption of a section arrives again every section_repeat notes inside it (the same
     # vectors, inserted again in 'prefix' mode), so it is never far back in the context; 0 = once per section
     section_repeat: int = 0
+    # linear attention (musicar/model/linear_attn.py): blocks whose attention is a Gated DeltaNet ('' = none,
+    # 'hybrid4' = every layer but each 4th and the last, as Qwen3-Next's 3 : 1, or comma-separated block indices)
+    linear_attn: str = ''
 
 
 # order in which attributes of the next note are decided by CascadeHeads
@@ -449,7 +456,7 @@ class GPT(nn.Module):
         self.transformer = nn.ModuleDict(dict(
             music_embeddings = MusicEmbeddings(config),
             drop = nn.Dropout(config.dropout),
-            h = nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
+            h = nn.ModuleList([Block(config, i) for i in range(config.n_layer)]),
             ln_f = block_norm(config),
         ))
         if config.pos_emb == 'learned':
@@ -466,13 +473,16 @@ class GPT(nn.Module):
         if config.text_prefix:
             assert config.text_dim and not config.text_center, 'text_prefix needs text_dim (and replaces T1)'
             assert config.pos_emb == 'rope', 'text_prefix shifts the notes by K positions: RoPE only'
+            # the adapters attend over the text encoder's width: the trunk's head count if it divides it (12 at 107M),
+            # else the largest one below that does (450M: 18 heads, LaBSE 768 -> 16); weight shapes don't depend on it
+            text_heads = max(h for h in range(1, config.n_head + 1) if config.text_dim % h == 0)
             self.transformer['text_prefix'] = TextPrefix(config.text_dim, config.n_embd, config.text_prefix,
-                                                         n_head=config.n_head)
+                                                         n_head=text_heads)
             if config.section_len:
                 assert config.section_mode in ('prefix', 'xattn'), config.section_mode
                 assert 0 <= config.section_lead <= config.section_len
                 self.transformer['section_prefix'] = TextPrefix(config.text_dim, config.n_embd,
-                                                                config.section_slots, n_head=config.n_head)
+                                                                config.section_slots, n_head=text_heads)
                 if config.section_mode == 'xattn':
                     self.transformer['section_xattn'] = nn.ModuleDict({
                         str(i): SectionCrossAttention(config) for i in range(config.n_layer)
@@ -508,6 +518,28 @@ class GPT(nn.Module):
             torch.nn.init.normal_(self.transformer['section_prefix'].null, std=0.02)
             for xa in self.transformer['section_xattn'].values() if config.section_mode == 'xattn' else ():
                 torch.nn.init.zeros_(xa.gate)
+        for m in self.linear_attn_layers():  # _init_weights re-drew their conv / gates
+            m.reset_parameters()
+
+    def linear_attn_layers(self):
+        return [b.attn for b in self.transformer.h if isinstance(b.attn, GatedDeltaNet)]
+
+    def attach_attn_teachers(self):
+        """Stage 1 of a linear-attention conversion (linear_attn.py): each linear layer keeps a frozen copy of the
+        attention layer it starts from (its current c_attn / c_proj) and learns that layer's output; forward's loss is
+        then their summed relative MSE instead of the CE. Returns the parameter-name prefixes that should train."""
+        prefixes = []
+        cfg = self.config
+        for i, block in enumerate(self.transformer.h):
+            if isinstance(block.attn, GatedDeltaNet):
+                attn = CausalSelfAttention(cfg).to(block.attn.c_attn.weight.device)
+                attn.c_attn.load_state_dict(block.attn.c_attn.state_dict())
+                attn.c_proj.load_state_dict(block.attn.c_proj.state_dict())
+                if cfg.qk_norm:
+                    raise NotImplementedError('attention transfer from a QK-norm model: copy q_norm / k_norm too')
+                block.attn.attach_teacher(attn.eval())
+                prefixes.append(f'transformer.h.{i}.attn.')
+        return prefixes
 
     @property
     def head_names(self):
@@ -697,6 +729,10 @@ class GPT(nn.Module):
                     parts[f'late_{name}'] = F.cross_entropy(
                         logits[name][:, late_from:].reshape(-1, lg.size(-1)).float(), lt.reshape(-1),
                         ignore_index=-1, reduction='sum') / (lt != -1).sum().clamp(min=1)
+        transfer = [m.transfer_loss for m in self.linear_attn_layers() if m.transfer_loss is not None]
+        if transfer:  # stage 1 of a linear-attention conversion: only the layers' match to their attention
+            loss = sum(transfer)
+            parts['transfer'] = loss.detach()
         if cf is not None:
             loss = loss + self._counterfactual(cf, x, logits, tgt, parts, pitch, velocity, duration, delta_time,
                                                style, program, cond, text, sections)

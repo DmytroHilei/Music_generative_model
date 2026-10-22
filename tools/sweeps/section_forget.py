@@ -31,7 +31,13 @@ ARMS = {
     'ctrl': [],
     'splice': ['--section_splice_frac=0.25'],
     'repeat': ['--section_repeat=64'],
+    # iso-time arms (2026-10-22): the wall time of 'all' at 1,500 it (94 min on the laptop: 3.68 s/it; no cf 2.08 s/it)
+    'nocf': ['--section_splice_frac=0.25', '--section_repeat=64'],
+    'nocf_s50': ['--section_splice_frac=0.5', '--section_repeat=64'],
+    'cfcool': CF + ['--section_splice_frac=0.25', '--section_repeat=64', '--section_cf_from=0.8'],
+    'cf1': CF + ['--section_splice_frac=0.25', '--section_repeat=64', '--section_cf_rows=1'],
 }
+ITERS = {'nocf': 2700, 'nocf_s50': 2700, 'cfcool': 2350, 'cf1': 2200}  # others MAX_ITERS
 TABLE = ROOT / 'logs/sections/forget.md'
 BASELINE = 'checkpoints/v2_A0'
 PAIRS = ('loud', 'fast', 'drums', 'high', 'strings', 'uk_loud')
@@ -55,7 +61,7 @@ def follow_dir(arm):
 
 def train(arm, args):
     cmd = ['.venv/bin/python', 'tools/sweeps/section_long.py', '--name', f'forget_{arm}', '--out-dir',
-           f'checkpoints/forget_{arm}', '--max-iters', str(MAX_ITERS), '--minutes', f'{args.minutes:g}',
+           f'checkpoints/forget_{arm}', '--max-iters', str(ITERS.get(arm, MAX_ITERS)), '--minutes', f'{args.minutes:g}',
            '--chunks', '0', '--stop-at', '100000']
     for c in CONFIGS:
         cmd += ['--config', c]
@@ -105,7 +111,8 @@ def switched(arm):
 
 
 def write_table(arms):
-    lines = ['# Section-caption forgetting: arms from v2_A0 (1,500 it each)', '',
+    lines = ['# Section-caption forgetting: arms from v2_A0 (1,500 it; iso-time arms nocf / nocf_s50 / cfcool / cf1: '
+             'the wall time of all)', '',
              f'Updated {time.strftime("%Y-%m-%d %H:%M")}. Val gains: the last evaluation (200 held-out windows, all '
              'positions). Probe: 512 held-out windows around changes of >= 2 points, gain on the first 32 notes of the '
              'changed section (nats per note, 4 heads). Switch: share of the full flip at note 1024 (section_follow '
@@ -136,7 +143,7 @@ def main():
     if not args.table_only:
         for arm in arms:
             row = probe_row(arm)
-            if not (row and row['iter'] >= MAX_ITERS - 1):
+            if not (row and row['iter'] >= ITERS.get(arm, MAX_ITERS) - 1):
                 code = train(arm, args)
                 if code != 0:
                     print(f'{arm}: driver exit {code}, next arm', flush=True)

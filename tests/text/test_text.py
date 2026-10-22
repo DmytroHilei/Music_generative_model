@@ -106,6 +106,15 @@ def test_text_prefix_forward():
     assert m.transformer['text_prefix'].queries.grad.abs().sum() > 0
 
 
+def test_text_prefix_head_count():
+    """A trunk head count that does not divide the text width (450M: 18 heads, LaBSE 768) still builds; the adapters
+    use the largest head count <= the trunk's that does."""
+    m = tiny(n_head=6, n_embd=48, pos_emb='rope', text_dim=8, text_prefix=2, section_len=16)
+    assert m.transformer['text_prefix'].attn.num_heads == 4
+    assert m.transformer['section_prefix'].attn.num_heads == 4
+    assert tiny(n_head=2, pos_emb='rope', text_dim=8, text_prefix=2).transformer['text_prefix'].attn.num_heads == 2
+
+
 def test_text_prefix_cache_matches_forward():
     from musicar.model.gpt import KVCache
     m = prefix_model()
