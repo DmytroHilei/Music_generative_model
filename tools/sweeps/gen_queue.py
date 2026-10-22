@@ -16,6 +16,10 @@ baseline is results/section_follow/v2_A0_section: cfg 2, switch at note 1024 = t
   a7_switch1280    switch at note 1280, on a refill (slide 256)                                       ~4 min
   a7_switch1280_slide192  switch at note 1280 between refills (slide 192: 1024, 1216, 1408, ...)        ~4 min
   a8_file_caption  hold + switch with the file caption 'a piece of music' in both guidance halves     ~7 min
+Guidance on the switch (after tools/sweeps/section_forget.py), v2_A0 and forget_all:
+  cfg_boost2_*     cfg 2, +2 at each section start, back to 2 over 32 notes                          ~4 min
+  cfg_boost4_*     cfg 2, +4 at each section start, back to 2 over 64 notes                          ~4 min
+  cfg_double_v2_A0 file caption 'a piece of music', file scale 1, section scale 3 (3-pass)            ~6 min
 Jobs run one after another; a job whose <out>/summary.md exists is skipped (re-run: delete it or --redo). The queue
 refuses to start while train.py runs (--force overrides) and stops after the current job when a training process
 appears. Logs logs/gen_queue/<job>.log, progress on the dashboard (JobStatus 'gen_queue').
@@ -71,6 +75,19 @@ JOBS.update({
                         V2 + ['--parts', 'hold,switch', '--file-caption', 'a piece of music'],
                         'results/section_follow/v2_A0_a8_file_caption', 7),
 })
+
+# guidance schedule / separate scales on the switch (roadmap P0 items 5-6), after tools/sweeps/section_forget.py:
+# v2_A0 (baseline results/section_follow/v2_A0_section) and the forget_all arm (results/section_follow/forget_all)
+SW = ['--cfg', '2', '--prompts', 'section', '--parts', 'switch', '--mp3']
+for ck, tag in (('checkpoints/v2_A0', 'v2_A0'), ('checkpoints/forget_all', 'forget_all')):
+    for boost, notes in ((2, 32), (4, 64)):
+        JOBS[f'cfg_boost{boost}_{tag}'] = ('eval/compare/section_follow.py',
+                                           ['--checkpoints', ck, *SW, '--cfg-boost', str(boost), '--cfg-boost-notes',
+                                            str(notes)], f'results/section_follow/{tag}_cfg_boost{boost}', 4)
+JOBS['cfg_double_v2_A0'] = ('eval/compare/section_follow.py',
+                            ['--checkpoints', 'checkpoints/v2_A0', '--cfg', '1', '--prompts', 'section', '--parts',
+                             'switch', '--mp3', '--cfg-section', '3', '--file-caption', 'a piece of music'],
+                            'results/section_follow/v2_A0_cfg_double', 6)
 
 
 def parse_args():

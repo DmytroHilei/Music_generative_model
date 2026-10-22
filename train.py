@@ -50,6 +50,8 @@ style_eval_chunk = 20     # songs generated at once (KV cache ~0.26 GB per song 
 sample_eval_rows = 0      # > 0: at every evaluation also generate from this many fixed multi-instrument prompts and
 sample_eval_notes = 1000  # log sample metrics (sample_eval.py: instruments, out-of-band, density, takeover, ...)
 eval_only = False
+fake_quant = ''           # eval only: musicar.model.quant spec (e.g. 'w4g32-a8-kv8'), applied after loading; use
+                          # --dtype=float32 --fp8=False --compile=False to measure it
 always_save_checkpoint = False
 save_iters = ''            # e.g. '25,50,100': also keep bf16 weights at these iterations (out_dir/model_bf16_it<N>.pt),
                            # for judging fine-tune checkpoints by generation, not only by val CE
@@ -140,6 +142,15 @@ section_max_length = 48   # encoder tokens per section caption
 section_style = 'plain'   # 'change': section captions always name what changed vs the previous section
 section_change_frac = 0.0  # training: share of windows around a section change (NoteWindowDataset change_frac)
 section_change_min = 2    # points of change (dynamics / pace / register / drums / instruments)
+section_repeat = 0        # > 0: a section's caption arrives again every this many notes inside it (MusicConfig)
+# section-caption forgetting (context/claude/roadmap.md P0): counterfactual loss with the previous section caption
+# (GPT.forward cf) on change / splice windows, a recognition head, spliced windows (NoteWindowDataset splice_frac)
+section_cf_weight = 0.0   # > 0: loss += weight * max(0, eta - (NLL with the previous caption - NLL with the true one))
+section_cf_eta = 0.05     # margin in nats per note (summed over the heads), over the changed section's first notes
+section_cf_notes = 32
+section_cf_rows = 4       # rows per micro-batch in the second forward (fixed shape; change / splice rows first)
+section_cls_weight = 0.0  # > 0 (with section_cf_weight): BCE of the recognition head, true vs previous caption
+section_splice_frac = 0.0  # training: share of spliced windows (section of another file, its caption)
 late_from = 256           # validation with captions: also the CE over window positions >= late_from (val/*late*)
 
 # wandb logging
@@ -218,15 +229,19 @@ extra_names = (['program'] if n_programs else []) + (['style'] if styles else []
     + (['sec_text', 'sec_pos'] if section_len else [])
 data_kw = dict(root_dir=root_dir, cache_dir=cache_dir, special_tokens=special_tokens, styles=styles,
                programs=n_programs > 0, pad_short=pad_short, min_notes=min_notes, captions=captions or None,
-               caption_uk=caption_uk, section_len=section_len, section_lead=section_lead, section_style=section_style)
+               caption_uk=caption_uk, section_len=section_len, section_lead=section_lead, section_style=section_style,
+               section_repeat=section_repeat)
+assert not section_cf_weight or section_len, 'section_cf_weight needs section captions'
+cf_names = ['cf_text', 'cf_event', 'cf_start'] if section_cf_weight else []
 # train: random windows (uniform over all note positions of all files), with augmentation
 train_dataset = NoteWindowDataset(csv_path, split='train', block_size=block_size, augment=True, **data_kw,
                                style_dropout=style_dropout, boundary_frac=boundary_frac, aug_tempo=aug_tempo,
                                pack_short=pack_short, caption_dropout=caption_dropout, section_dropout=section_dropout,
                                change_frac=section_change_frac, change_min=section_change_min,
+                               counterfactual=section_cf_weight > 0, splice_frac=section_splice_frac,
                                aug_stores=as_list(aug_stores, int), source_weights=as_list(source_weights, float))
 train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=num_workers, drop_last=True,
-                          collate_fn=partial(collate_windows, extra_names=tuple(extra_names)),
+                          collate_fn=partial(collate_windows, extra_names=tuple(extra_names + cf_names)),
                           persistent_workers=num_workers > 0)
 make_val_loader = partial(val_loader, batch_size=batch_size, max_batches=eval_iters, num_workers=num_workers,
                           extra_names=extra_names, block_size=block_size, **data_kw)
@@ -239,7 +254,7 @@ text_loaders = {mode: make_val_loader(val_csv_path or csv_path, caption_mode=mod
 # section captions: another file's sections / none (own file caption), and no text at all
 if section_len:
     text_loaders.update({f'sec_{mode}': make_val_loader(val_csv_path or csv_path, section_caption_mode=mode)
-                         for mode in ('shuffled', 'none')})
+                         for mode in ('shuffled', 'none', 'previous')})
     text_loaders['all_none'] = make_val_loader(val_csv_path or csv_path, caption_mode='none',
                                                section_caption_mode='none')
 val2_loader = make_val_loader(val2_csv_path) if val2_csv_path else None
@@ -265,6 +280,11 @@ else:
     print("Initializing a new model from scratch")
 
 model = GPT(MusicConfig(**model_args, dropout=dropout, label_smoothing=label_smoothing))
+assert model.config.section_repeat == section_repeat, \
+    f"the data lays out section_repeat={section_repeat}, the model has {model.config.section_repeat}"
+if section_cls_weight:
+    assert section_cf_weight, 'the recognition head trains on the counterfactual rows: set section_cf_weight'
+    model.add_section_cls()  # before loading, so a resume finds its weights (a finetune starts it fresh)
 
 if checkpoint is not None:
     state_dict = strip_compile_prefix(checkpoint['model'])
@@ -292,6 +312,10 @@ if (cond_inst, n_density) != (model_args['cond_inst'], model_args['n_density']):
 assert not cond_inst or n_programs == model_args['n_programs'], \
     f"cond_inst: set n_programs={model_args['n_programs']} (the model's instrument vocabulary)"
 
+if fake_quant:
+    from musicar.model.quant import fake_quantize
+    assert eval_only, 'fake_quant is for evaluation only'
+    print(f"fake quantization {fake_quantize(model, fake_quant)}")
 if block_size < model.config.block_size:
     model.crop_block_size(block_size)
     model_args['block_size'] = block_size
@@ -345,12 +369,21 @@ def prepare(X, Y, cond_drop_p):
     replaced by 'none' with probability cond_drop_p per window."""
     streams = to_device(X[0])
     extra = {k: encoder.encode(v, tokens=raw_model.config.text_prefix > 0) if k == 'text'
-             else v.to(device, non_blocking=True) for k, v in X[1].items() if not k.startswith('sec_')}
+             else v.to(device, non_blocking=True) for k, v in X[1].items()
+             if not k.startswith('sec_') and not k.startswith('cf_')}
     if 'sec_text' in X[1]:  # B lists of section_events captions -> (B, E, L, text_dim) token states
         caps = X[1]['sec_text']
         states = encoder.encode([c for row in caps for c in row], tokens=True, max_length=section_max_length)
         extra['sections'] = (states.view(len(caps), len(caps[0]), *states.shape[1:]),
                              X[1]['sec_pos'].to(device, non_blocking=True))
+    if 'cf_text' in X[1]:  # counterfactual rows: change / splice rows first, a fixed number
+        start = X[1]['cf_start']
+        rows = torch.argsort((start < 0).int(), stable=True)[:section_cf_rows]
+        states = extra['sections'][0][rows.to(device)].clone()
+        prev = encoder.encode([X[1]['cf_text'][i] for i in rows.tolist()], tokens=True, max_length=section_max_length)
+        states[torch.arange(len(rows), device=device), X[1]['cf_event'][rows].to(device)] = prev
+        extra['cf'] = dict(rows=rows.to(device), states=states, start=start[rows].to(device), notes=section_cf_notes,
+                           eta=section_cf_eta, weight=section_cf_weight, cls_weight=section_cls_weight)
     if cond_inst or n_density:
         extra['cond'] = window_conditions(streams[0], streams[3], extra.get('program'), n_programs, n_density,
                                           drop_p=cond_drop_p)
@@ -530,7 +563,8 @@ for iter_num in pbar:
             extra[f'text_{mode}'] = val_loss(loader)
         if text_loaders:  # CE(other file's caption) - CE(own caption); and CE(no caption) - CE(own caption)
             for name, mode in (('text_gain', 'shuffled'), ('text_gain_none', 'none'), ('sec_gain', 'sec_shuffled'),
-                               ('sec_gain_none', 'sec_none'), ('text_gain_all', 'all_none')):
+                               ('sec_gain_none', 'sec_none'), ('sec_gain_prev', 'sec_previous'),
+                               ('text_gain_all', 'all_none')):
                 if f'text_{mode}' in extra:
                     val[name] = extra[f'text_{mode}']['ce/total'] - val['ce/total']
                     if 'ce/late_total' in val:
@@ -549,10 +583,14 @@ for iter_num in pbar:
                       if 'text_gain' in val else "")
                    + (f" | late {val['text_gain_late']:+.4f} / none {val['text_gain_none_late']:+.4f}"
                       if 'text_gain_late' in val else "")
-                   + (f" | section gain {val['sec_gain']:+.4f} / none {val['sec_gain_none']:+.4f}, late "
+                   + (f" | section gain {val['sec_gain']:+.4f} / none {val['sec_gain_none']:+.4f} / prev "
+                      f"{val['sec_gain_prev']:+.4f}, late "
                       f"{val['sec_gain_late']:+.4f} / {val['sec_gain_none_late']:+.4f} | all text late "
                       f"{val['text_gain_all_late']:+.4f}" if 'sec_gain' in val else "")
-                   + "".join(f" | {name} CE {e['ce/total']:.3f}" for name, e in extra.items()))
+                   + "".join(f" | {name} CE {e['ce/total']:.3f}" for name, e in extra.items())
+                   + (f" | cf margin {train['ce/cf_margin']:+.4f} hinge {train['ce/cf_hinge']:.4f} used "
+                      f"{train['ce/cf_used']:.2f}" if 'ce/cf_margin' in train else "")
+                   + (f" | cls acc {train['ce/cls_acc']:.3f}" if 'ce/cls_acc' in train else ""))
         if wandb_log:
             wandb.log({"iter": iter_num, "lr": lr,
                        **{f"val/{k}": v for k, v in val.items()},

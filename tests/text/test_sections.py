@@ -145,18 +145,20 @@ def greedy_sections(m, text, secs, n_new, slide):
     the section captions laid out like NoteWindowDataset._sections: the one in force at the window start, then those
     arriving inside it."""
     L, S, lead = m.config.block_size, m.config.section_len, m.config.section_lead
+    R = m.config.section_repeat or S
     B = text.size(0)
     out = [torch.full((B, 1), 128)] + [torch.zeros(B, 1, dtype=torch.long)] * 3
     prog = torch.zeros(B, 1, dtype=torch.long)
     vecs = m.section_vectors(secs)
     at = [max(0, k * S - lead) for k in range(len(secs))]
+    arrive = [(p + j * R, k) for k, p in enumerate(at) for j in range(-(-S // R))
+              if j == 0 or k + 1 >= len(at) or p + j * R < at[k + 1]]
     a = 0
     for _ in range(n_new):
         n = out[0].size(1)
         if n - a > L:
             a = n - (L - slide)
-        events = [(0, max(k for k, p in enumerate(at) if p <= a))] + [(p - a, k) for k, p in enumerate(at)
-                                                                      if a < p <= n]
+        events = [(0, max((p, k) for p, k in arrive if p <= a)[1])] + [(p - a, k) for p, k in arrive if a < p <= n]
         sec = (torch.stack([vecs[k] for _, k in events], 1), torch.tensor([p for p, _ in events]).expand(B, -1))
         h = m.encode(*(o[:, a:n] for o in out), program=prog[:, a:n], text=text, sections=sec)[:, [-1]]
         picked = {}
@@ -184,14 +186,14 @@ def test_refills_match_training_layout():
     secs = torch.randn(n_new // 8 + 2, B, 5, D)
     start = [torch.full((B, 1), 128)] + [torch.zeros(B, 1, dtype=torch.long)] * 3
     for mode in ('prefix', 'xattn'):
-        for lead in (0, 4):
-            m = section_model(mode, section_lead=lead)
+        for lead, repeat in ((0, 0), (4, 0), (0, 3), (4, 3)):
+            m = section_model(mode, section_lead=lead, section_repeat=repeat)
             for slide in (8, 12):
                 got = generate(m, *start, max_new_tokens=n_new, top_k=1, text=text, sections=secs, slide=slide,
                                program=None, cuda_graph=False)
                 with torch.no_grad():
                     want = greedy_sections(m, text, secs, n_new, slide)
-                assert all(torch.equal(g, w) for g, w in zip(got, want)), (mode, lead, slide)
+                assert all(torch.equal(g, w) for g, w in zip(got, want)), (mode, lead, repeat, slide)
 
 
 def test_guidance_negatives():
@@ -207,6 +209,26 @@ def test_guidance_negatives():
     prev = torch.cat([secs[:2], torch.zeros(4, 5, D)])  # contrast only the first two sections
     other = generate(m, *start, text=text, sections=secs, cfg_scale=3.0, text_neg=text, sections_neg=prev, **kw)
     assert not all(torch.equal(a, b) for a, b in zip(plain, other))
+
+
+def test_double_guidance_and_boost():
+    """cfg_section: equal scales = ordinary guidance, both 1 = no guidance; cfg_boost changes only notes near a
+    section start."""
+    start = [torch.full((2, 1), 128)] + [torch.zeros(2, 1, dtype=torch.long)] * 3
+    kw = dict(max_new_tokens=40, top_k=1, program=None, cuda_graph=False)
+    m = section_model('prefix')
+    text, secs = torch.randn(5, D), torch.randn(6, 5, D)
+    same = lambda a, b: all(torch.equal(x, y) for x, y in zip(a, b))  # noqa: E731
+    plain = generate(m, *start, text=text, sections=secs, **kw)
+    guided = generate(m, *start, text=text, sections=secs, cfg_scale=2.0, **kw)
+    assert same(generate(m, *start, text=text, sections=secs, cfg_scale=2.0, cfg_section=2.0, **kw), guided)
+    assert same(generate(m, *start, text=text, sections=secs, cfg_scale=1.0, cfg_section=1.0, **kw), plain)
+    double = generate(m, *start, text=text, sections=secs, cfg_scale=1.0, cfg_section=4.0, **kw)
+    assert not same(double, plain)
+    boost = generate(m, *start, text=text, sections=secs, cfg_scale=2.0, cfg_boost=3.0, cfg_boost_notes=2, **kw)
+    assert not same(boost, guided)
+    assert torch.equal(boost[0][:, :1], guided[0][:, :1])  # the prompt (BOS)
+    assert same(generate(m, *start, text=text, sections=secs, cfg_scale=2.0, cfg_boost=0.0, **kw), guided)
 
 
 def test_section_caption_from_notes():
@@ -330,7 +352,7 @@ def test_dataset_change_windows():
             x, _ = ds[0]
             random.seed(seed)
             random.random()  # the change_frac draw
-            file_idx, v = ds._change_window(None)
+            file_idx, v, _ = ds._change_window(None)
             assert file_idx == 1 and 48 - 28 <= v <= 48 - 12  # boundary at window index lead + 4 .. 32 - 4
             assert 40 - v in x[-1].tolist()  # its caption arrives inside the window, 8 rows early
         np.save(store / 'section_changes_16_1.npy', np.zeros(36, np.int8))  # the cache is read, not recomputed
@@ -359,6 +381,100 @@ def test_dataset_section_style():
         c = change._section_caption(1, 3).lower()
         assert any(w in c for w in ('loud', 'powerful', 'гучн', 'потужн')), c
         assert any(w in c for w in ('high register', 'high-pitched', 'bright', 'регістр')), c
+
+
+def test_dataset_previous_and_repeat():
+    with tempfile.TemporaryDirectory() as d:
+        root = make_store(Path(d), notes=80)
+        kw = dict(root_dir=d, block_size=32, special_tokens=True, programs=True, captions=str(root / 'labels'),
+                  cache_dir=str(root / 'cache'), section_len=16, eval_stride=32, section_style='change')
+        src = f"store:{root / 'cache' / 'toy'}"
+        true = NoteWindowDataset(src, split='train', **kw)
+        prev = NoteWindowDataset(src, split='train', section_caption_mode='previous', **kw)
+        # file 0, window at row 32: sections 2, 3, 4 -> previous gives the captions of 1, 2, 3
+        assert prev[1][0][-2][1:3] == true[1][0][-2][:2] and prev[1][0][-2][0] == true[0][0][-2][1]
+        rep = NoteWindowDataset(src, split='train', section_repeat=6, **kw)
+        assert rep.section_events == 1 + 3 * 3
+        caps, pos = rep[1][0][-2:]  # sections 2 (rows 32, 38, 44), 3 (48, 54, 60), 4 (64)
+        assert pos.tolist() == [0, 6, 12, 16, 22, 28, 32, 33, 33, 33]
+        assert caps[:3] == [true[1][0][-2][0]] * 3 and caps[3:6] == [true[1][0][-2][1]] * 3
+        assert caps[6] == true[1][0][-2][2] and caps[7:] == [''] * 3
+
+
+def test_dataset_splice_and_counterfactual():
+    with tempfile.TemporaryDirectory() as d:
+        root = make_store(Path(d), n_files=6, notes=80)
+        kw = dict(root_dir=d, block_size=32, special_tokens=True, programs=True, captions=str(root / 'labels'),
+                  cache_dir=str(root / 'cache'), section_len=16, augment=False, section_dropout=0.0,
+                  section_style='change', caption_dropout=0.0)
+        src = f"store:{root / 'cache' / 'toy'}"
+        ds = NoteWindowDataset(src, split='train', splice_frac=1.0, counterfactual=True, **kw)
+        plain = NoteWindowDataset(src, split='train', **kw)
+        n_cf = 0
+        calls, own = [], ds._section_caption
+
+        def record(f, k, prev_notes=None):
+            # (file, section, the first file's section whose notes come before it in a splice)
+            match = [j for j in range(5) if prev_notes is not None and
+                     np.array_equal(prev_notes[0], plain._section_notes(f1, j)[0])] if prev_notes is not None else []
+            calls.append((f, k, match[0] if match else None))
+            return own(f, k, prev_notes)
+        ds._section_caption = record
+        for seed in range(30):
+            random.seed(seed)
+            random.random()
+            f1 = ds._splice_window(None)[0]
+            calls.clear()
+            random.seed(seed)
+            x, y = ds[0]
+            random.seed(seed)
+            random.random()  # the splice_frac draw
+            f1, v1, b, f2, v2 = ds._splice_window(None)
+            assert f1 != f2 and (v1 + b) % 16 == 0 and (v2 + b) % 16 == 0 and 4 <= b <= 28
+            r1, _ = plain._read(f1, v1)
+            r2, _ = plain._read(f2, v2)
+            assert torch.equal(x[0], torch.cat([r1[:b], r2[b:]])[:-1, 0]), seed
+            assert torch.equal(y[0], torch.cat([r1[:b], r2[b:]])[1:, 0]), seed
+            caps, pos, cf_text, cf_event, cf_start = x[-5:]
+            assert x[-6] == '', 'no file caption in a spliced window'
+            assert b in pos.tolist()
+            e = pos.tolist().index(b)
+            k1, k2 = (v1 + b) // 16, (v2 + b) // 16
+            assert (f2, k2, k1 - 1) in calls, 'the first spliced section: change-aware against the notes before b'
+            assert all(k < k1 for f, k, _ in calls if f == f1 and _ is None), 'no first-file section after b'
+            if int(cf_start) >= 0:
+                n_cf += 1
+                assert int(cf_start) == b and int(cf_event) == e and cf_text and cf_text != caps[e]
+        assert n_cf >= 20
+        (streams, extra), _ = collate_windows([ds[i] for i in range(3)], extra_names=(
+            'program', 'text', 'sec_text', 'sec_pos', 'cf_text', 'cf_event', 'cf_start'))
+        assert extra['cf_start'].shape == (3,) and len(extra['cf_text']) == 3
+
+
+def test_counterfactual_loss():
+    m = section_model('prefix')
+    m.add_section_cls()
+    B, T, E, L = 3, 24, 4, 5
+    streams, program, tgt = batch(B, T)
+    torch.manual_seed(2)
+    text = torch.randn(B, L, D)
+    states = torch.randn(B, E, L, D)
+    pos = torch.tensor([[0, 8, 16, 25]] * B)
+    sections = (states, pos)
+    base_parts, base = m(*streams, program=program, targets=tgt, text=text, sections=sections)
+    rows = torch.tensor([0, 2])
+    cf = dict(rows=rows, states=states[rows].clone(), start=torch.tensor([8, -1]), notes=6, eta=0.05, weight=1.0,
+              cls_weight=0.5)
+    parts, loss = m(*streams, program=program, targets=tgt, text=text, sections=sections, cf=cf)
+    # identical captions: margin 0, hinge = eta, used = 1 of 2 rows
+    assert abs(float(parts['cf_margin'])) < 1e-5 and abs(float(parts['cf_hinge']) - 0.05) < 1e-5
+    assert float(parts['cf_used']) == 0.5 and float(parts['cls_acc']) == 0.5  # same states: same logit for both
+    cf['states'][0, 1] = torch.randn(L, D)  # the changed section (event 1, before note 8) gets another caption
+    parts, loss = m(*streams, program=program, targets=tgt, text=text, sections=sections, cf=cf)
+    assert abs(float(parts['cf_margin'])) > 1e-6
+    loss.backward()
+    assert m.transformer['section_prefix'].gate.grad.abs().sum() > 0 and m.aux_section_cls.weight.grad.abs().sum() > 0
+    assert torch.allclose(base, loss - 1.0 * parts['cf_hinge'] - 0.5 * parts['cls_bce'], atol=1e-5)
 
 
 def test_merge_model_args_adds_sections():

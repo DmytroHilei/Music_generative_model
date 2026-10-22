@@ -10,12 +10,13 @@ from torch.nn import functional as F
 ARCH_KEYS = ('n_layer', 'n_head', 'n_embd', 'block_size', 'bias', 'pitch_size', 'velocity_size', 'duration_size',
              'delta_time_size', 'n_styles', 'n_programs', 'pos_emb', 'rope_base', 'norm', 'mlp', 'qk_norm', 'cond_inst',
              'n_density', 'text_dim', 'text_center', 'text_prefix', 'section_len', 'section_lead', 'section_slots',
-             'section_mode', 'section_xattn_every')
+             'section_mode', 'section_xattn_every', 'section_repeat')
 # what checkpoints that predate a key actually used
 LEGACY_DEFAULTS = {'n_styles': 0, 'n_programs': 0, 'pos_emb': 'learned', 'rope_base': 10000.0, 'norm': 'layernorm',
                    'mlp': 'gelu', 'qk_norm': False, 'cond_inst': False, 'n_density': 0,
                    'text_dim': 0, 'text_center': False, 'text_prefix': 0, 'section_len': 0, 'section_lead': 0,
-                   'section_slots': 4, 'section_mode': 'prefix', 'section_xattn_every': 2}
+                   'section_slots': 4, 'section_mode': 'prefix', 'section_xattn_every': 2,
+                   'section_repeat': 0}
 
 
 def resolve_checkpoint(path):
@@ -81,6 +82,8 @@ def merge_model_args(saved, wanted, finetune, block_size):
             args[k] = wanted[k]  # add the T2 prefix adapter
         if add_sections and k.startswith('section_'):
             args[k] = wanted.get(k, args[k])  # add section captions (fresh adapter; 'xattn' starts as the old model)
+        if finetune and k == 'section_repeat' and wanted.get(k):
+            args[k] = wanted[k]  # repeat the section caption (no new parameters, only more inserted vectors)
         if finetune and k == 'pos_emb' and wanted[k] == 'rope':
             args[k] = 'rope'  # switch to RoPE: the position table is dropped (not function-preserving)
     if finetune and args['pos_emb'] == 'rope':
@@ -90,14 +93,19 @@ def merge_model_args(saved, wanted, finetune, block_size):
     return args
 
 
-def load_model(path, device='cpu', dtype=torch.float32):
+def load_model(path, device='cpu', dtype=torch.float32, quant=None):
     """A trained GPT for inference from a checkpoint file or run dir (resolve_checkpoint): dropout 0, eval mode, on
-    `device` in `dtype`. Keys a checkpoint predates take MusicConfig's defaults. Returns (model, iter_num or None)."""
+    `device` in `dtype`. Keys a checkpoint predates take MusicConfig's defaults. quant: a musicar.model.quant spec
+    (e.g. 'w4g32-a8-kv8'), applied in float32 before the cast to `dtype`. Returns (model, iter_num or None)."""
     from musicar.model.gpt import GPT, MusicConfig
     ck = torch.load(resolve_checkpoint(path), map_location='cpu')
     fields = MusicConfig.__dataclass_fields__
     model = GPT(MusicConfig(**{k: v for k, v in ck['model_args'].items() if k in fields}, dropout=0.0))
-    model.load_state_dict(strip_compile_prefix(ck['model']))
+    state = strip_compile_prefix(ck['model'])
+    model.load_state_dict({k: v for k, v in state.items() if not k.startswith('aux_')})  # training-only heads
+    if quant:
+        from musicar.model.quant import fake_quantize
+        print(f'fake quantization {fake_quantize(model, quant)}')
     return model.eval().to(device=device, dtype=dtype), ck.get('iter_num')
 
 

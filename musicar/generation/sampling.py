@@ -41,7 +41,8 @@ def generate(model, pitch, velocity, duration, delta_time, max_new_tokens, tempe
              anchor=0, slide=None, progress=None, dt_bias=0.0, target_nps=None, dt_seconds=0.02,
              cuda_graph=True, style=None, min_new=0, program=0, top_p=None, cfg_scale=1.0,
              eos_t1=False, programs=None, allowed_programs=None, return_programs=False, program_temperature=None,
-             cond=None, text=None, sections=None, text_neg=None, sections_neg=None):
+             cond=None, text=None, sections=None, text_neg=None, sections_neg=None, cfg_section=None,
+             cfg_boost=0.0, cfg_boost_notes=32):
     """
     Batched sampling (B rows, same prompt length) with a preallocated KV cache: each new note costs one position
     through the model, not a full re-run. On CUDA the one-note transformer step is captured once as a CUDA graph
@@ -81,6 +82,12 @@ def generate(model, pitch, velocity, duration, delta_time, max_new_tokens, tempe
       sections, same number of sections; all-zero entries = null): e.g. the file caption in both halves so only the
       section captions are guided, or the previous section caption after a switch (contrastive guidance: the new
       caption against the old one instead of against none).
+    cfg_section (section_len models, with text and sections): separate scales for the file and the section captions
+      (InstructPix2Pix-style double guidance). The batch runs three times: file + section captions (c), file caption +
+      null sections (f; sections_neg instead of null when given), no captions (u; text_neg instead of none when
+      given), and every head samples from u + cfg_scale * (f - u) + cfg_section * (c - f).
+    cfg_boost: a guidance schedule (YuE: higher at a section start): the section scale (cfg_section, else cfg_scale)
+      is raised by cfg_boost at each section's first note, falling linearly to its base over cfg_boost_notes notes.
     eos_t1: EOS keeps its probability at temperature 1 (and outside top-k/top-p); the other pitches use the
       tempered distribution, rescaled to the remaining mass. Lower temperatures otherwise starve the rare EOS.
     Special tokens (pitch vocab 130): BOS is never sampled; EOS (end of piece) not before min_new notes. Rows keep
@@ -92,12 +99,16 @@ def generate(model, pitch, velocity, duration, delta_time, max_new_tokens, tempe
     assert 0 <= anchor and anchor + slide < L, "need anchor + slide < block_size"
     device = pitch.device
     Bo = pitch.size(0)  # rows asked for; with guidance the model runs 2 * Bo (conditional, then unconditional)
-    guided = cfg_scale != 1.0 and (style is not None or text is not None or sections is not None)
+    double = cfg_section is not None
+    assert not double or (text is not None and model.config.section_len), 'cfg_section needs text and sections'
+    guided = double or ((cfg_scale != 1.0 or cfg_boost) and
+                        (style is not None or text is not None or sections is not None))
+    n_br = 3 if double else 2 if guided else 1  # batch copies: conditional, (file only,) unconditional
     assert not (guided and target_nps is not None), "guidance with a density target isn't supported"
     if programs is not None:  # prompt drum notes as in training: duration 0 (MIDI-tokenized prompts keep theirs)
         duration = torch.where(programs == DRUM_PROGRAM, 0, duration)
     if guided:
-        pitch, velocity, duration, delta_time = (torch.cat([t, t]) for t in (pitch, velocity, duration, delta_time))
+        pitch, velocity, duration, delta_time = (t.repeat(n_br, 1) for t in (pitch, velocity, duration, delta_time))
     B, n0 = pitch.shape
     total = n0 + max_new_tokens
     # output buffers, filled in place (no growing torch.cat)
@@ -119,9 +130,9 @@ def generate(model, pitch, velocity, duration, delta_time, max_new_tokens, tempe
     if style is not None:
         style = torch.as_tensor(style, dtype=torch.long, device=device).reshape(-1).expand(Bo).contiguous()
         if guided:
-            style = torch.cat([style, torch.zeros_like(style)])
+            style = torch.cat([style] * (n_br - 1) + [torch.zeros_like(style)])
     if cond is not None and guided:
-        cond = tuple(torch.cat([c, c]) for c in cond)
+        cond = tuple(c.repeat(n_br, *[1] * (c.dim() - 1)) for c in cond)
     k_pre = model.config.text_prefix  # cache slots of the T2 prefix in front of the notes
     if text is not None:
         text = torch.as_tensor(text, dtype=torch.float32, device=device)
@@ -132,7 +143,7 @@ def generate(model, pitch, velocity, duration, delta_time, max_new_tokens, tempe
             if text_neg is not None:
                 neg = torch.as_tensor(text_neg, dtype=torch.float32, device=device)
                 neg = neg.reshape(-1, *text.shape[1:]).expand_as(text)
-            text = torch.cat([text, neg])
+            text = torch.cat([text] * (n_br - 1) + [neg])
     S = model.config.section_len
     sec_vecs = None
     if S:
@@ -148,17 +159,23 @@ def generate(model, pitch, velocity, duration, delta_time, max_new_tokens, tempe
                 neg = torch.as_tensor(sections_neg, dtype=torch.float32, device=device)
                 neg = neg.reshape(neg.size(0), -1, *neg.shape[-2:]).expand(-1, Bo, -1, -1)
                 assert neg.shape == sections.shape, (neg.shape, sections.shape)
-            sections = torch.cat([sections, neg], 1)
+            sections = torch.cat([sections, neg] + ([torch.zeros_like(neg)] if double else []), 1)
         sec_vecs = model.section_vectors(sections)  # (n, B, slots, C)
         sec_at = lambda k: max(0, k * S - model.config.section_lead)  # noqa: E731
         sec_vec = lambda k: sec_vecs[min(k, sec_vecs.size(0) - 1)]  # noqa: E731
+        R = model.config.section_repeat or S
+        n_sec = total // S + 2
+        # (note index, section) of every caption arrival: each section's first, then every R notes until the next
+        # section's (section_repeat), as the loader lays them out
+        sec_arrive = sorted((sec_at(k) + j * R, k) for k in range(n_sec) for j in range(-(-S // R))
+                            if j == 0 or k + 1 >= n_sec or sec_at(k) + j * R < sec_at(k + 1))
         sec_starts = {}  # note index -> section whose caption comes before it
-        for k in range(total // S + 2):
-            sec_starts[sec_at(k)] = k  # k * S - lead clamps to 0 for the first sections: the latest wins
+        for p, k in sec_arrive:
+            sec_starts[p] = k  # k * S - lead clamps to 0 for the first sections: the latest wins
 
         def sec_now(n):
             """The section whose caption is in force for predicting note n."""
-            return max(k for k in range(total // S + 2) if sec_at(k) <= n)
+            return max((p, k) for p, k in sec_arrive if p <= n)[1]
     prefix_sec = S and model.config.section_mode == 'prefix'
     n_prog = model.config.n_programs
     sample_programs = bool(n_prog) and program is None
@@ -168,7 +185,7 @@ def generate(model, pitch, velocity, duration, delta_time, max_new_tokens, tempe
     if n_prog:  # the instrument of every note, like the 4 note streams
         prog_out = torch.zeros(B, total, dtype=torch.long, device=device)
         if programs is not None:
-            prog_out[:, :n0] = torch.cat([programs, programs]) if guided else programs
+            prog_out[:, :n0] = programs.repeat(n_br, 1)
         elif fixed_program is not None:
             prog_out[:, :n0] = fixed_program
     prog_mask = None
@@ -177,6 +194,15 @@ def generate(model, pitch, velocity, duration, delta_time, max_new_tokens, tempe
         prog_mask[torch.as_tensor(list(allowed_programs), device=device)] = 0.0
 
     note_program = [None]  # the instrument just sampled for the note being decided (the cascade samples it first)
+    base_scale = cfg_section if double else cfg_scale
+    scale = [base_scale]  # the section (or only) guidance scale for the note being decided (cfg_boost schedule)
+
+    def set_scale(n):
+        """The guidance scale for predicting note n: + cfg_boost at a section's first note, linearly back to the
+        base over cfg_boost_notes notes."""
+        if cfg_boost and S:
+            since = n - sec_at(sec_now(n))
+            scale[0] = base_scale + cfg_boost * max(0.0, 1.0 - since / cfg_boost_notes)
 
     def sample(logits, name=None):  # (B, 1, vocab) → (B, 1)
         if name == 'program' and not sample_programs:
@@ -185,8 +211,11 @@ def generate(model, pitch, velocity, duration, delta_time, max_new_tokens, tempe
         logits = logits[:, -1, :].float()
         if name == 'program' and prog_mask is not None:
             logits = logits + prog_mask
-        if guided:
-            logits = logits[Bo:] + cfg_scale * (logits[:Bo] - logits[Bo:])
+        if double:
+            c, f, u = logits.split(Bo)
+            logits = u + cfg_scale * (f - u) + scale[0] * (c - f)
+        elif guided:
+            logits = logits[Bo:] + scale[0] * (logits[:Bo] - logits[Bo:])
         p_eos = None
         if name == 'pitch' and specials and eos_t1 and step_i[0] >= min_new:
             p_eos = F.softmax(logits, dim=-1)[:, [EOS_PITCH]]  # the model's own chance of ending here
@@ -210,7 +239,7 @@ def generate(model, pitch, velocity, duration, delta_time, max_new_tokens, tempe
             probs = probs / probs.sum(-1, keepdim=True).clamp(min=1e-12) * (1 - p_eos)
             probs[:, EOS_PITCH] = p_eos.squeeze(-1)
         nxt = torch.multinomial(probs, num_samples=1)
-        nxt = torch.cat([nxt, nxt]) if guided else nxt
+        nxt = nxt.repeat(n_br, 1)
         if name == 'program':
             note_program[0] = nxt
         elif name == 'duration' and note_program[0] is not None:
@@ -225,7 +254,8 @@ def generate(model, pitch, velocity, duration, delta_time, max_new_tokens, tempe
     C = model.config.n_embd
     # a sequence that fits the context never refills the cache, so it only needs prompt + new slots (less memory,
     # and the one-note step attends over fewer slots)
-    sec_slots = model.config.section_slots * (2 + -(-L // S)) if prefix_sec else 0  # inserted section vectors
+    # inserted section vectors: the caption in force + the arrivals in the sections a window touches
+    sec_slots = model.config.section_slots * (1 + (1 + -(-L // S)) * -(-S // R)) if prefix_sec else 0
     cache = KVCache(model.config.n_layer, B, model.config.n_head, min(L, total) + k_pre + sec_slots,
                     C // model.config.n_head, device, dtype)
     extra = [0]  # cache slots taken by inserted section vectors
@@ -247,8 +277,9 @@ def generate(model, pitch, velocity, duration, delta_time, max_new_tokens, tempe
         kw = dict(step=False) if k_pre else {}  # prefix + window: a prefill even for a 1-note window
         if S:  # the caption in force at the window start, then those arriving up to note n (incl. before note n)
             a = n - w
-            ks = [sec_now(a)] + [k for k in range(total // S + 2) if a < sec_at(k) <= n]
-            pos = torch.tensor([0] + [sec_at(k) - a for k in ks[1:]], device=device).expand(B, -1)
+            later = [(p, k) for p, k in sec_arrive if a < p <= n and sec_starts[p] == k]
+            ks = [sec_now(a)] + [k for _, k in later]
+            pos = torch.tensor([0] + [p - a for p, _ in later], device=device).expand(B, -1)
             kw['sections'] = (torch.stack([sec_vec(k) for k in ks], 1), pos)
             extra[0] = model.config.section_slots * len(ks) if prefix_sec else 0
         return model.encode(*window, style=style, program=prog, cache=cache, cond=cond, text=text,
@@ -295,6 +326,7 @@ def generate(model, pitch, velocity, duration, delta_time, max_new_tokens, tempe
 
     h, filled = prefill(n0)
     for i in range(max_new_tokens):
+        set_scale(n0 + i)
         nxt = model.cascade.sample(h, sample)
         new = [nxt[name] for name in STREAM_ORDER]
         n = n0 + i

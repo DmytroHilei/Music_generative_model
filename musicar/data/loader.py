@@ -144,6 +144,9 @@ class NoteWindowDataset(Dataset):
         section_style='plain',
         change_frac=0.0,
         change_min=2,
+        section_repeat=0,
+        counterfactual=False,
+        splice_frac=0.0,
     ):
         """
         csv_path:    one or more sources separated by ',': a CSV (paths inside relative to root_dir or absolute),
@@ -194,7 +197,10 @@ class NoteWindowDataset(Dataset):
                      then those arriving inside it, '' = unused or dropped) and their positions (a (section_events,)
                      tensor of the window index each comes before; block_size + 1 = unused). section_dropout
                      (training): share of section captions replaced by ''. section_caption_mode (validation): 'true' /
-                     'shuffled' (another file's sections) / 'none', fixed per file like caption_mode.
+                     'shuffled' (another file's sections) / 'none' / 'previous' (section k gets the caption of
+                     section k - 1 of its own file, the first section its own), fixed per file like caption_mode.
+                     section_repeat: > 0: each section's caption also arrives again every section_repeat rows after its first
+                     arrival, up to the next section's (MusicConfig.section_repeat; the same string each time)
                      section_style: 'plain' = each section described on its own; 'change' = what changed vs the
                      section before is always named (musicar.text.captions.section_changed), e.g. the instrument that
                      entered or 'loud' after a soft section (the first section of a file stays plain)
@@ -204,6 +210,16 @@ class NoteWindowDataset(Dataset):
                      boundary at window index lead + margin .. block_size - margin (margin = min(64, block_size // 8)),
                      so the new section's caption arrives inside the window after notes of the old section. Before
                      boundary_frac, which applies to the rest
+        counterfactual: training only, with section_len: each window also returns (cf_text, cf_event, cf_start): the
+                     caption of the section before the changed one (change_frac / splice windows), the index of the
+                     changed section's event in its section captions, and the window index of that section's first
+                     note; ('', 0, -1) = none (other windows, a dropped caption, the same caption). For the
+                     counterfactual loss (GPT.forward cf): the new caption must beat the previous one on its first notes
+        splice_frac: training only, with section_len: this share of windows (drawn before change_frac) is spliced:
+                     notes of one file up to a section boundary (at window index lead + margin .. block_size - margin,
+                     as change windows), then a section of another long file of the same store from its own section
+                     boundary on, with that file's section captions (the first one, change-aware, against the notes
+                     before the splice) and no file caption: a caption that contradicts the context
         """
         sources = [s.strip() for s in str(csv_path).split(',') if s.strip()]
         self.csv_paths = [Path(s) for s in sources if not s.startswith('store:')]
@@ -265,8 +281,14 @@ class NoteWindowDataset(Dataset):
         assert 0 <= section_lead <= section_len
         # the caption in force at the window start + at most one per section_len rows inside it (+ the one before
         # the note after the window)
-        self.section_events = 2 + -(-block_size // section_len) if section_len else 0
+        self.section_repeat = section_repeat
+        assert 0 <= section_repeat <= section_len
+        # (with repeats: up to ceil(section_len / section_repeat) arrivals in each section the window touches)
+        self.section_events = 1 + (1 + -(-block_size // section_len)) * -(-section_len // (section_repeat or section_len)) \
+            if section_len else 0
         self.change_frac = change_frac if section_len and not eval_stride else 0.0
+        self.counterfactual = bool(counterfactual and section_len and not eval_stride)
+        self.splice_frac = splice_frac if section_len and not eval_stride else 0.0
 
         store_ids, starts, lengths, styles_kept, file_ids = [], [], [], [], []
         for i, store in enumerate(self.store_dirs):
@@ -364,7 +386,34 @@ class NoteWindowDataset(Dataset):
         T = self.block_size
         margin = min(64, T // 8)
         offset = random.randint(min(self.section_lead + margin, T - margin), T - margin)
-        return file_idx, min(max(row - offset, 0), int(self.lengths[file_idx]) - T - 1)
+        return file_idx, min(max(row - offset, 0), int(self.lengths[file_idx]) - T - 1), row
+
+    def _random_file(self, sid):
+        """A file of store sid (None = any) drawn per note like the training windows."""
+        if sid is None:
+            pos = random.randrange(int(self.cum_valid[-1]))
+        else:
+            lo, hi = self.store_file_range[sid]
+            base = int(self.cum_valid[lo - 1]) if lo > 0 else 0
+            pos = base + random.randrange(int(self.cum_valid[hi - 1]) - base)
+        return int(np.searchsorted(self.cum_valid, pos, side="right"))
+
+    def _splice_window(self, sid):
+        """(file, window start, boundary index b in the window, second file, its window start) of a spliced window
+        (see splice_frac): window rows < b from the first file, rows >= b from the second, both at section
+        boundaries (k * section_len), k >= 1. None after 20 failed draws (short files)."""
+        S, T = self.section_len, self.block_size
+        margin = min(64, T // 8)
+        for _ in range(20):
+            f1, f2 = self._random_file(sid), self._random_file(sid)
+            if f1 == f2 or self.short[f1] or self.short[f2]:
+                continue
+            b = random.randint(min(self.section_lead + margin, T - margin), T - margin)
+            ks = [[k for k in range(1, -(-int(self.lengths[f]) // S)) if 0 <= k * S - b <= int(self.lengths[f]) - T - 1]
+                  for f in (f1, f2)]
+            if ks[0] and ks[1]:
+                return f1, random.choice(ks[0]) * S - b, b, f2, random.choice(ks[1]) * S - b
+        return None
 
     # ------------------------------------------------------------------ storage
 
@@ -500,14 +549,21 @@ class NoteWindowDataset(Dataset):
         return torch.from_numpy(rows), None if programs is None else torch.from_numpy(programs)
 
     def __getitem__(self, idx):
+        change = None
         if self.eval_stride:
             file_idx, v = (int(x) for x in self.windows[idx])
         else:
             sid = None if self.source_weights is None else \
                 random.choices(range(len(self.source_weights)), weights=self.source_weights)[0]
-            change = self._change_window(sid) if self.change_frac and random.random() < self.change_frac else None
-            if change is not None:
-                file_idx, v = change
+            splice = self._splice_window(sid) if self.splice_frac and random.random() < self.splice_frac else None
+            change = None
+            if splice is None and self.change_frac and random.random() < self.change_frac:
+                change = self._change_window(sid)
+            if splice is not None:
+                file_idx, v = splice[:2]
+                change = splice
+            elif change is not None:
+                file_idx, v, _ = change
             elif sid is None:
                 pos = random.randrange(int(self.cum_valid[-1]))
             else:
@@ -525,7 +581,14 @@ class NoteWindowDataset(Dataset):
                 elif r < self.boundary_frac:
                     v = int(self.lengths[file_idx]) - self.block_size - 1  # ends with EOS
 
-        if self.pack_short and self.short[file_idx]:
+        splice = change if not self.eval_stride and change is not None and len(change) == 5 else None
+        if splice is not None:
+            rows, program = self._read(file_idx, v)
+            rows2, program2 = self._read(splice[3], splice[4])
+            b = splice[2]
+            rows = torch.cat([rows[:b], rows2[b:]])
+            program = None if program is None else torch.cat([program[:b], program2[b:]])
+        elif self.pack_short and self.short[file_idx]:
             rows, program = self._read_packed(file_idx)
         else:
             rows, program = self._read(file_idx, v)
@@ -566,10 +629,34 @@ class NoteWindowDataset(Dataset):
                 style = 0
             x = x + (torch.tensor(style),)
         if self.with_captions:
-            x = x + (self._caption(file_idx),)
+            x = x + ('' if splice is not None else self._caption(file_idx),)
         if self.section_len:
-            x = x + self._sections(file_idx, v)
+            caps, pos, events = self._sections(file_idx, v, splice)
+            x = x + (caps, pos)
+            if self.counterfactual:
+                x = x + self._counterfactual(file_idx, v, change, caps, events)
         return x, y
+
+    def _counterfactual(self, file_idx, v, change, caps, events):
+        """(cf_text, cf_event, cf_start) of a window (see counterfactual): the caption of the section before the
+        changed one, the changed section's event index and the window index of its first note."""
+        none = ('', torch.tensor(0), torch.tensor(-1))
+        if change is None:
+            return none
+        S = self.section_len
+        if len(change) == 5:  # splice: the second file's section at the boundary b
+            b, f2, v2 = change[2:]
+            k, start, key = (v + b) // S, b, ((v2 + b) // S, f2)
+        else:
+            k = change[2] // S
+            start, key = k * S - v, (k, file_idx)
+        e = next((i for i, (_, kk, f) in enumerate(events) if (kk, f) == key), None)
+        if not e or not 0 < start < self.block_size or not caps[e]:
+            return none
+        cf = self._section_caption(file_idx, k - 1)
+        if not cf or cf == caps[e]:
+            return none
+        return cf, torch.tensor(e), torch.tensor(start)
 
     def _caption(self, file_idx):
         """The caption string of a window of file_idx (see captions / caption_mode in __init__)."""
@@ -584,23 +671,47 @@ class NoteWindowDataset(Dataset):
             return ''
         return self.captioners[int(self.store_ids[file_idx])].caption(int(self.file_ids[file_idx]))
 
-    def _sections(self, file_idx, v):
-        """(captions, positions) of the sections of the window at virtual row v of file_idx (see section_len)."""
-        S, T = self.section_len, self.block_size
-        at = [max(0, k * S - self.section_lead) for k in range(-(-int(self.lengths[file_idx]) // S))]
+    def _sections(self, file_idx, v, splice=None):
+        """(captions, positions, events) of the sections of the window at virtual row v of file_idx (see
+        section_len); events = (window index, section, file) of each caption. A spliced window (splice = the
+        _splice_window tuple): the first file's sections before the boundary b, then the second file's from its
+        section at the boundary on (the first of them change-aware against the first file's section before b)."""
+        S, T, lead = self.section_len, self.block_size, self.section_lead
+        R = self.section_repeat or S
+        at = [max(0, k * S - lead) for k in range(-(-int(self.lengths[file_idx]) // S))]
         now = max(k for k, p in enumerate(at) if p <= v)
-        events = [(0, now)] + [(p - v, k) for k, p in enumerate(at) if v < p <= v + T]
-        caps = [self._section_caption(file_idx, k) for _, k in events]
+        # arrivals: every section's first one, then every R rows until the next section's caption
+        arrive = [(p + j * R, k) for k, p in enumerate(at) for j in range(-(-S // R))
+                  if j == 0 or k + 1 >= len(at) or p + j * R < at[k + 1]]
+        events = [(0, now, file_idx)] + [(p - v, k, file_idx) for p, k in arrive if v < p <= v + T]
+        prev_notes = {}
+        if splice is not None:
+            b, f2, v2 = splice[2:]
+            k1, k2 = (v + b) // S, (v2 + b) // S  # the sections that start at the boundary
+            events = [e for e in events if e[1] < k1]
+            n2 = -(-int(self.lengths[f2]) // S)
+            events += [(b + m * S - lead + j * R, k2 + m, f2) for m in range(n2 - k2) for j in range(-(-S // R))
+                       if 0 < b + m * S - lead + j * R <= T]
+            prev_notes[(f2, k2)] = self._section_notes(file_idx, k1 - 1)
+        drawn = {}  # one caption per section, repeated as is (one dropout draw per section)
+        for _, k, f in events:
+            if (f, k) not in drawn:
+                drawn[(f, k)] = self._section_caption(f, k, prev_notes.get((f, k)))
+        caps = [drawn[(f, k)] for _, k, f in events]
         pad = self.section_events - len(events)
         assert pad >= 0, (len(events), self.section_events)
-        return caps + [''] * pad, torch.tensor([p for p, _ in events] + [T + 1] * pad)
+        return caps + [''] * pad, torch.tensor([p for p, _, _ in events] + [T + 1] * pad), events
 
-    def _section_caption(self, file_idx, k):
+    def _section_caption(self, file_idx, k, prev_notes=None):
+        """Caption of section k of file_idx; prev_notes: (tokens, programs) of the notes before it when they aren't
+        its own file's section k - 1 (a splice), for change-aware captions."""
         S = self.section_len
         rng = random
         if self.eval_stride:
             if self.section_caption_mode == 'none':
                 return ''
+            if self.section_caption_mode == 'previous':  # the caption that was in force before this section
+                k = max(k - 1, 0)
             if self.section_caption_mode == 'shuffled':  # the same fixed other file as caption_mode 'shuffled'
                 file_idx = (file_idx + self.n_files // 2) % self.n_files
                 k %= -(-int(self.lengths[file_idx]) // S)
@@ -609,8 +720,9 @@ class NoteWindowDataset(Dataset):
         elif self.augment and random.random() < self.section_dropout:
             return ''
         from musicar.text.captions import section_attributes, section_caption
-        prev = section_attributes(*self._section_notes(file_idx, k - 1)) if self.section_style == 'change' and k > 0 \
-            else None
+        prev = None
+        if self.section_style == 'change' and (k > 0 or prev_notes is not None):
+            prev = section_attributes(*(prev_notes if prev_notes is not None else self._section_notes(file_idx, k - 1)))
         return section_caption(*self._section_notes(file_idx, k), rng, uk_share=self.caption_uk, prev=prev)
 
     def _section_notes(self, file_idx, k):

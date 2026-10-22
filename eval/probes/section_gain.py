@@ -1,7 +1,8 @@
 """
 Where do section captions act? (context/claude/text_control.md, "Section captions"). Teacher-forced CE of held-out
-labeled windows with the model's own section captions vs another file's (shuffled) and vs none (null captions), the
-file caption kept in all three. Gain = CE(other) - CE(own) per predicted note, averaged per bucket of:
+labeled windows with the model's own section captions vs another file's (shuffled), vs none (null captions) and vs
+the previous section's caption of the same file (previous: what a section switch has to beat), the file caption kept
+in all four. Gain = CE(other) - CE(own) per predicted note, averaged per bucket of:
   - its position inside its section (rows k * section_len ..): a caption that arrives early (section_lead > 0)
     should already help in the last notes of the previous section (the model prepares the change), one that comes
     with the section only from its first note on;
@@ -37,7 +38,7 @@ from musicar.model.gpt import STREAM_ORDER  # noqa: E402
 from musicar.text.encoder import TextEncoder  # noqa: E402
 
 VAL_SOURCE = 'store:data/cache/gigamidi_heldout#labeled'
-MODES = ('true', 'shuffled', 'none')
+MODES = ('true', 'shuffled', 'none', 'previous')
 SINCE = [(0, 1), (1, 8), (8, 32), (32, 128), (128, 512), (512, 2048)]
 WINDOW = [(0, 8), (8, 32), (32, 128), (128, 512), (512, 1024)]
 CHANGE = [(0, 1), (1, 2), (2, 3), (3, 6)]
@@ -108,7 +109,7 @@ def probe(ck, encoder, args):
     labels = ROOT / (train_setting(ck, 'captions', '') or 'data/labels')  # the label tables the model trained with
     kw = dict(root_dir=str(ROOT), split='validation', block_size=args.block, eval_stride=args.block,
               special_tokens=True, programs=True, pad_short=True, captions=str(labels), caption_uk=0.3,
-              section_len=S, section_lead=cfg.section_lead, section_style=style)
+              section_len=S, section_lead=cfg.section_lead, section_style=style, section_repeat=cfg.section_repeat)
     sets = {m: NoteWindowDataset(VAL_SOURCE, section_caption_mode=m, **kw) for m in MODES}
     ds = sets['true']
     if args.at_changes:
@@ -159,7 +160,7 @@ def probe(ck, encoder, args):
                  'change_start': bucket_means(cat['true'], change, ctx & (pin < 32), CHANGE),
                  'change_first8': bucket_means(cat['true'], change, ctx & (pin < 8), CHANGE),
                  'change_rest': bucket_means(cat['true'], change, ctx & (pin >= 32), CHANGE)}
-    for other in ('shuffled', 'none'):
+    for other in ('shuffled', 'none', 'previous'):
         gain = cat[other] - cat['true']
         res[other] = {'all': float(gain[valid].mean()),
                       'in_section': bucket_means(gain, pin, valid, in_section(S)),
@@ -180,15 +181,17 @@ def summarize(results):
         lines += [f"## {name} ({r['section_mode']}, section {r['section_len']}, lead {r['section_lead']}, "
                   f"@{r['iter']}, {r['windows']} windows{' around changes' if r.get('at_changes') else ''}"
                   f"{', change-aware captions' if r.get('section_style') == 'change' else ''})", '',
-                  f"all positions: vs shuffled {r['shuffled']['all']:+.4f}, vs none {r['none']['all']:+.4f}", '']
+                  f"all positions: vs shuffled {r['shuffled']['all']:+.4f}, vs none {r['none']['all']:+.4f}"
+                  + (f", vs previous {r['previous']['all']:+.4f}" if 'previous' in r else ''), '']
         for table, title in (('in_section', 'position in section'), ('since_arrival', 'notes since the caption'),
                              ('window', 'window position'), ('change', 'change score of the section'),
                              ('change_start', 'change score, first 32 notes of the section')):
             if table not in r['shuffled']:
                 continue
-            lines += [f'| {title} | notes | vs shuffled | vs none |', '|---|---|---|---|']
-            for (b, cnt, gs), (_, _, gn) in zip(r['shuffled'][table], r['none'][table]):
-                lines.append(f'| {b} | {cnt:,} | {gs:+.4f} | {gn:+.4f} |')
+            prev = r['previous'][table] if 'previous' in r else [(b, c, float('nan')) for b, c, _ in r['none'][table]]
+            lines += [f'| {title} | notes | vs shuffled | vs none | vs previous |', '|---|---|---|---|---|']
+            for (b, cnt, gs), (_, _, gn), (_, _, gp) in zip(r['shuffled'][table], r['none'][table], prev):
+                lines.append(f'| {b} | {cnt:,} | {gs:+.4f} | {gn:+.4f} | {gp:+.4f} |')
             lines.append('')
         if 'ce' in r:
             lines += ['| CE (own captions, >= 128 notes of context) by change score | whole section | first 8 notes | first 32 | rest |',

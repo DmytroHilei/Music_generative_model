@@ -89,6 +89,8 @@ def main():
     ap.add_argument('--out-dir', default='samples/multi_450m')
     ap.add_argument('--no-mp3', action='store_true', help='write MIDI only (scoring runs)')
     ap.add_argument('--device', default='cuda')
+    ap.add_argument('--quant', default=None, help="fake quantization spec (musicar/model/quant.py, e.g. 'w4g32-a8-kv8'): "
+                    "weights rounded in float32, then the usual bf16 run")
     args = ap.parse_args()
 
     best = json.loads(Path(args.settings).read_text()) if Path(args.settings).exists() else {}
@@ -100,7 +102,8 @@ def main():
         groups = {s.strip(): (s.strip(), [dict(song, store=args.store, name=str(song['file'])) for song in sset[s.strip()]])
                   for s in args.styles.split(',')}
     dev = args.device
-    model, it = load_model(args.checkpoint, dev, torch.bfloat16 if dev == 'cuda' else torch.float32)
+    model, it = load_model(args.checkpoint, dev, torch.bfloat16 if dev == 'cuda' else torch.float32,
+                           quant=args.quant)
     cfg = model.config
     out = Path(args.out_dir)
     print(f"{args.checkpoint} @{it}: {', '.join(f'{g} {len(v[1])}' for g, v in groups.items())} songs, "

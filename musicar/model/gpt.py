@@ -76,6 +76,7 @@ class CausalSelfAttention(nn.Module):
         # QK-norm: RMSNorm over each head's q and k (before RoPE), keeps attention logits bounded at high LR
         self.q_norm = RMSNorm(config.n_embd // config.n_head) if config.qk_norm else None
         self.k_norm = RMSNorm(config.n_embd // config.n_head) if config.qk_norm else None
+        self.kv_bits = 0  # > 0: keys / values rounded as an int8 KV cache would hold them (musicar.model.quant)
 
     def forward(self, x, cache=None, layer=0, rope=None):
         """cache (inference only): a KVCache with preallocated k/v buffers. x is either a prefill from position 0
@@ -93,6 +94,9 @@ class CausalSelfAttention(nn.Module):
             q, k = self.q_norm(q), self.k_norm(k)
         if rope is not None:
             q, k = apply_rope(q, *rope), apply_rope(k, *rope)
+        if self.kv_bits:
+            from musicar.model.quant import quantize_symmetric
+            k, v = quantize_symmetric(k, self.kv_bits), quantize_symmetric(v, self.kv_bits)
         causal, mask = True, None
         if cache is not None and cache.chunk_start is not None:
             # a chunk appended at slots s..s+T-1 (inserted section vectors): attends to everything before + causal
@@ -228,6 +232,9 @@ class MusicConfig:
     section_slots: int = 4
     section_mode: str = 'prefix'
     section_xattn_every: int = 2
+    # section_repeat > 0: the caption of a section arrives again every section_repeat notes inside it (the same
+    # vectors, inserted again in 'prefix' mode), so it is never far back in the context; 0 = once per section
+    section_repeat: int = 0
 
 
 # order in which attributes of the next note are decided by CascadeHeads
@@ -638,8 +645,14 @@ class GPT(nn.Module):
             cache.chunk_start = None
         return self.transformer.ln_f(x[:, -1:])
 
+    def add_section_cls(self):
+        """Training-only section recognition head (forward cf): does a section's notes match its caption? A
+        linear map of the mean hidden state over the section's first notes; its keys start with 'aux_' (load_model
+        drops them)."""
+        self.aux_section_cls = nn.Linear(self.config.n_embd, 1)
+
     def forward(self, pitch, velocity, duration, delta_time, style=None, program=None, targets=None, cond=None,
-                text=None, sections=None, late_from=0):
+                text=None, sections=None, late_from=0, cf=None):
         """
         Returns (parts, loss). loss = sum of the per-head CEs with label smoothing (what we optimize),
         parts = dict name -> CE without label smoothing (detached, for honest logging / comparing runs).
@@ -651,6 +664,14 @@ class GPT(nn.Module):
         text: (B, text_dim) caption vectors for models with text_dim.
         sections: (token states (B, E, L, text_dim), pos (B, E)) of the window's section captions (see encode).
         late_from > 0: parts also has 'late_<head>' = the CE over positions >= late_from only (validation).
+        cf (training, sections): counterfactual loss with the previous section caption, a dict of
+          rows (R,) batch rows to compare (a fixed number, so the compiled shapes stay put), states (R, E, L,
+          text_dim) their section captions with the changed section's replaced by the one before it, start (R,)
+          window index of the changed section's first note (-1 = row not used), notes, eta, weight, cls_weight.
+          Loss += weight * mean over used rows of max(0, eta - (NLL_prev - NLL_true)), NLL = per-note CE summed over
+          the heads, averaged over the section's first `notes` notes; with cls_weight > 0 and add_section_cls() also
+          cls_weight * BCE of aux_section_cls on the mean hidden state of those notes (true caption 1, previous 0).
+          parts: cf_margin (mean NLL_prev - NLL_true), cf_hinge, cf_used, cls_bce, cls_acc.
         """
         if sections is not None:
             sections = (self.section_vectors(sections[0]), sections[1])
@@ -676,7 +697,51 @@ class GPT(nn.Module):
                     parts[f'late_{name}'] = F.cross_entropy(
                         logits[name][:, late_from:].reshape(-1, lg.size(-1)).float(), lt.reshape(-1),
                         ignore_index=-1, reduction='sum') / (lt != -1).sum().clamp(min=1)
+        if cf is not None:
+            loss = loss + self._counterfactual(cf, x, logits, tgt, parts, pitch, velocity, duration, delta_time,
+                                               style, program, cond, text, sections)
         return parts, loss
+
+    def _counterfactual(self, cf, x, logits, tgt, parts, pitch, velocity, duration, delta_time, style, program,
+                        cond, text, sections):
+        """The cf part of forward (see there); returns the loss term."""
+        r = cf['rows']
+        sub = lambda t: None if t is None else t[r]  # noqa: E731
+        cond_r = None if cond is None else tuple(sub(c) for c in cond)
+        x_cf = self.encode(pitch[r], velocity[r], duration[r], delta_time[r], style=sub(style), program=sub(program),
+                           cond=cond_r, text=sub(text), sections=(self.section_vectors(cf['states']), sections[1][r]))
+        tgt_r = {n: t[r] for n, t in tgt.items()}
+        logits_cf = self.cascade(x_cf, tgt_r)
+
+        def nll(lg):  # (R, T) per-note CE summed over the heads (masked targets 0)
+            return sum(F.cross_entropy(lg[n].float().transpose(1, 2), tgt_r[n], ignore_index=-1, reduction='none')
+                       for n in self.head_names)
+
+        nll_true = nll({n: v[r] for n, v in logits.items()})
+        T = x.size(1)
+        i = torch.arange(T, device=x.device)[None]
+        lo = cf['start'][:, None] - 1  # output position i predicts note i + 1
+        mask = (cf['start'][:, None] >= 0) & (i >= lo) & (i < lo + cf['notes']) & (tgt_r['pitch'] != -1)
+        n_mask = mask.sum(1)
+        used = n_mask > 0
+        n_used = used.sum().clamp(min=1)
+        margin = ((nll(logits_cf) - nll_true) * mask).sum(1) / n_mask.clamp(min=1)
+        hinge = (F.relu(cf['eta'] - margin) * used).sum() / n_used
+        parts['cf_margin'] = ((margin * used).sum() / n_used).detach()
+        parts['cf_hinge'] = hinge.detach()
+        parts['cf_used'] = used.float().mean().detach()
+        term = cf['weight'] * hinge
+        if cf.get('cls_weight') and hasattr(self, 'aux_section_cls'):
+            w = mask[..., None].to(x.dtype)
+            pooled = torch.cat([(x[r] * w).sum(1), (x_cf * w).sum(1)]) / n_mask.clamp(min=1).repeat(2)[:, None]
+            logit = self.aux_section_cls(pooled).squeeze(-1).float()
+            label = torch.cat([torch.ones_like(margin), torch.zeros_like(margin)])
+            keep = used.repeat(2).float()
+            bce = (F.binary_cross_entropy_with_logits(logit, label, reduction='none') * keep).sum() / (2 * n_used)
+            parts['cls_bce'] = bce.detach()
+            parts['cls_acc'] = (((logit > 0).float() == label).float() * keep).sum().detach() / (2 * n_used)
+            term = term + cf['cls_weight'] * bce
+        return term
 
     def crop_block_size(self, block_size):
         assert block_size <= self.config.block_size

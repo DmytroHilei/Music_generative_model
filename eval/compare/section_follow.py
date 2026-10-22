@@ -27,6 +27,9 @@ Variants (switch tests of text_control.md "Next: hypotheses and tests", section-
         --out results/section_follow/s1 --mp3
     python eval/compare/section_follow.py --checkpoints checkpoints/sec_A0 --prompts file   # the old wording
 
+  --cfg-boost B: guidance + B at every section's first note, back to --cfg over --cfg-boost-notes notes (YuE-style
+    schedule); --cfg-section S: separate scale for the section captions (3-pass guidance; --cfg = the file scale,
+    useful with --file-caption).
 Writes <out>/rows.csv (column 'prompts' = the set; missing in older files = 'file'), <out>/prompts.json (the texts),
 <out>/summary.md and MIDI (+ MP3) of the first --midi rows per prompt (<out>/<checkpoint>/cfg<s>/<part>_<name>_<i>.mid).
 Default <out>: results/section_follow/run_<prompts>.
@@ -100,6 +103,12 @@ def parse_args():
     p.add_argument('--contrast-sections', type=int, default=0, help='--contrast prev for this many sections (0 = all)')
     p.add_argument('--file-caption', default='', help='file caption of every row (section models), in both halves')
     p.add_argument('--slide', type=int, default=None, help="generate's slide (default block_size // 4)")
+    p.add_argument('--cfg-boost', type=float, default=0.0,
+                   help="section models: generate's cfg_boost (guidance + this at a section's first note, back to "
+                        "--cfg over --cfg-boost-notes notes)")
+    p.add_argument('--cfg-boost-notes', type=int, default=32)
+    p.add_argument('--cfg-section', type=float, default=None,
+                   help="section models: generate's cfg_section (separate section scale; --cfg = the file scale)")
     p.add_argument('--midi', type=int, default=1, help='MIDI files written per prompt and scale')
     p.add_argument('--mp3', action='store_true', help='also render the MIDI files to MP3 (fluidsynth)')
     p.add_argument('--soundfont', default=SOUNDFONT)
@@ -140,7 +149,10 @@ def settings(args):
     n = args.contrast_sections if contrast == 'prev' else 0
     return (f'switch at note {args.switch}, contrast {contrast}' + (f' for {n} section(s)' if n else '')
             + f", file caption {getattr(args, 'file_caption', '')!r}, slide "
-            + str(getattr(args, 'slide', None) or 'block_size // 4'))
+            + str(getattr(args, 'slide', None) or 'block_size // 4')
+            + (f", cfg boost +{args.cfg_boost:g} over {args.cfg_boost_notes} notes" if getattr(args, 'cfg_boost', 0)
+               else '')
+            + (f', section scale {args.cfg_section:g}' if getattr(args, 'cfg_section', None) is not None else ''))
 
 
 def agg(rows, metric, seg):
@@ -261,6 +273,10 @@ def main():
                 if file_cap is not None and cfg.section_len:
                     kw['text'] = kw['text_neg'] = file_cap.to(args.device)
                 if caps is not None and cfg.section_len:
+                    kw.update(cfg_boost=args.cfg_boost, cfg_boost_notes=args.cfg_boost_notes)
+                    if args.cfg_section is not None:
+                        kw['cfg_section'] = args.cfg_section
+                        kw.setdefault('text', torch.zeros_like(file_states[caps[0]]).to(args.device))
                     sched = schedule(cfg, caps[0], caps[1], args.switch, args.notes)
                     kw['sections'] = torch.stack([sec_states[c] for c in sched]).to(args.device)
                     if part == 'switch' and args.contrast == 'prev':

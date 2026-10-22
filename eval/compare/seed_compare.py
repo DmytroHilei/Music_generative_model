@@ -152,6 +152,8 @@ def main():
     ap.add_argument('--seeds', type=int, nargs='*', default=None, help='pool several sampling seeds per row')
     ap.add_argument('--batch-size', type=int, default=8)
     ap.add_argument('--device', choices=['cpu', 'cuda'], default='cuda')
+    ap.add_argument('--quant', default=None, help="fake quantization spec (musicar/model/quant.py, e.g. 'w4g32-a8-kv8'): "
+                    "weights rounded in float32, then the usual bf16 run")
     ap.add_argument('--threads', type=int, default=8)
     ap.add_argument('--out-dir', default=None, help='write MIDI + mp3 per song here')
     ap.add_argument('--out', default=None, help='also write the table here')
@@ -186,7 +188,7 @@ def main():
     ranking, records = [], []
     run = 0
     for path in args.checkpoints:
-        model, it = load_model(path, args.device)
+        model, it = load_model(path, args.device, quant=args.quant)
         cfg = model.config
         if args.device == 'cuda':
             model = model.to(torch.bfloat16)

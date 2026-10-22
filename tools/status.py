@@ -180,7 +180,7 @@ def active_train_logs():
 
 
 SKIP_SETTINGS = {'out_dir', 'wandb_run_name', 'lr_decay_iters', 'eval_interval'}
-SEC_LATE = re.compile(r'section gain [-+.\d]+ / none [-+.\d]+, late [-+.\d]+ / ([-+.\d]+)')
+SEC_LATE = re.compile(r'section gain [-+.\d]+ / none [-+.\d]+(?: / prev [-+.\d]+)?, late [-+.\d]+ / ([-+.\d]+)')
 
 
 def run_settings(path):
@@ -728,7 +728,7 @@ LONG_DRIVER = ROOT / 'tools/sweeps/section_long.py'
 LONG_HEADER = re.compile(rb'^===== chunk (\d{4}-\d\d-\d\d \d\d:\d\d): ([^\r\n]*)', re.M)
 LONG_EVAL = re.compile(rb'step \d+: train loss [^\r\n]*')
 EVAL_HEAD = re.compile(r'step (\d+): train loss ([\d.na]+), val loss [\d.]+ \| (\S+) CE ([\d.]+)')
-SEC_GAIN = re.compile(r'section gain ([-+.\d]+) / none ([-+.\d]+), late ([-+.\d]+) / ([-+.\d]+)')
+SEC_GAIN = re.compile(r'section gain ([-+.\d]+) / none ([-+.\d]+)(?: / prev [-+.\d]+)?, late ([-+.\d]+) / ([-+.\d]+)')
 LONG_STARTUP = 90  # seconds from a chunk's header to its training loop (data, LaBSE, model): before its first step
 _long_logs = {}  # log path -> what long_log_marks has read of it
 

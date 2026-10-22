@@ -138,6 +138,7 @@ def probe(args, state):
     row = {'iter': r['iter'], 'time': time.strftime('%Y-%m-%d %H:%M'),
            'gain_none': change_gain(r['none']['change_start']),
            'gain_shuffled': change_gain(r['shuffled']['change_start']),
+           'gain_prev': change_gain(r['previous']['change_start']) if 'previous' in r else float('nan'),
            'gain_none_nochange': change_gain(r['none']['change_start'], ('0-1',)),
            'excess': change_gain([(b, n, ce[b] - rest[b]) for b, n, _ in r['ce']['change_start']]),
            'all_none': r['none']['all']}
@@ -149,10 +150,11 @@ def write_table(state, args):
     lines = [f'# {args.name}: caption gain on the first 32 notes of sections after a change of >= 2 points', '',
              f'Probe: {args.windows} held-out windows around changes; gain in nats per note; excess = CE of those '
              'notes minus the rest of their section (what a caption could remove).', '',
-             '| weights @iter | probed | gain vs none | vs shuffled | no-change sections vs none | all notes vs none '
-             '| excess |', '|---|---|---|---|---|---|---|']
+             '| weights @iter | probed | gain vs none | vs shuffled | vs previous | no-change sections vs none '
+             '| all notes vs none | excess |', '|---|---|---|---|---|---|---|---|']
     for p in state['probes']:
         lines.append(f"| {p['iter']} | {p['time']} | {p['gain_none']:+.4f} | {p['gain_shuffled']:+.4f} | "
+                     f"{p.get('gain_prev', float('nan')):+.4f} | "
                      f"{p['gain_none_nochange']:+.4f} | {p['all_none']:+.4f} | {p['excess']:+.3f} |")
     if state['stopped']:
         lines += ['', f"**Stopped:** {state['stopped']}"]
