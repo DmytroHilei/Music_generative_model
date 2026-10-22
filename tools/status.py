@@ -1,7 +1,8 @@
 """
 Live dashboard of everything running in this project: training runs, song download, piano reduction, GPU, disk.
 
-    .venv/bin/python tools/status.py            # refreshes every 5 s, Ctrl+C to quit
+    .venv/bin/python tools/status.py            # full screen, refreshes every 5 s, Ctrl+C to quit; from 280 columns
+                                                # the data pipeline sits to the right of the runs
     .venv/bin/python tools/status.py --once     # print once
     .venv/bin/python tools/status.py --web 8765 # no terminal view: serve it as a web page (phone on the same network:
                                                 # http://<laptop ip>:8765/?t=<token>, the token is printed);
@@ -24,7 +25,10 @@ import time
 from collections import Counter
 from pathlib import Path
 
-from rich.console import Group
+from rich import box
+from rich.columns import Columns
+from rich.console import Console, Group
+from rich.layout import Layout
 from rich.live import Live
 from rich.panel import Panel
 from rich.progress_bar import ProgressBar
@@ -35,6 +39,9 @@ from musicar.jobstatus import read_jobs
 
 ROOT = Path(__file__).resolve().parent.parent
 LOGS = ROOT / 'logs'
+ZEBRA = ['', 'on grey15']  # every other row shaded: rows of several lines stay apart without a line between them
+SPARK = '▁▂▃▄▅▆▇█'
+WIDE = 280  # terminal columns from which the live view puts the data pipeline next to the runs (~140 each)
 
 # training runs in the order they execute: (label, log file, params)
 RUNS = [
@@ -121,6 +128,28 @@ STEP = re.compile(r'step (\d+): train loss ([\d.na]+), val loss [\d.]+ \| (\S+) 
                   r'\(pit ([\d.]+) vel ([\d.]+) dur ([\d.]+) del ([\d.]+)\)(?: \| (?!prog |future )(\S+) CE ([\d.]+))?')
 
 
+def table(title, **kw):
+    """A dashboard table: a rule under the header, no vertical lines, every other row shaded."""
+    return Table(title=title, expand=True, title_justify='left', title_style='bold', box=box.SIMPLE_HEAD,
+                 row_styles=ZEBRA, **kw)
+
+
+def sparkline(values, n=12):
+    """The last n values as a one-line bar chart scaled to their own range ('' for fewer than 2)."""
+    v = values[-n:]
+    if len(v) < 2:
+        return ''
+    lo, span = min(v), (max(v) - min(v)) or 1
+    return ''.join(SPARK[round((x - lo) / span * (len(SPARK) - 1))] for x in v)
+
+
+def change_mark(prev, cur, lower_better=True):
+    """An arrow from prev to cur, green when it improved, red when it got worse."""
+    if cur == prev:
+        return Text(' =', style='dim')
+    return Text(' ↓' if cur < prev else ' ↑', style='green' if (cur < prev) == lower_better else 'bold red')
+
+
 def tail_text(path, n_bytes=200_000):
     try:
         with open(path, 'rb') as f:
@@ -194,10 +223,11 @@ def run_settings(path):
 
 def training_table(done_keep=None):
     """All unfinished runs plus the last done_keep finished ones (None = all)."""
-    t = Table(title='Training runs', expand=True, title_justify='left')
+    t = table('Training runs')
     for col, kw in [('run', {}), ('params', {'justify': 'right'}), ('state', {}), ('progress', {'ratio': 2}),
                     ('step', {'justify': 'right'}), ('speed', {'justify': 'right'}), ('ETA', {'justify': 'right'}),
-                    ('main val CE', {'justify': 'right'}), ('2nd val CE', {'justify': 'right'}),
+                    ('main val CE', {'justify': 'right'}), ('trend', {'style': 'cyan', 'no_wrap': True}),
+                    ('2nd val CE', {'justify': 'right'}),
                     ('pit/vel/dur/dt', {'justify': 'right'})]:
         t.add_column(col, **kw)
     active = active_train_logs()
@@ -219,7 +249,7 @@ def training_table(done_keep=None):
         log = path.name
         text = tail_text(path)
         if not text or not text.strip():
-            rows.append((False, (label, params, Text('queued', style='dim'), '', '', '', '', '', '', '')))
+            rows.append((False, (label, params, Text('queued', style='dim'), '', '', '', '', '', '', '', '')))
             continue
         bars = TQDM.findall(text)
         steps = STEP.findall(text)
@@ -236,12 +266,18 @@ def training_table(done_keep=None):
         s = steps[-1] if steps else None
         # older logs print 'val CE' / 'val2 CE', newer ones the set's name (e.g. 'gigamidi_clean CE')
         named = lambda name, v: v if name in ('val', 'val2') else f'{v} {name}'
-        val = named(s[2], s[3]) if s else ''
+        vals = [float(x[3]) for x in steps]
+        val = Text(s[3]) if s else ''
+        if len(vals) >= 2:
+            val.append_text(change_mark(vals[-2], vals[-1]))
+        if s and s[2] not in ('val', 'val2'):
+            val.append(f' {s[2]}')
         aria = named(s[8], s[9]) if s and s[9] else ''
         heads = f'{s[4]}/{s[5]}/{s[6]}/{s[7]}' if s else ''
         prog = ProgressBar(total=tot, completed=tot if done else cur, width=None)
         rows.append((state.plain == 'done', (label, params, state, prog, f'{tot if done else cur}/{tot}',
-                                             '' if done else speed, '' if done else eta, val, aria, heads)))
+                                             '' if done else speed, '' if done else eta, val, sparkline(vals),
+                                             aria, heads)))
     finished = [i for i, (fin, _) in enumerate(rows) if fin]
     hidden = set(finished[:-done_keep] if done_keep else finished) if done_keep is not None else set()
     for i, (_, cells) in enumerate(rows):
@@ -613,7 +649,7 @@ def multi_pass_rows(t):
 
 
 def pipeline_table():
-    t = Table(title='Data pipeline', expand=True, title_justify='left')
+    t = table('Data pipeline')
     for col in ('stage', 'state', 'progress', 'count', 'detail'):
         t.add_column(col, width=24 if col == 'progress' else None, ratio=1 if col == 'detail' else None)
 
@@ -692,7 +728,7 @@ def fmt_secs(s):
 
 def jobs_table(keep=6):
     """generate.py / sample_sweep.py runs (logs/jobs/*.json): all live ones plus the most recent finished ones."""
-    t = Table(title='Sampling jobs', expand=True, title_justify='left')
+    t = table('Sampling jobs')
     for col, kw in [('job', {}), ('pid', {'justify': 'right'}), ('state', {}), ('progress', {'ratio': 2}),
                     ('notes', {'justify': 'right'}), ('speed', {'justify': 'right'}), ('ETA', {'justify': 'right'}),
                     ('detail / result', {'ratio': 2})]:
@@ -895,6 +931,8 @@ def long_run_row(name, active, drivers):
     m, g = EVAL_HEAD.search(ev), SEC_GAIN.search(ev)
     last_eval = (f'step {int(m.group(1)):,}: {m.group(3)} CE {m.group(4)}' if m else '') + \
         (f'\nsection gain {g.group(1)} / none {g.group(2)}\nlate {g.group(3)} / none {g.group(4)}' if g else '')
+    if len(probes) >= 2:
+        last_eval += f'\nprobes vs shuffled {sparkline([r["gain_shuffled"] for r in probes])}'
     cells = (name, st, ProgressBar(total=max(1, total), completed=min(it, total)),
              f'{it:,}/{total:,}\n{it / total:.0%}' if total else f'{it:,}/?', f'{spi:.2f} s/it' if spi else '',
              '\n'.join(lines), last_eval)
@@ -902,10 +940,10 @@ def long_run_row(name, active, drivers):
     if not probes and not stopped:
         return cells, None
     stop_at, min_gain = long_stop_rule(driver[1] if driver else '')
-    p = Table(title=f'{name}: gain of the section captions on the first 32 notes after a section change of >= 2 '
+    p = table(f'{name}: gain of the section captions on the first 32 notes after a section change of >= 2 '
                     'points (nats per note)' +
                     (f' · early stop if vs shuffled < {min_gain:g} from it {stop_at:,}' if None not in (stop_at, min_gain)
-                     else ''), expand=True, title_justify='left')
+                     else ''))
     for col in ('weights @it', 'probed', 'vs shuffled', 'vs none', 'no-change vs none', 'all notes vs none',
                 'excess CE'):
         p.add_column(col, justify='right')
@@ -928,7 +966,7 @@ def long_runs_view():
                    {p.stem for p in LONG_DIR.glob('long_*.json')})
     if not names:
         return None
-    t = Table(title='Long section runs (tools/sweeps/section_long.py)', expand=True, title_justify='left')
+    t = table('Long section runs (tools/sweeps/section_long.py)')
     for col, kw in [('run', {}), ('state', {}), ('progress', {'ratio': 1}), ('step', {'justify': 'right'}),
                     ('speed', {'justify': 'right'}), ('chunk', {'ratio': 2}), ('last evaluation', {'ratio': 2})]:
         t.add_column(col, **kw)
@@ -947,27 +985,73 @@ def long_runs_view():
     return Group(t, *probe_tables)
 
 
-def system_panel():
+def meter(total, used, warn=0.9):
+    """A 20-wide bar, red from warn of total."""
+    return ProgressBar(total=max(total, 1), completed=used, width=20,
+                       complete_style='bold red' if used >= warn * total else 'bar.complete')
+
+
+def gpu_panel():
     try:
         out = subprocess.run(['nvidia-smi', '--query-gpu=utilization.gpu,memory.used,memory.total,power.draw,'
                               'temperature.gpu,clocks.sm', '--format=csv,noheader,nounits'],
                              capture_output=True, text=True, timeout=5).stdout.strip().split(', ')
         util, mem, mem_tot, power, temp, clock = out
-        gpu = (f'GPU {util:>3}%   mem {int(mem) / 1024:.1f}/{int(mem_tot) / 1024:.1f} GB   '
-               f'{float(power):.0f} W   {temp} °C   {clock} MHz')
     except Exception:
-        gpu = 'GPU: nvidia-smi unavailable'
+        return Panel(Text('nvidia-smi unavailable', style='dim'), title='GPU', title_align='left', expand=False)
+    g = Table.grid(padding=(0, 1))
+    g.add_row('util', ProgressBar(total=100, completed=int(util), width=20), f'{util:>3}%')
+    g.add_row('mem', meter(int(mem_tot), int(mem), 0.95), f'{int(mem) / 1024:.1f}/{int(mem_tot) / 1024:.1f} GB')
+    g.add_row('', Text(f'{float(power):.0f} W  {temp} °C  {clock} MHz',
+                       style='bold red' if int(temp) >= 83 else 'dim'), '')
+    return Panel(g, title='GPU', title_align='left', expand=False)
+
+
+def disk_panel():
     du = shutil.disk_usage(ROOT)
-    disk = f'disk free {du.free / 1e9:.1f} GB of {du.total / 1e9:.0f} GB'
-    style = 'bold red' if du.free < 2e9 else ''
-    return Panel(Text(f'{gpu}\n') + Text(disk, style=style), title='System', title_align='left')
+    style = 'bold red' if du.free < 2e9 else 'yellow' if du.free < 20e9 else ''
+    g = Table.grid(padding=(0, 1))
+    g.add_row('used', meter(du.total, du.used, 0.95), f'{du.used / du.total:.0%}')
+    g.add_row('', Text(f'{du.free / 1e9:.1f} GB free of {du.total / 1e9:.0f} GB', style=style), '')
+    return Panel(g, title='Disk', title_align='left', expand=False)
+
+
+def now_panel():
+    n_train = len(active_train_logs())
+    n_jobs = sum(1 for j in read_jobs() if not j['finished'] and Path(f"/proc/{j['pid']}").exists())
+    body = Text(time.strftime('%H:%M:%S'), style='bold')
+    body.append(f'\n{n_train} train.py running', style='bold yellow' if n_train else 'dim')
+    body.append(f'\n{n_jobs} sampling jobs running', style='bold yellow' if n_jobs else 'dim')
+    return Panel(body, title='Now', title_align='left', expand=False)
+
+
+def views(show_all):
+    """The parts of the view: header panels, long section runs (None if there are none), data pipeline, training
+    runs, sampling jobs."""
+    return {'header': Columns([now_panel(), gpu_panel(), disk_panel()]), 'long': long_runs_view(),
+            'pipeline': pipeline_table(), 'training': training_table(None if show_all else 4),
+            'jobs': jobs_table(keep=6 if show_all else 2)}
 
 
 def render(show_all=False):
     # what is running comes first: the live view is cut at the terminal height
-    long_runs = long_runs_view()
-    return Group(Text(time.strftime('%H:%M:%S'), style='dim'), system_panel(), *([long_runs] if long_runs else []),
-                 pipeline_table(), training_table(None if show_all else 4), jobs_table(keep=6 if show_all else 2))
+    v = views(show_all)
+    return Group(*(v[k] for k in ('header', 'long', 'pipeline', 'training', 'jobs') if v[k] is not None))
+
+
+def screen_layout(show_all, console):
+    """The live view filling the terminal: the header on top, then from WIDE columns the runs on the left and the data
+    pipeline on the right, else the same stack as render(); each region is cut at its bottom."""
+    v = views(show_all)
+    root, body = Layout(), Layout()
+    root.split_column(Layout(v['header'], size=len(console.render_lines(v['header'], console.options, pad=False))),
+                      body)
+    if console.width >= WIDE:
+        body.split_row(Layout(Group(*(v[k] for k in ('long', 'training', 'jobs') if v[k] is not None)), ratio=1),
+                       Layout(v['pipeline'], ratio=1))
+    else:
+        body.update(Group(*(v[k] for k in ('long', 'pipeline', 'training', 'jobs') if v[k] is not None)))
+    return root
 
 
 def serve(port, interval, show_all, token):
@@ -977,7 +1061,7 @@ def serve(port, interval, show_all, token):
     import threading
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
     from urllib.parse import parse_qs, urlsplit
-    from rich.console import Console
+    from rich.terminal_theme import MONOKAI
     import todo_web
     page = [b'starting']
 
@@ -1018,7 +1102,7 @@ def serve(port, interval, show_all, token):
     while True:
         console = Console(record=True, width=140, file=io.StringIO(), color_system='truecolor')
         console.print(render(show_all))
-        html = console.export_html(inline_styles=True).replace('<head>', '<head>' + head, 1)
+        html = console.export_html(inline_styles=True, theme=MONOKAI).replace('<head>', '<head>' + head, 1)
         page[0] = html.replace('<body>', link, 1).encode()
         time.sleep(interval)
 
@@ -1040,14 +1124,14 @@ def main():
         serve(args.web, max(args.interval, 10), args.all, args.token or secrets.token_urlsafe(8))
         return
     if args.once:
-        from rich.console import Console
         Console().print(render(args.all))
         return
-    with Live(render(args.all), refresh_per_second=1, screen=False) as live:
+    console = Console()
+    with Live(screen_layout(args.all, console), console=console, refresh_per_second=1, screen=True) as live:
         try:
             while True:
                 time.sleep(args.interval)
-                live.update(render(args.all))
+                live.update(screen_layout(args.all, console))
         except KeyboardInterrupt:
             pass
 
