@@ -16,7 +16,9 @@ Tests run in plan order and the session doesn't stop at a failure; a test whose 
 GPU tests are skipped without CUDA (or --cpu-only) and while another process computes on the GPU (a training run;
 --gpu-busy-ok runs them anyway). Training data = synthetic token stores and caption tables, so no dataset is needed;
 sample-search reads data/cache/gigamidi_heldout_validation and is skipped without it. Output:
-logs/ci/<date_time>/<test>.log + summary.json; checkpoints there are deleted at the end (--keep keeps them).
+logs/ci/<date_time>/<test>.log + summary.json (rewritten after every test) + report.txt / report.html
+(tests/ci_report.py: failed tests with their command and traceback / log tail), logs/ci/index.html (every run, a test x
+run grid) and logs/ci/latest -> the newest run; checkpoints there are deleted at the end (--keep keeps them).
 Exit code 1 if anything failed.
 """
 
@@ -31,6 +33,7 @@ import signal
 import subprocess
 import sys
 import time
+import traceback
 from pathlib import Path
 
 import numpy as np
@@ -38,6 +41,7 @@ import numpy as np
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'tests'))
 
+import ci_report  # noqa: E402
 from helpers import make_store, notes  # noqa: E402
 
 PY = sys.executable
@@ -293,17 +297,27 @@ def config_keys(s):
     return f'{len(files)} configs, {len(known)} settings'
 
 
+def unit_tests(s, env=None):
+    """tests/run.py; its 'n/m passed' line, or Fail with the failed tests named."""
+    out = s.run([PY, 'tests/run.py'], env=env, codes=(0, 1))
+    passed = re.findall(r'^(\d+/\d+ passed)', out, re.M)
+    failed = re.findall(r'^  failed: (\S+)', out, re.M)
+    if failed or not passed:
+        raise Fail(f'{passed[-1] if passed else "no summary line"}; failed: {", ".join(failed)}')
+    return passed[-1]
+
+
 @test('unit-cpu')
 def unit_cpu(s):
     """tests/run.py with CUDA hidden (torchtitan: unit_tests/cpu)."""
-    return re.findall(r'^(\d+/\d+ passed)', s.run([PY, 'tests/run.py'], env={'CUDA_VISIBLE_DEVICES': ''}), re.M)[-1]
+    return unit_tests(s, env={'CUDA_VISIBLE_DEVICES': ''})
 
 
 @test('unit-gpu', gpu=True)
 def unit_gpu(s):
     """tests/run.py with the GPU visible: the CUDA-only checks (CUDA-graph decode, fla kernels) run instead of
     returning early."""
-    return re.findall(r'^(\d+/\d+ passed)', s.run([PY, 'tests/run.py']), re.M)[-1]
+    return unit_tests(s)
 
 
 @test('data')
@@ -699,13 +713,30 @@ def main():
     print(f'CI session {run_dir.relative_to(ROOT)}  commit {sha}  {len(tests)} tests'
           + (f'  (GPU tests: {no_gpu})' if no_gpu else ''))
     results, t_start = {}, time.time()
+    state = dict(commit=sha, started=run_dir.name, gpu=no_gpu or 'ok', minutes=0.0, finished=False, running=None,
+                 plan=[dict(name=t['name'], gpu=t['gpu'], needs=list(t['needs']), doc=t['doc']) for t in tests],
+                 results=results)
+
+    def save(running=None, finished=False):
+        """summary.json + the reports, after every test (a broken report never stops the session)."""
+        state.update(minutes=round((time.time() - t_start) / 60, 1), running=running, finished=finished)
+        (run_dir / 'summary.json').write_text(json.dumps(state, indent=1) + '\n')
+        try:
+            ci_report.write_run(run_dir, state)
+        except Exception as e:
+            print(f'  (report not written: {type(e).__name__}: {e})', flush=True)
+
+    ci_report.link_latest(run_dir)
+    save()
+    print(f'  report: {(run_dir / "report.html").relative_to(ROOT)}')
     try:
         for t in tests:
             name = t['name']
-            print(f'  {name:18s} ', end='', flush=True)
+            save(running=name)
+            print(f'  {name:20s} ', end='', flush=True)
             s.log, s.deadline = run_dir / f'{name}.log', time.time() + t['timeout'] * args.timeout
             missing = [n for n in t['needs'] if results.get(n, {}).get('status') != 'PASS']
-            t0, status, note = time.time(), 'PASS', ''
+            t0, status, note, tb = time.time(), 'PASS', '', None
             try:
                 if t['gpu'] and no_gpu:
                     raise Skip(no_gpu)
@@ -717,9 +748,10 @@ def main():
             except Fail as e:
                 status, note = 'FAIL', str(e)
             except Exception as e:
-                status, note = 'FAIL', f'{type(e).__name__}: {e}'
+                status, note, tb = 'FAIL', f'{type(e).__name__}: {e}', traceback.format_exc()
             secs = time.time() - t0
-            results[name] = dict(status=status, seconds=round(secs, 1), note=note)
+            results[name] = dict(status=status, seconds=round(secs, 1), note=note, **({'traceback': tb} if tb else {}))
+            save()
             print(f'{status}  {secs:6.1f} s  {note}', flush=True)
     except KeyboardInterrupt:
         print('\ninterrupted')
@@ -728,11 +760,10 @@ def main():
             for f in s.work.rglob('*.pt'):
                 f.unlink()
     counts = {k: sum(r['status'] == k for r in results.values()) for k in ('PASS', 'FAIL', 'SKIP')}
-    (run_dir / 'summary.json').write_text(json.dumps(dict(commit=sha, started=run_dir.name, gpu=no_gpu or 'ok',
-                                                          minutes=round((time.time() - t_start) / 60, 1),
-                                                          results=results), indent=1) + '\n')
+    save(finished=True)
     print(f'\n{counts["PASS"]} passed, {counts["FAIL"]} failed, {counts["SKIP"]} skipped in '
           f'{(time.time() - t_start) / 60:.1f} min; logs in {run_dir.relative_to(ROOT)}/')
+    print(f'report: {(run_dir / "report.html").relative_to(ROOT)} (all runs: logs/ci/index.html)')
     for n, r in results.items():
         if r['status'] == 'FAIL':
             print(f'  FAIL {n}: {run_dir.relative_to(ROOT)}/{n}.log')
