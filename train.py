@@ -28,8 +28,8 @@ from tqdm import tqdm
 
 from musicar.model.checkpoint import (ARCH_KEYS, bf16_cpu_state, load_expanded, merge_model_args, save_atomic,
                                 strip_compile_prefix)
-from musicar.data.loader import (NoteWindowDataset, collate_windows, load_styles, source_name, val_loader,
-                                 window_conditions)
+from musicar.data.loader import (NoteWindowDataset, collate_windows, load_styles, remain_level, source_name,
+                                 val_loader, window_conditions)
 from musicar.eval.val_loss import estimate_val_loss, summed_ce
 from musicar.training.fp8 import convert_fp8, fp8_supported, refresh_fp8_weights
 from musicar.training.memory import spill_to_cpu
@@ -91,6 +91,7 @@ num_workers = 4
 # model
 n_layer = 6
 n_head = 8
+n_kv_head = 0             # GQA: key / value heads (0 = n_head); a finetune from more KV heads mean-pools them
 n_embd = 256
 pitch_size = 128
 velocity_size = 32
@@ -110,6 +111,8 @@ qk_norm = False           # RMSNorm on each head's q and k
 cond_inst = False         # condition on the set of instruments in the window (multi-hot, zero-init, needs n_programs)
 n_density = 0             # condition on the window's notes/s level (16 = 15 levels + none; 0 = off)
 cond_dropout = 0.15       # training: share of windows whose conditions are replaced by 'none'
+n_remain = 0              # length control: seconds-to-the-end levels per note (33 = 32 levels + none; 0 = off)
+remain_dropout = 0.15     # training: share of windows whose length input is 'none'
 pad_short = False         # keep files shorter than block_size as one padded whole-file window (masked targets)
 act_ckpt = 0              # activation checkpointing: first N transformer blocks recompute in backward (-1 = all)
 act_ckpt_save = ''        # selective checkpointing: op outputs the checkpointed blocks keep ('attn' | 'attn,mm')
@@ -170,6 +173,9 @@ optimizer_name = 'adamw'   # 'adamw' | 'muon' (Muon for transformer-block matric
                            # | 'adamw8bit' (torchao 8-bit AdamW states: fits a 450M full fine-tune in 8 GB)
 freeze = ''                # comma-separated parameter-name prefixes kept frozen (e.g. 'transformer.music_embeddings')
 muon_momentum = 0.95
+muon_ns = 'quintic'        # Muon Newton-Schulz coefficients: 'quintic' | 'polar' (Polar Express)
+muon_normuon = False       # NorMuon: per-neuron normalization of the orthogonalized update
+muon_cautious = False      # Cautious mask: update entries against the gradient's sign zeroed
 learning_rate = 6e-4
 max_iters = 30000
 weight_decay = 1e-1
@@ -237,9 +243,10 @@ extra_names = (['program'] if n_programs else []) + (['style'] if styles else []
 data_kw = dict(root_dir=root_dir, cache_dir=cache_dir, special_tokens=special_tokens, styles=styles,
                programs=n_programs > 0, pad_short=pad_short, min_notes=min_notes, captions=captions or None,
                caption_uk=caption_uk, section_len=section_len, section_lead=section_lead, section_style=section_style,
-               section_attrs=section_attrs, section_repeat=section_repeat)
+               section_attrs=section_attrs, section_repeat=section_repeat, remain=n_remain > 0)
 assert not section_cf_weight or section_len, 'section_cf_weight needs section captions'
 cf_names = ['cf_text', 'cf_event', 'cf_start'] if section_cf_weight else []
+remain_names = ['remain'] if n_remain else []  # last in a dataset item
 cf_from_iter = int(section_cf_from * lr_decay_iters)
 # train: random windows (uniform over all note positions of all files), with augmentation
 train_dataset = NoteWindowDataset(csv_path, split='train', block_size=block_size, augment=True, **data_kw,
@@ -248,11 +255,12 @@ train_dataset = NoteWindowDataset(csv_path, split='train', block_size=block_size
                                change_frac=section_change_frac, change_min=section_change_min,
                                counterfactual=section_cf_weight > 0, splice_frac=section_splice_frac,
                                aug_stores=as_list(aug_stores, int), source_weights=as_list(source_weights, float))
+train_names = tuple(extra_names + cf_names + remain_names)
 train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=num_workers, drop_last=True,
-                          collate_fn=partial(collate_windows, extra_names=tuple(extra_names + cf_names)),
+                          collate_fn=partial(collate_windows, extra_names=train_names),
                           persistent_workers=num_workers > 0)
 make_val_loader = partial(val_loader, batch_size=batch_size, max_batches=eval_iters, num_workers=num_workers,
-                          extra_names=extra_names, block_size=block_size, **data_kw)
+                          extra_names=extra_names + remain_names, block_size=block_size, **data_kw)
 val_name = val_name or source_name(val_csv_path or csv_path)
 val2_name = val2_name or (source_name(val2_csv_path) if val2_csv_path else '')
 val_loader_main = make_val_loader(val_csv_path or csv_path)
@@ -288,6 +296,8 @@ else:
     print("Initializing a new model from scratch")
 
 model = GPT(MusicConfig(**model_args, dropout=dropout, label_smoothing=label_smoothing))
+assert model.config.n_remain == n_remain, \
+    f"the data returns remain for n_remain={n_remain}, the model has {model.config.n_remain}: set n_remain"
 assert model.config.section_repeat == section_repeat, \
     f"the data lays out section_repeat={section_repeat}, the model has {model.config.section_repeat}"
 if section_cls_weight:
@@ -364,7 +374,8 @@ if freeze_trunk:
     freeze_params(model, '*', except_prefixes=freeze_trunk_keep)
 optimizer = build_optimizer(optimizer_name, model, weight_decay, learning_rate, (beta1, beta2), device_type,
                             style_lr_mult=style_lr_mult, muon_momentum=muon_momentum, muon_bf16=muon_bf16,
-                            compile_ns=compile, text_lr_mult=text_lr_mult, linear_lr_mult=linear_lr_mult)
+                            compile_ns=compile, text_lr_mult=text_lr_mult, linear_lr_mult=linear_lr_mult,
+                            muon_ns=muon_ns, muon_normuon=muon_normuon, muon_cautious=muon_cautious)
 encoder = None
 if text_encoder:
     from musicar.text.encoder import TextEncoder
@@ -388,9 +399,10 @@ def to_device(batch):
     return tuple(t.to(device, non_blocking=True) for t in batch)
 
 
-def prepare(X, Y, cond_drop_p):
+def prepare(X, Y, cond_drop_p, remain_drop_p=None):
     """A batch on the device; cond_inst / n_density models also get the window conditions of its own notes,
-    replaced by 'none' with probability cond_drop_p per window."""
+    replaced by 'none' with probability cond_drop_p per window; n_remain models the levels of the seconds to each
+    piece's end, 'none' with probability remain_drop_p per window (default cond_drop_p)."""
     streams = to_device(X[0])
     extra = {k: encoder.encode(v, tokens=raw_model.config.text_prefix > 0) if k == 'text'
              else v.to(device, non_blocking=True) for k, v in X[1].items()
@@ -411,13 +423,19 @@ def prepare(X, Y, cond_drop_p):
     if cond_inst or n_density:
         extra['cond'] = window_conditions(streams[0], streams[3], extra.get('program'), n_programs, n_density,
                                           drop_p=cond_drop_p)
+    if 'remain' in extra:
+        level = remain_level(extra['remain'], n_remain)
+        p = cond_drop_p if remain_drop_p is None else remain_drop_p
+        if p > 0:
+            level = level * (torch.rand(level.size(0), 1, device=level.device) >= p)
+        extra['remain'] = level
     return (streams, extra), to_device(Y)
 
 
 def infinite_batches(loader):
     while True:
         for X, Y in loader:
-            yield prepare(X, Y, cond_dropout)
+            yield prepare(X, Y, cond_dropout, remain_dropout)
 
 
 def val_loss(loader, conditioned=True):
@@ -581,7 +599,7 @@ for iter_num in pbar:
         val = val_loss(val_loader_main)
         val2 = val_loss(val2_loader) if val2_loader else {}
         extra = {name: val_loss(loader) for name, loader in extra_loaders.items()}
-        if cond_inst or n_density:  # the main val set again with no conditions: the model's unconditional quality
+        if cond_inst or n_density or n_remain:  # the main val set again with no conditions: unconditional quality
             extra['nocond'] = val_loss(val_loader_main, conditioned=False)
         for mode, loader in text_loaders.items():
             extra[f'text_{mode}'] = val_loss(loader)

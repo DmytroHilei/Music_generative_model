@@ -3,7 +3,7 @@
 import torch
 from torch.nn import functional as F
 
-from musicar.data.loader import BOS_PITCH, DRUM_PROGRAM, EOS_PITCH, window_conditions
+from musicar.data.loader import BOS_PITCH, DRUM_PROGRAM, EOS_PITCH, remain_level, window_conditions
 from musicar.model.gpt import KVCache, STREAM_ORDER
 
 # one side stream per device for the CUDA-graph warm-up and capture: cuBLAS keeps a workspace for every
@@ -42,7 +42,7 @@ def generate(model, pitch, velocity, duration, delta_time, max_new_tokens, tempe
              cuda_graph=True, style=None, min_new=0, program=0, top_p=None, cfg_scale=1.0,
              eos_t1=False, programs=None, allowed_programs=None, return_programs=False, program_temperature=None,
              cond=None, text=None, sections=None, text_neg=None, sections_neg=None, cfg_section=None,
-             cfg_boost=0.0, cfg_boost_notes=32):
+             cfg_boost=0.0, cfg_boost_notes=32, length_seconds=None):
     """
     Batched sampling (B rows, same prompt length) with a preallocated KV cache: each new note costs one position
     through the model, not a full re-run. On CUDA the one-note transformer step is captured once as a CUDA graph
@@ -88,6 +88,9 @@ def generate(model, pitch, velocity, duration, delta_time, max_new_tokens, tempe
       given), and every head samples from u + cfg_scale * (f - u) + cfg_section * (c - f).
     cfg_boost: a guidance schedule (YuE: higher at a section start): the section scale (cfg_section, else cfg_scale)
       is raised by cfg_boost at each section's first note, falling linearly to its base over cfg_boost_notes notes.
+    length_seconds: n_remain models: the length of the piece in seconds (a float, or one per row), counted from the
+      first prompt note; every note gets the level of length_seconds minus its onset (0 s past the end), as the
+      seconds-to-the-end input was trained. None = 'none'.
     eos_t1: EOS keeps its probability at temperature 1 (and outside top-k/top-p); the other pitches use the
       tempered distribution, rescaled to the remaining mass. Lower temperatures otherwise starve the rare EOS.
     Special tokens (pitch vocab 130): BOS is never sampled; EOS (end of piece) not before min_new notes. Rows keep
@@ -177,6 +180,15 @@ def generate(model, pitch, velocity, duration, delta_time, max_new_tokens, tempe
             """The section whose caption is in force for predicting note n."""
             return max((p, k) for p, k in sec_arrive if p <= n)[1]
     prefix_sec = S and model.config.section_mode == 'prefix'
+    n_remain = model.config.n_remain
+    length = None  # (B, 1) requested seconds; onsets come from the cumulative delta_time of out[3]
+    if n_remain and length_seconds is not None:
+        length = torch.as_tensor(length_seconds, dtype=torch.float32, device=device).reshape(-1, 1).expand(Bo, 1)
+        length = length.repeat(n_br, 1)
+
+    def remain_at(onset):
+        """remain levels of notes at these onsets (seconds, (B, n))."""
+        return remain_level((length - onset).clamp(min=0), n_remain)
     n_prog = model.config.n_programs
     sample_programs = bool(n_prog) and program is None
     fixed_program = torch.full((B, 1), int(program), dtype=torch.long, device=device) \
@@ -256,7 +268,7 @@ def generate(model, pitch, velocity, duration, delta_time, max_new_tokens, tempe
     # and the one-note step attends over fewer slots)
     # inserted section vectors: the caption in force + the arrivals in the sections a window touches
     sec_slots = model.config.section_slots * (1 + (1 + -(-L // S)) * -(-S // R)) if prefix_sec else 0
-    cache = KVCache(model.config.n_layer, B, model.config.n_head, min(L, total) + k_pre + sec_slots,
+    cache = KVCache(model.config.n_layer, B, model.config.kv_heads, min(L, total) + k_pre + sec_slots,
                     C // model.config.n_head, device, dtype)
     extra = [0]  # cache slots taken by inserted section vectors
 
@@ -275,6 +287,12 @@ def generate(model, pitch, velocity, duration, delta_time, max_new_tokens, tempe
             prog = prog_out[:, :n] if n <= L else torch.cat([prog_out[:, :anchor],
                                                              prog_out[:, n - (L - slide - anchor):n]], dim=1)
         kw = dict(step=False) if k_pre else {}  # prefix + window: a prefill even for a 1-note window
+        if length is not None:  # the onsets of the window's notes, counted from the first note of the sequence
+            onset = out[3][:, :n].cumsum(1).float() * dt_seconds
+            idx = torch.arange(n, device=device) if n <= L else torch.cat(
+                [torch.arange(anchor, device=device), torch.arange(n - (L - slide - anchor), n, device=device)])
+            kw['remain'] = remain_at(onset[:, idx])
+            step_onset.copy_(onset[:, n - 1:n])
         if S:  # the caption in force at the window start, then those arriving up to note n (incl. before note n)
             a = n - w
             later = [(p, k) for p, k in sec_arrive if a < p <= n and sec_starts[p] == k]
@@ -289,6 +307,9 @@ def generate(model, pitch, velocity, duration, delta_time, max_new_tokens, tempe
     step_in = [torch.zeros(B, 1, dtype=torch.long, device=device) for _ in range(4)]
     step_prog = torch.zeros(B, 1, dtype=torch.long, device=device) if n_prog else None  # the new note's instrument
     step_style = style  # constant during generation, so the graph can read it directly
+    # length control: the onset of the latest note (seconds) and the step's remain level, a static buffer
+    step_onset = torch.zeros(B, 1, device=device)
+    step_remain = torch.zeros(B, 1, dtype=torch.long, device=device) if length is not None else None
     # 'xattn' sections: the caption of the note being predicted, copied in before every step
     step_sec = (sec_vecs[0][:, None].clone(), None) if S and not prefix_sec else None
     graph = None
@@ -300,12 +321,12 @@ def generate(model, pitch, velocity, duration, delta_time, max_new_tokens, tempe
         with torch.cuda.stream(stream):  # warm-up outside the graph (allocator, kernel selection)
             for _ in range(2):
                 model.encode(*step_in, style=step_style, program=step_prog, cache=cache, cond=cond, text=text,
-                             sections=step_sec)
+                             sections=step_sec, remain=step_remain)
         torch.cuda.current_stream().wait_stream(stream)
         graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(graph):
             step_out = model.encode(*step_in, style=step_style, program=step_prog, cache=cache, cond=cond, text=text,
-                                    sections=step_sec)
+                                    sections=step_sec, remain=step_remain)
         # the warm-up and capture wrote junk into slot 0; prefill below overwrites every slot it uses
 
     def step(new, pos, prog=None, n=None):
@@ -317,12 +338,15 @@ def generate(model, pitch, velocity, duration, delta_time, max_new_tokens, tempe
             step_prog.copy_(prog)
         if step_sec is not None:
             step_sec[0].copy_(sec_vec(sec_now(n))[:, None])
+        if step_remain is not None:  # the new note's onset = the previous one's + its delta_time
+            step_onset.add_(new[3].float() * dt_seconds)
+            step_remain.copy_(remain_at(step_onset))
         cache.pos.fill_(pos + k_pre + extra[0])
         if graph is not None:
             graph.replay()
             return step_out
         return model.encode(*step_in, style=step_style, program=step_prog, cache=cache, cond=cond, text=text,
-                            sections=step_sec)
+                            sections=step_sec, remain=step_remain)
 
     h, filled = prefill(n0)
     for i in range(max_new_tokens):

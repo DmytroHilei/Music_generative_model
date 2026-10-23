@@ -65,8 +65,11 @@ class CausalSelfAttention(nn.Module):
     def __init__(self, config):
         super().__init__()
         assert config.n_embd % config.n_head == 0
-        # key, query, value projections for all heads, but in a batch
-        self.c_attn = nn.Linear(config.n_embd, 3 * config.n_embd, bias=config.bias)
+        self.n_kv_head = config.kv_heads
+        self.head_size = config.n_embd // config.n_head
+        # query, key, value projections for all heads, but in a batch; GQA (n_kv_head < n_head): n_kv_head key / value
+        # heads, each shared by n_head // n_kv_head consecutive query heads
+        self.c_attn = nn.Linear(config.n_embd, config.n_embd + 2 * self.n_kv_head * self.head_size, bias=config.bias)
         # output projection
         self.c_proj = nn.Linear(config.n_embd, config.n_embd, bias=config.bias)
         # regularization
@@ -87,10 +90,11 @@ class CausalSelfAttention(nn.Module):
         B, T, C = x.size() # batch size, sequence length, embedding dimensionality (n_embd)
 
         # calculate query, key, values for all heads in batch and move head forward to be the batch dim
-        q, k, v  = self.c_attn(x).split(self.n_embd, dim=2)
-        k = k.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
-        q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
-        v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
+        hs, nkv = self.head_size, self.n_kv_head
+        q, k, v  = self.c_attn(x).split([self.n_embd, nkv * hs, nkv * hs], dim=2)
+        q = q.view(B, T, self.n_head, hs).transpose(1, 2) # (B, nh, T, hs)
+        k = k.view(B, T, nkv, hs).transpose(1, 2)         # (B, n_kv_head, T, hs)
+        v = v.view(B, T, nkv, hs).transpose(1, 2)
         if self.q_norm is not None:
             q, k = self.q_norm(q), self.k_norm(k)
         if rope is not None:
@@ -119,7 +123,7 @@ class CausalSelfAttention(nn.Module):
 
         # causal self-attention (fused SDPA kernels: flash / cuDNN / memory-efficient)
         y = F.scaled_dot_product_attention(q, k, v, attn_mask=mask, dropout_p=self.dropout if self.training else 0,
-                                           is_causal=causal)
+                                           is_causal=causal, enable_gqa=nkv != self.n_head)
         y = y.transpose(1, 2).contiguous().view(B, T, C) # re-assemble all head outputs side by side
 
         # output projection
@@ -189,6 +193,10 @@ class MusicConfig:
 
     n_layer: int = 6
     n_head: int = 8
+    # grouped-query attention: key / value heads per attention layer, each shared by n_head // n_kv_head query heads
+    # (0 = n_head, plain multi-head). A finetune from more KV heads mean-pools each group's K / V projections
+    # (Ainslie et al. 2023, musicar.model.checkpoint.load_expanded)
+    n_kv_head: int = 0
     n_embd: int = 256   # must be divisible by 4 (embeddings) and n_head
     dropout: float = 0.2
     bias: bool = False
@@ -203,6 +211,10 @@ class MusicConfig:
     # n_programs, via a linear map), n_density = notes-per-second levels of the window (0 = off; 16 = 15 + 'none')
     cond_inst: bool = False
     n_density: int = 0
+    # length control (roadmap item 11): the seconds from each note's onset to the end of its piece, as a log-scaled
+    # level per position (musicar.data.loader.remain_level: 0 = none, 1 = at the end, then log steps up to ~20 min),
+    # added at that position from a zero-init table; 0 = off. Generation feeds the requested length minus the time so far
+    n_remain: int = 0
     # multi-instrument: a 5th note attribute, the instrument (GM program 0-127, DRUM_PROGRAM = drums); 0 = off.
     # Added to the input embedding (zero init, like the style table) and predicted by a cascade head after dt.
     n_programs: int = 0
@@ -242,6 +254,13 @@ class MusicConfig:
     # linear attention (musicar/model/linear_attn.py): blocks whose attention is a Gated DeltaNet ('' = none,
     # 'hybrid4' = every layer but each 4th and the last, as Qwen3-Next's 3 : 1, or comma-separated block indices)
     linear_attn: str = ''
+
+    @property
+    def kv_heads(self):
+        """Key / value heads per attention layer (n_kv_head, 0 = n_head)."""
+        kv = self.n_kv_head or self.n_head
+        assert self.n_head % kv == 0, f'n_head {self.n_head} is not a multiple of n_kv_head {kv}'
+        return kv
 
 
 # order in which attributes of the next note are decided by CascadeHeads
@@ -458,6 +477,7 @@ class GPT(nn.Module):
         self.pad_multiple = 0
 
         assert config.pos_emb in ('learned', 'rope'), config.pos_emb
+        assert config.kv_heads == config.n_head or not config.linear_attn, 'GQA with linear attention layers: not supported'
         self.transformer = nn.ModuleDict(dict(
             music_embeddings = MusicEmbeddings(config),
             drop = nn.Dropout(config.dropout),
@@ -473,6 +493,8 @@ class GPT(nn.Module):
             self.transformer['cond_inst'] = nn.Linear(config.n_programs, config.n_embd, bias=False)
         if config.n_density:
             self.transformer['cond_density'] = nn.Embedding(config.n_density, config.n_embd)
+        if config.n_remain:
+            self.transformer['cond_remain'] = nn.Embedding(config.n_remain, config.n_embd)
         if config.n_programs:
             self.transformer['program'] = nn.Embedding(config.n_programs, config.n_embd)
         if config.text_prefix:
@@ -512,7 +534,7 @@ class GPT(nn.Module):
         if config.n_programs:
             # zero: a piano model grown to programs starts with exactly its old input embedding
             torch.nn.init.zeros_(self.transformer['program'].weight)
-        for name in ('cond_inst', 'cond_density', 'text_proj'):
+        for name in ('cond_inst', 'cond_density', 'cond_remain', 'text_proj'):
             if name in self.transformer:
                 torch.nn.init.zeros_(self.transformer[name].weight)  # starts as the unconditioned model
         if config.text_prefix:  # _init_weights re-drew its Linears; small gate, embedding-like null prefix
@@ -572,13 +594,15 @@ class GPT(nn.Module):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
     def encode(self, pitch, velocity, duration, delta_time, style=None, program=None, cache=None, cond=None,
-               text=None, step=None, sections=None):
+               text=None, step=None, sections=None, remain=None):
         """The trunk: notes -> hidden states after ln_f, (B, T, C).
         cache=None: plain forward. With a KVCache: T > 1 = prefill from position 0, T == 1 = one step at cache.pos.
         text: (B, text_dim) caption vectors for models with text_dim (zeros / None = no caption); text_prefix models:
         (B, L, text_dim) token states (None = no caption), whose prefix goes in front of the notes (positions 0..K-1,
         the notes from K; only the notes' states are returned) in every call but a one-note step.
         step: whether a T == 1 call with a cache is a one-note step (default) or a prefill (text_prefix models).
+        remain (n_remain models): (B, T) remain_level of each input note (0 = none; None = none everywhere, the
+        trained 'none' row, not nothing).
         sections (section_len models): (vectors (B, E, section_slots, C) from section_vectors, pos (B, E)): the
         window's section captions and the note index each one comes before (ascending, pos[:, 0] = 0, pos > T =
         unused); None = every caption is the null one. 'prefix': the vectors are inserted into the sequence (a cache
@@ -613,6 +637,10 @@ class GPT(nn.Module):
                 x = x + self.transformer['cond_inst'](inst.to(x.dtype)).unsqueeze(1)
             if self.config.n_density:
                 x = x + self.transformer['cond_density'](density).unsqueeze(1)
+        if self.config.n_remain:
+            if remain is None:
+                remain = torch.zeros(b, t, dtype=torch.long, device=device)
+            x = x + self.transformer['cond_remain'](remain)
         if text is not None and self.config.text_dim and not self.config.text_prefix:
             if self.config.text_center:
                 has = text.abs().sum(-1, keepdim=True) > 0
@@ -697,7 +725,7 @@ class GPT(nn.Module):
         self.aux_section_cls = nn.Linear(self.config.n_embd, 1)
 
     def forward(self, pitch, velocity, duration, delta_time, style=None, program=None, targets=None, cond=None,
-                text=None, sections=None, late_from=0, cf=None):
+                text=None, sections=None, late_from=0, cf=None, remain=None):
         """
         Returns (parts, loss). loss = sum of the per-head CEs with label smoothing (what we optimize),
         parts = dict name -> CE without label smoothing (detached, for honest logging / comparing runs).
@@ -706,6 +734,7 @@ class GPT(nn.Module):
         program: (B, T) instrument per input note when the model has n_programs; targets then has a 5th entry, the
         next note's program (see head_names). Duration targets of drum notes are expected as -1 (masked).
         cond: (instrument multi-hot (B, n_programs), density level (B,)) for models with cond_inst / n_density.
+        remain: (B, T) seconds-to-the-end levels for models with n_remain (see encode).
         text: (B, text_dim) caption vectors for models with text_dim.
         sections: (token states (B, E, L, text_dim), pos (B, E)) of the window's section captions (see encode).
         late_from > 0: parts also has 'late_<head>' = the CE over positions >= late_from only (validation).
@@ -721,7 +750,7 @@ class GPT(nn.Module):
         if sections is not None:
             sections = (self.section_vectors(sections[0]), sections[1])
         x = self.encode(pitch, velocity, duration, delta_time, style=style, program=program, cond=cond, text=text,
-                        sections=sections)
+                        sections=sections, remain=remain)
         assert len(targets) == len(self.head_names), f"{len(targets)} targets for heads {self.head_names}"
         tgt = dict(zip(self.head_names, targets))
         logits = self.cascade(x, tgt)
@@ -748,17 +777,18 @@ class GPT(nn.Module):
             parts['transfer'] = loss.detach()
         if cf is not None:
             loss = loss + self._counterfactual(cf, x, logits, tgt, parts, pitch, velocity, duration, delta_time,
-                                               style, program, cond, text, sections)
+                                               style, program, cond, text, sections, remain)
         return parts, loss
 
     def _counterfactual(self, cf, x, logits, tgt, parts, pitch, velocity, duration, delta_time, style, program,
-                        cond, text, sections):
+                        cond, text, sections, remain=None):
         """The cf part of forward (see there); returns the loss term."""
         r = cf['rows']
         sub = lambda t: None if t is None else t[r]  # noqa: E731
         cond_r = None if cond is None else tuple(sub(c) for c in cond)
         x_cf = self.encode(pitch[r], velocity[r], duration[r], delta_time[r], style=sub(style), program=sub(program),
-                           cond=cond_r, text=sub(text), sections=(self.section_vectors(cf['states']), sections[1][r]))
+                           cond=cond_r, text=sub(text), sections=(self.section_vectors(cf['states']), sections[1][r]),
+                           remain=sub(remain))
         tgt_r = {n: t[r] for n, t in tgt.items()}
         logits_cf = self.cascade(x_cf, tgt_r)
 

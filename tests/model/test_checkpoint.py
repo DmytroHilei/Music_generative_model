@@ -54,6 +54,44 @@ def test_learned_positions_stretch_and_rope_drop():
     assert 'transformer.wpe.weight (dropped)' in load_expanded(rope, old.state_dict())
 
 
+def test_gqa_conversion_mean_pools_kv_heads():
+    """A finetune into fewer KV heads mean-pools each group: an MHA checkpoint whose heads are equal within groups
+    converts exactly; any other keeps the query rows and the averaged K / V rows."""
+    g = tiny(n_head=4, n_kv_head=2, pos_emb='rope')
+    mha_state = {}
+    for k, v in g.state_dict().items():
+        if k.endswith('attn.c_attn.weight'):
+            q, kk, vv = v.split([32, 16, 16])
+            rep = lambda x: x.view(2, 1, 8, 32).expand(2, 2, 8, 32).reshape(32, 32)  # noqa: E731
+            v = torch.cat([q, rep(kk), rep(vv)])
+        mha_state[k] = v.clone()
+    new = tiny(n_head=4, n_kv_head=2, pos_emb='rope', n_layer=2)
+    changed = load_expanded(new, mha_state)
+    assert sum('mean-pooled to 2 heads' in c for c in changed) == 2, changed
+    assert all(torch.allclose(a, b) for a, b in zip(new.state_dict().values(), g.state_dict().values()))
+    mha = tiny(n_head=4, pos_emb='rope')
+    w = mha.transformer.h[0].attn.c_attn.weight
+    new = tiny(n_head=4, n_kv_head=1, pos_emb='rope')
+    load_expanded(new, mha.state_dict())
+    w1 = new.transformer.h[0].attn.c_attn.weight
+    assert torch.equal(w1[:32], w[:32])
+    assert torch.allclose(w1[32:40], w[32:64].view(4, 8, 32).mean(0)) and torch.allclose(w1[40:], w[64:].view(4, 8, 32).mean(0))
+
+
+def test_merge_model_args_gqa():
+    saved = {k: v for k, v in WANTED.items() if k not in LEGACY_DEFAULTS}
+    assert merge_model_args(saved, {**WANTED, 'n_kv_head': 1}, True, 64)['n_kv_head'] == 1, 'finetune: pool'
+    assert merge_model_args(saved, {**WANTED, 'n_kv_head': 1}, False, 64)['n_kv_head'] == 0, 'resume: the checkpoint'
+    assert merge_model_args({**saved, 'n_kv_head': 1}, {**WANTED, 'n_kv_head': 0}, True, 64)['n_kv_head'] == 1, \
+        'KV heads are never grown back'
+
+
+def test_merge_model_args_adds_remain():
+    saved = {k: v for k, v in WANTED.items() if k not in LEGACY_DEFAULTS}
+    assert merge_model_args(saved, {**WANTED, 'n_remain': 33}, True, 64)['n_remain'] == 33, 'finetune: added'
+    assert merge_model_args(saved, {**WANTED, 'n_remain': 33}, False, 64)['n_remain'] == 0, 'resume: the checkpoint'
+
+
 def test_merge_model_args():
     saved = {k: v for k, v in WANTED.items() if k not in LEGACY_DEFAULTS}
     saved['pitch_size'] = 128

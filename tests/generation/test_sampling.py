@@ -8,7 +8,7 @@ import torch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from helpers import batch, run, tiny  # noqa: E402
-from musicar.data.loader import BOS_PITCH, DRUM_PROGRAM, EOS_PITCH  # noqa: E402
+from musicar.data.loader import BOS_PITCH, DRUM_PROGRAM, EOS_PITCH, remain_level  # noqa: E402
 from musicar.generation.sampling import generate, prompt_inputs, with_bos  # noqa: E402
 from musicar.model.gpt import STREAM_ORDER  # noqa: E402
 
@@ -27,12 +27,36 @@ def greedy_reference(m, streams, n_new):
 
 
 def test_greedy_matches_full_forward():
-    for kw in (dict(), dict(pos_emb='rope', norm='rmsnorm', mlp='swiglu', qk_norm=True)):
+    for kw in (dict(), dict(pos_emb='rope', norm='rmsnorm', mlp='swiglu', qk_norm=True),
+               dict(pos_emb='rope', n_head=4, n_kv_head=2)):  # GQA: the cache holds the 2 KV heads
         m = tiny(**kw)
         streams, _, _ = batch(B=2, T=5)
         got = generate(m, *streams, max_new_tokens=30, top_k=1, **KW)
         want = greedy_reference(m, streams, 30)
         assert all(torch.equal(a, b) for a, b in zip(got, want)), kw
+
+
+def test_length_seconds_matches_full_forward():
+    """length_seconds: every note gets the level of length - its onset; cached greedy decoding = a full forward with
+    those levels. Refilled windows keep running."""
+    m = tiny(pos_emb='rope', n_remain=33)
+    torch.nn.init.normal_(m.transformer['cond_remain'].weight)
+    streams, _, _ = batch(B=2, T=5)
+    got = generate(m, *streams, max_new_tokens=30, top_k=1, length_seconds=[3.0, 40.0], **KW)
+    out = [s.clone() for s in streams]
+    for _ in range(30):
+        onset = out[3].cumsum(1).float() * 0.02
+        level = remain_level((torch.tensor([[3.0], [40.0]]) - onset).clamp(min=0), 33)
+        with torch.no_grad():
+            h = m.encode(*out, remain=level)[:, [-1]]
+            nxt = m.cascade.sample(h, lambda logits, name: logits[:, -1].argmax(-1, keepdim=True))
+        out = [torch.cat([o, nxt[name]], 1) for o, name in zip(out, STREAM_ORDER)]
+    assert all(torch.equal(a, b) for a, b in zip(got, out))
+    other = generate(m, *streams, max_new_tokens=30, top_k=1, length_seconds=600.0, **KW)
+    assert not all(torch.equal(a, b) for a, b in zip(got, other)), 'the length changes the notes'
+    small = tiny(pos_emb='rope', n_remain=33, block_size=32)
+    out = generate(small, *streams, max_new_tokens=80, slide=8, length_seconds=10.0, **KW)
+    assert all(o.shape == (2, 85) for o in out)
 
 
 def test_past_block_size_refills():

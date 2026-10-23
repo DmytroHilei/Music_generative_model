@@ -38,6 +38,7 @@ def parse_args():
     p.add_argument('--n_layer', type=int, default=12)
     p.add_argument('--n_embd', type=int, default=512)
     p.add_argument('--n_head', type=int, default=8)
+    p.add_argument('--n_kv_head', type=int, default=0, help='GQA key / value heads (0 = n_head)')
     p.add_argument('--block', type=int, default=512)
     p.add_argument('--pos_emb', default='learned', choices=['learned', 'rope'])
     p.add_argument('--tokens_per_step', type=int, default=30720)
@@ -69,9 +70,9 @@ def bench(args, micro, compiled, attn, fp8, profile=False, act_ckpt=0, linear_at
     import musicar.model.linear_attn as la
     la.KERNEL = gdn_kernel
     torch.manual_seed(0)
-    cfg = MusicConfig(n_layer=args.n_layer, n_embd=args.n_embd, n_head=args.n_head, block_size=args.block,
-                      pos_emb=args.pos_emb, dropout=0.0, label_smoothing=0.0, n_programs=args.n_programs,
-                      norm=args.norm, mlp=args.mlp, qk_norm=bool(args.qk_norm), linear_attn=linear_attn)
+    cfg = MusicConfig(n_layer=args.n_layer, n_embd=args.n_embd, n_head=args.n_head, n_kv_head=args.n_kv_head,
+                      block_size=args.block, pos_emb=args.pos_emb, dropout=0.0, label_smoothing=0.0,
+                      n_programs=args.n_programs, norm=args.norm, mlp=args.mlp, qk_norm=bool(args.qk_norm), linear_attn=linear_attn)
     model = GPT(cfg).cuda()
     model.act_ckpt = act_ckpt
     model.act_ckpt_save = args.ckpt_save
@@ -177,7 +178,7 @@ def bench(args, micro, compiled, attn, fp8, profile=False, act_ckpt=0, linear_at
 def main():
     args = parse_args()
     n = sum(p.numel() for p in GPT(MusicConfig(n_layer=args.n_layer, n_embd=args.n_embd, n_head=args.n_head,
-                                               mlp=args.mlp, qk_norm=bool(args.qk_norm))).parameters())
+                                               n_kv_head=args.n_kv_head, mlp=args.mlp, qk_norm=bool(args.qk_norm))).parameters())
     print(f"model {args.n_layer}L x {args.n_embd} ({n / 1e6:.1f}M), block {args.block} {args.pos_emb}, "
           f"{args.tokens_per_step:,} tokens/step, {torch.cuda.get_device_name()}")
     print(f"optimizer {args.optim}, n_programs {args.n_programs}")

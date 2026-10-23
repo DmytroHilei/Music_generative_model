@@ -349,6 +349,17 @@ def train_gpu_eager(s):
     s.train('train-gpu-eager', compile=False, fp8=False)
 
 
+@test('train-gpu-f1', gpu=True, needs=('data',))
+def train_gpu_f1(s):
+    """6 steps with the GPU defaults (bf16, torch.compile, fp8) and the planned F1 additions: GQA (1 KV head for 2
+    query heads, SDPA enable_gqa), the length input (n_remain 33), RoPE, BOS/EOS; then generate.py --length-seconds
+    from it (CUDA graph with the per-note length level)."""
+    out = s.train('train-gpu-f1', n_kv_head=1, n_remain=33, pos_emb='rope', special_tokens=True)
+    s.generate('gpu-f1', s.work / 'train-gpu-f1', '--length-seconds', 5)
+    losses = val_losses(out)
+    return f'val {losses[0][1]:.3f} -> {losses[-1][1]:.3f}'
+
+
 @test('golden-gpu', gpu=True, needs=('train-gpu', 'train-gpu-eager'))
 def golden_gpu(s):
     """train-gpu's and train-gpu-eager's val losses vs tests/assets/losses/<GPU name>.json (one file per GPU type,
@@ -462,6 +473,37 @@ def generate_no_graph(s):
 def generate_cpu(s):
     """generate.py on the CPU from train-cpu."""
     s.generate('cpu', s.work / 'train-cpu', '--device', 'cpu')
+
+
+@test('finetune-cpu-f1', needs=('train-cpu',))
+def finetune_cpu_f1(s):
+    """init_from=finetune from train-cpu on the CPU into the planned F1 additions: GQA (2 heads mean-pooled into 1 KV
+    head) and the length input (n_remain 33, zero-init, seconds to the piece's end from the loader), with BOS/EOS."""
+    from musicar.model.checkpoint import resolve_checkpoint
+    out = s.train('finetune-cpu-f1', init_from='finetune', init_ckpt=resolve_checkpoint(s.work / 'train-cpu'),
+                  special_tokens=True, n_kv_head=1, n_remain=33, **CPU)
+    if 'K / V mean-pooled to 1 heads' not in out or 'transformer.cond_remain.weight' not in out:
+        raise Fail('no K / V pooling or no new cond_remain in the finetune output')
+    losses = val_losses(out)
+    return f'val {losses[0][1]:.3f} -> {losses[-1][1]:.3f}'
+
+
+@test('generate-cpu-length', needs=('finetune-cpu-f1',))
+def generate_cpu_length(s):
+    """generate.py --length-seconds on the CPU from finetune-cpu-f1 (GQA cache, per-note length levels)."""
+    s.generate('cpu-length', s.work / 'finetune-cpu-f1', '--device', 'cpu', '--length-seconds', 5)
+
+
+@test('length-follow-cpu', needs=('finetune-cpu-f1',))
+def length_follow_cpu(s):
+    """eval/compare/length_follow.py end to end on finetune-cpu-f1 (2 lengths + 'none', 2 rows, MIDI of one row)."""
+    out = s.work / 'length_follow'
+    s.run([PY, 'eval/compare/length_follow.py', '--checkpoints', s.work / 'finetune-cpu-f1', '--lengths', '1,2',
+           '--rows', 2, '--max-nps', 20, '--midi', 1, '--device', 'cpu', '--out', out])
+    rows = (out / 'rows.csv').read_text().splitlines()
+    if len(rows) != 1 + 3 * 2 or not (out / 'summary.md').exists():
+        raise Fail(f'{len(rows) - 1} rows in rows.csv, expected 6')
+    return f'{len(list(out.rglob("*.mid")))} MIDI'
 
 
 @test('generate-recipe', gpu=True, needs=('train-recipe',))

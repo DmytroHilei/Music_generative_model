@@ -7,13 +7,13 @@ import torch
 from torch.nn import functional as F
 
 # the MusicConfig fields a checkpoint stores as model_args
-ARCH_KEYS = ('n_layer', 'n_head', 'n_embd', 'block_size', 'bias', 'pitch_size', 'velocity_size', 'duration_size',
-             'delta_time_size', 'n_styles', 'n_programs', 'pos_emb', 'rope_base', 'norm', 'mlp', 'qk_norm', 'cond_inst',
-             'n_density', 'text_dim', 'text_center', 'text_prefix', 'section_len', 'section_lead', 'section_slots',
-             'section_mode', 'section_xattn_every', 'section_repeat', 'linear_attn')
+ARCH_KEYS = ('n_layer', 'n_head', 'n_kv_head', 'n_embd', 'block_size', 'bias', 'pitch_size', 'velocity_size',
+             'duration_size', 'delta_time_size', 'n_styles', 'n_programs', 'pos_emb', 'rope_base', 'norm', 'mlp',
+             'qk_norm', 'cond_inst', 'n_density', 'n_remain', 'text_dim', 'text_center', 'text_prefix', 'section_len',
+             'section_lead', 'section_slots', 'section_mode', 'section_xattn_every', 'section_repeat', 'linear_attn')
 # what checkpoints that predate a key actually used
-LEGACY_DEFAULTS = {'n_styles': 0, 'n_programs': 0, 'pos_emb': 'learned', 'rope_base': 10000.0, 'norm': 'layernorm',
-                   'mlp': 'gelu', 'qk_norm': False, 'cond_inst': False, 'n_density': 0,
+LEGACY_DEFAULTS = {'n_kv_head': 0, 'n_styles': 0, 'n_programs': 0, 'pos_emb': 'learned', 'rope_base': 10000.0,
+                   'norm': 'layernorm', 'mlp': 'gelu', 'qk_norm': False, 'cond_inst': False, 'n_density': 0, 'n_remain': 0,
                    'text_dim': 0, 'text_center': False, 'text_prefix': 0, 'section_len': 0, 'section_lead': 0,
                    'section_slots': 4, 'section_mode': 'prefix', 'section_xattn_every': 2,
                    'section_repeat': 0, 'linear_attn': ''}
@@ -34,13 +34,19 @@ def load_expanded(model, state_dict):
     their fresh init, keys the checkpoint lacks (style embedding) keep theirs. Returns the grown/new keys.
     Exception: a new program condition embedding is zeroed, so the old pitch/duration/velocity heads see exactly
     the conditioning they were trained with (function-preserving growth to multi-instrument), and so is the
-    instrument head's output layer."""
+    instrument head's output layer. GQA: a checkpoint with more key / value heads than the model (n_kv_head) has
+    each group's K / V projection rows mean-pooled (pool_kv_heads; not function-preserving, the uptraining recovers)."""
     own = model.state_dict()
+    cfg, pooled = model.config, []
+    for k in [k for k in state_dict if k.endswith(('.attn.c_attn.weight', '.attn.c_attn.bias'))]:
+        if k in own and own[k].shape[0] < state_dict[k].shape[0]:
+            state_dict[k] = pool_kv_heads(state_dict[k], cfg.n_embd, cfg.n_embd // cfg.n_head, cfg.kv_heads)
+            pooled.append(f'{k} (K / V mean-pooled to {cfg.kv_heads} heads)')
     # a learned-position checkpoint loaded into a RoPE model: the position table has no place to go
     dropped = [k for k in state_dict if k.startswith('transformer.wpe.') and k not in own]
     for k in dropped:
         del state_dict[k]
-    changed = [k for k in own if k not in state_dict] + [f'{k} (dropped)' for k in dropped]
+    changed = [k for k in own if k not in state_dict] + [f'{k} (dropped)' for k in dropped] + pooled
     for k in [k for k in own if k not in state_dict]:
         # the new instrument head's output also starts at zero = a uniform guess (ln 129), not a random one
         if k.startswith('cascade.cond_emb.program.') or k == 'cascade.heads.program.out.weight':
@@ -63,11 +69,26 @@ def load_expanded(model, state_dict):
     return changed
 
 
+def pool_kv_heads(w, n_embd, head_size, n_kv):
+    """c_attn weight (or bias) rows [q (n_embd) | k | v] with any number of key / value heads -> n_kv of them: each
+    group of consecutive heads (the query heads that share a KV head under enable_gqa) averaged."""
+    q, kv = w[:n_embd], w[n_embd:]
+    k, v = kv.chunk(2, dim=0)
+    heads = k.shape[0] // head_size
+    assert heads % n_kv == 0, f'{heads} KV heads do not pool into {n_kv}'
+
+    def pool(x):
+        return x.reshape(n_kv, heads // n_kv, head_size, *x.shape[1:]).float().mean(1).reshape(
+            n_kv * head_size, *x.shape[1:]).to(x.dtype)
+    return torch.cat([q, pool(k), pool(v)])
+
+
 def merge_model_args(saved, wanted, finetune, block_size):
     """Model args for a resume / finetune: the checkpoint's own (`saved`; LEGACY_DEFAULTS, then `wanted`, for keys it
     predates). A finetune may change what load_expanded can map: grow pitch_size / n_styles / n_programs, add the
     text input (text_dim 0 -> the encoder's width), its centering (text_center) or the T2 prefix (text_prefix), convert
-    attention layers to linear attention (linear_attn), switch to RoPE, and set block_size (RoPE: any; learned positions:
+    attention layers to linear attention (linear_attn), add the length input (n_remain), pool key / value heads (n_kv_head below the checkpoint's: GQA),
+    switch to RoPE, and set block_size (RoPE: any; learned positions:
     larger, the table is stretched)."""
     args = {}
     add_sections = finetune and not saved.get('section_len', 0)
@@ -79,6 +100,8 @@ def merge_model_args(saved, wanted, finetune, block_size):
             args[k] = wanted[k]  # add the text input (zero-init text_proj: starts as the old model)
         if finetune and k == 'text_center' and wanted[k]:
             args[k] = True  # text_mean is then set from the training captions (train.py)
+        if finetune and k == 'n_remain' and wanted.get(k) and not args[k]:
+            args[k] = wanted[k]  # add the length input (zero-init cond_remain: starts as the old model)
         if finetune and k == 'text_prefix' and args[k] == 0:
             args[k] = wanted[k]  # add the T2 prefix adapter
         if add_sections and k.startswith('section_'):
@@ -87,6 +110,8 @@ def merge_model_args(saved, wanted, finetune, block_size):
             args[k] = wanted[k]  # repeat the section caption (no new parameters, only more inserted vectors)
         if finetune and k == 'linear_attn' and wanted.get(k) and not args[k]:
             args[k] = wanted[k]  # convert attention layers to linear attention (c_attn / c_proj carry over)
+        if finetune and k == 'n_kv_head' and wanted.get(k) and wanted[k] < (args[k] or args['n_head']):
+            args[k] = wanted[k]  # GQA: K / V heads mean-pooled per group (load_expanded)
         if finetune and k == 'pos_emb' and wanted[k] == 'rope':
             args[k] = 'rope'  # switch to RoPE: the position table is dropped (not function-preserving)
     if finetune and args['pos_emb'] == 'rope':

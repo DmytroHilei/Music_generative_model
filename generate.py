@@ -90,6 +90,9 @@ def parse_args():
                              "'a sad slow piano ballad' (default: none = unconditional)")
     parser.add_argument("--cfg-scale", type=float, default=1.0,
                         help="classifier-free guidance strength over --text / --style (1 = off; e.g. 1.5-3)")
+    parser.add_argument("--length-seconds", type=float, default=None,
+                        help="models with the length input (n_remain): the piece's length in seconds from the prompt's "
+                             "first note, so it ends there with EOS (default: none)")
     parser.add_argument("--min-notes", type=int, default=0,
                         help="models with BOS/EOS: don't allow the end token before this many new notes")
     parser.add_argument("--density", type=str, default=None,
@@ -260,6 +263,8 @@ def generate_batch(model, config, args, pieces, seed, outs, device, progress=Non
     has_prompt = bool(pieces or args.prompt)
     style = style_id(config, args.style)
     text = text_vector(config, args.text, device)
+    if args.length_seconds is not None and not config.n_remain:
+        raise SystemExit("this checkpoint was trained without the length input (n_remain)")
     target_nps = None
     if args.density == "prompt":
         if not has_prompt or pitch.size(1) < 2:
@@ -296,6 +301,7 @@ def generate_batch(model, config, args, pieces, seed, outs, device, progress=Non
             cond=cond,
             text=text,
             cfg_scale=args.cfg_scale,
+            length_seconds=args.length_seconds,
         )
     print(f"  {len(outs) * args.max_new_tokens / (time.time() - t0):.0f} notes/s")
     save_samples(outs, [t.cpu() for t in (pitch, velocity, duration, delta_time, programs)], n_prompt, args, config)
@@ -358,7 +364,9 @@ def save_samples(outs, streams, n_prompt, args, config):
         if EOS_PITCH in new:
             cut = len(rows[0]) - (len(new) - new.index(EOS_PITCH))
             rows = [x[:cut] for x in rows]
-            print(f"  {out.name}: ended with EOS after {new.index(EOS_PITCH)} new notes")
+            end = streams[0].size(1) - args.max_new_tokens + new.index(EOS_PITCH)
+            secs = sum(streams[3][r, :end].tolist()) * 0.02  # from the first prompt note, as --length-seconds
+            print(f"  {out.name}: ended with EOS after {new.index(EOS_PITCH)} new notes, at {secs:.1f} s")
         keep = [i for i, p in enumerate(rows[0]) if p < BOS_PITCH]
         rows = [[x[i] for i in keep] for x in rows]
         midi = tokens_to_midi(*rows[:4], programs=rows[4], max_polyphony=args.max_polyphony, max_delta=args.max_delta)

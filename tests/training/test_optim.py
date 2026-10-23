@@ -63,6 +63,44 @@ def test_newton_schulz_orthogonalizes():
         assert s.min() > 0.5 and s.max() < 1.3, (shape, s.min(), s.max())
 
 
+def test_polar_express_orthogonalizes_closer():
+    torch.manual_seed(0)
+    for shape in ((32, 32), (16, 48), (48, 16)):
+        g = torch.randn(shape)
+        s = torch.linalg.svdvals(zeropower_via_newtonschulz5(g, kind='polar').float())
+        q = torch.linalg.svdvals(zeropower_via_newtonschulz5(g).float())
+        assert s.min() > 0.8 and s.max() < 1.2, (shape, s.min(), s.max())  # max ~1.14 for both: bf16 rounding
+        assert s.min() > q.min() and (s - 1).abs().mean() < 0.7 * (q - 1).abs().mean(), (shape, s, q)
+
+
+def test_muon_variants_step():
+    """Polar Express / NorMuon / cautious each move every block matrix, keep the update RMS near Muon's 0.2 x lr, and
+    survive a state_dict round trip (NorMuon's neuron_v buffers)."""
+    streams, _, targets = batch()
+    for kw in (dict(muon_ns='polar'), dict(muon_normuon=True), dict(muon_cautious=True)):
+        torch.manual_seed(0)
+        m = tiny()
+        opt = build_optimizer('muon', m, 0.0, 1e-3, (0.9, 0.95), 'cpu', **kw)
+        mats = [p for p in m.transformer.h.parameters() if p.dim() == 2]
+        for _ in range(2):
+            before = [p.detach().clone() for p in mats]
+            _, loss = m.train()(*streams, targets=targets)
+            loss.backward()
+            opt.step()
+            opt.zero_grad()
+        rms = [((p - b).square().mean().sqrt() / 1e-3).item() for p, b in zip(mats, before)]
+        assert all(0.1 < r < 0.4 for r in rms), (kw, rms)
+        muon = opt.optimizers[0]
+        if kw.get('muon_normuon'):
+            assert all(muon.state[p]['neuron_v'].shape == (p.shape[0],) for p in mats)
+        opt.load_state_dict(opt.state_dict())
+    try:
+        build_optimizer('adamw', tiny(), 0.1, 1e-3, (0.9, 0.95), 'cpu', muon_normuon=True)
+        raise RuntimeError('muon_normuon with adamw')
+    except AssertionError:
+        pass
+
+
 def test_set_lr_uses_lr_mult():
     m = tiny(n_styles=4)
     opt = build_optimizer('muon', m, 0.1, 1e-3, (0.9, 0.95), 'cpu', style_lr_mult=20.0)

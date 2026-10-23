@@ -12,7 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from helpers import make_store, notes, run  # noqa: E402
 from musicar.data.loader import (BOS_PITCH, DRUM_PROGRAM, EOS_PITCH, NoteWindowDataset, collate_windows,  # noqa: E402
-                                 density_level, source_name, window_conditions)
+                                 density_level, remain_level, remaining_seconds, source_name, window_conditions)
 
 
 def dataset(d, files, progs=None, name='toy', **kw):
@@ -129,6 +129,49 @@ def test_conditions_and_collate():
     (streams, extra), y = collate_windows(items, extra_names=('style', 'text'))
     assert streams[0].shape == (3, 4) and extra['style'].tolist() == [0, 1, 2] and extra['text'][2] == 'cap 2'
     assert source_name('store:data/cache/gigamidi_clean,data/finetune/x.csv') == 'gigamidi_clean+x'
+
+
+
+def test_remaining_seconds_and_levels():
+    pitch = torch.tensor([60, 60, 60, EOS_PITCH, BOS_PITCH, 60, 60])
+    dt = torch.tensor([0, 5, 10, 0, 0, 0, 25])
+    rem = remaining_seconds(pitch, dt, tail=1.0)  # a packed window: a piece ends at the EOS, the next one is cut
+    assert torch.allclose(rem, torch.tensor([0.3, 0.2, 0.0, 0.0, 1.5, 1.5, 1.0])), rem
+    assert remain_level([0.0, 0.49, 0.5, 1200.0, 5000.0]).tolist() == [1, 1, 2, 32, 32]
+    levels = remain_level(np.geomspace(0.5, 1199, 200))
+    assert torch.all(levels[1:] >= levels[:-1]) and set(levels.tolist()) == set(range(2, 33))
+
+
+def test_remain_input():
+    """The seconds from each input row's onset to its piece's end: exact for the strided windows of a file, 0 at
+    EOS, restarting in packed windows, and stretched with the notes by the tempo augmentation."""
+    with tempfile.TemporaryDirectory() as d:
+        f = notes(40, 0)
+        ds = dataset(d, [f], special_tokens=True, eval_stride=8, remain=True)
+        onset = np.concatenate([[0.0], np.cumsum(f[:, 3]) * 0.02])  # virtual rows: BOS, notes (EOS = last onset)
+        onset = np.concatenate([onset, [onset[-1]]])
+        for i, (_, v) in enumerate(ds.windows.tolist()):
+            x, _ = ds[i]
+            assert len(x) == 5 and x[4].dtype == torch.float32
+            rows = np.arange(v, min(v + 16, len(onset)))
+            assert np.allclose(x[4][:len(rows)].numpy(), onset[-1] - onset[rows], atol=1e-4), (v, x[4])
+        files = [notes(5, i) for i in range(6)] + [notes(70, 9)]
+        pack = dataset(d, files, name='pack', special_tokens=True, pack_short=True, min_notes=4, remain=True)
+        random.seed(1)
+        for _ in range(30):
+            x, _ = pack[0]
+            pitch, dt, rem = x[0], x[3], x[4]
+            assert torch.all(rem[pitch == EOS_PITCH] == 0) and torch.all(rem >= 0)
+            step = rem[:-1] - rem[1:]
+            inside = (pitch[:-1] != EOS_PITCH)  # within a piece the remainder falls by each next note's step
+            assert torch.allclose(step[inside], dt[1:][inside].float() * 0.02, atol=1e-4)
+        tempo = dataset(d, [notes(60, 4)], name='tempo', augment=True, aug_tempo=0.5, remain=True)
+        random.seed(2)
+        for _ in range(10):
+            x, _ = tempo[0]
+            assert torch.allclose(x[4][:-1] - x[4][1:], x[3][1:].float() * 0.02, atol=1e-4)
+        (streams, extra), _ = collate_windows([ds[0], ds[1]], extra_names=('remain',))
+        assert extra['remain'].shape == (2, 16)
 
 
 if __name__ == '__main__':

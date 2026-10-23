@@ -38,9 +38,14 @@ ARMS = {
     'cf1': CF + ['--section_splice_frac=0.25', '--section_repeat=64', '--section_cf_rows=1'],
     # overshoot fix B3 + B5 (2026-10-23): 'all' with section attributes v2 (section-level thresholds, rhythm + texture)
     'all_v2': CF + ['--section_splice_frac=0.25', '--section_repeat=64', '--section_attrs=v2'],
+    's50_v2': ['--section_splice_frac=0.5', '--section_repeat=64', '--section_attrs=v2'],
+    # F1 additions on the ctrl recipe (control = the ctrl row, same steps): GQA 12 -> 4 KV heads (K / V mean-pooled per
+    # group of 3), the length input (seconds to the piece's end; ends: eval/compare/length_follow.py)
+    'gqa4': ['--n_kv_head=4'],
+    'len': ['--n_remain=33'],
 }
-FOLLOW_PROMPTS = {'all_v2': 'section_v2'}  # section_follow --prompts (default 'section')
-ITERS = {'nocf': 2700, 'nocf_s50': 2700, 'cfcool': 2350, 'cf1': 2200}  # others MAX_ITERS
+FOLLOW_PROMPTS = {'all_v2': 'section_v2', 's50_v2': 'section_v2'}  # section_follow --prompts (default 'section')
+ITERS = {'nocf': 2700, 'nocf_s50': 2700, 'cfcool': 2350, 'cf1': 2200, 's50_v2': 2700}  # others MAX_ITERS
 TABLE = ROOT / 'logs/sections/forget.md'
 BASELINE = 'checkpoints/v2_A0'
 PAIRS = ('loud', 'fast', 'drums', 'high', 'strings', 'uk_loud')

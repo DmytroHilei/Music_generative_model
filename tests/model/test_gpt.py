@@ -77,6 +77,70 @@ def test_kv_cache_matches_full_forward():
                     assert torch.allclose(h[:, 0], full[:, i], atol=1e-5), (kw, n0, i)
 
 
+def test_gqa_kv_cache_matches_full_forward():
+    """GQA (n_kv_head < n_head): the cache holds n_kv_head heads; prefill + one-note steps = the full forward."""
+    for kw in (dict(n_kv_head=2), dict(n_kv_head=1, pos_emb='rope', norm='rmsnorm', mlp='swiglu', qk_norm=True)):
+        m = tiny(n_head=4, **kw)
+        assert m.transformer.h[0].attn.c_attn.weight.shape == (32 + 2 * kw['n_kv_head'] * 8, 32)
+        streams, _, _ = batch(B=2, T=20)
+        with torch.no_grad():
+            full = m.encode(*streams)
+            cache = KVCache(2, 2, m.config.kv_heads, 20, 8, 'cpu', torch.float32)
+            h = m.encode(*(s[:, :5] for s in streams), cache=cache)
+            assert torch.allclose(h, full[:, :5], atol=1e-5), kw
+            for i in range(5, 20):
+                cache.pos.fill_(i)
+                h = m.encode(*(s[:, i:i + 1] for s in streams), cache=cache)
+                assert torch.allclose(h[:, 0], full[:, i], atol=1e-5), (kw, i)
+
+
+def test_gqa_equals_mha_with_repeated_kv_heads():
+    """A GQA layer = multi-head attention whose K / V heads are copies within each group (consecutive query heads
+    share a KV head, as enable_gqa's repeat_interleave)."""
+    g = tiny(n_head=4, n_kv_head=2, pos_emb='rope', qk_norm=True)
+    mha = tiny(n_head=4, pos_emb='rope', qk_norm=True)
+    state = g.state_dict()
+    for k in [k for k in state if k.endswith('attn.c_attn.weight')]:
+        q, kk, v = state[k].split([32, 16, 16])
+        rep = lambda x: x.view(2, 1, 8, 32).expand(2, 2, 8, 32).reshape(32, 32)  # noqa: E731
+        state[k] = torch.cat([q, rep(kk), rep(v)])
+    mha.load_state_dict(state)
+    streams, _, _ = batch()
+    with torch.no_grad():
+        assert torch.allclose(g.encode(*streams), mha.encode(*streams), atol=1e-5)
+
+
+def test_kv_heads():
+    assert tiny().config.kv_heads == 2 and tiny(n_head=4, n_kv_head=2).config.kv_heads == 2
+    for bad in (dict(n_head=4, n_kv_head=3), dict(n_kv_head=1, linear_attn='0')):
+        try:
+            tiny(**bad)
+            raise RuntimeError(bad)
+        except AssertionError:
+            pass
+
+
+def test_remain_input_zero_init_and_cache():
+    """A fresh length input changes nothing until trained; once trained, prefill + one-note steps with the
+    per-position levels = the full forward."""
+    streams, _, _ = batch(B=2, T=20)
+    remain = torch.randint(0, 33, (2, 20), generator=torch.Generator().manual_seed(3))
+    plain, m = tiny(pos_emb='rope'), tiny(pos_emb='rope', n_remain=33)
+    m.load_state_dict(plain.state_dict(), strict=False)
+    with torch.no_grad():
+        assert torch.allclose(plain.encode(*streams), m.encode(*streams, remain=remain), atol=1e-6)
+        torch.nn.init.normal_(m.transformer['cond_remain'].weight)
+        full = m.encode(*streams, remain=remain)
+        assert not torch.allclose(full, m.encode(*streams))
+        cache = KVCache(2, 2, 2, 20, 16, 'cpu', torch.float32)
+        assert torch.allclose(m.encode(*(s[:, :5] for s in streams), cache=cache, remain=remain[:, :5]), full[:, :5],
+                              atol=1e-5)
+        for i in range(5, 20):
+            cache.pos.fill_(i)
+            h = m.encode(*(s[:, i:i + 1] for s in streams), cache=cache, remain=remain[:, i:i + 1])
+            assert torch.allclose(h[:, 0], full[:, i], atol=1e-5), i
+
+
 def test_rope_is_relative():
     torch.manual_seed(0)
     q, k = torch.randn(1, 1, 1, 16), torch.randn(1, 1, 1, 16)

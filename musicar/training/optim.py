@@ -6,6 +6,12 @@ Muon: momentum SGD whose update for a 2D weight is orthogonalized with a Newton-
 momentum), so all directions of the matrix get updated at a similar rate. Moonlight scaling multiplies the
 orthogonalized update by 0.2 * sqrt(max(rows, cols)) so its RMS matches AdamW's: then Muon can use the SAME learning
 rate and decoupled weight decay as AdamW, and the existing LR schedule works unchanged.
+
+Variants (off by default; the 42M A/B of todo c7cb78dd): ns='polar' = Polar Express coefficients (Amsel et al. 2025,
+a different quintic per Newton-Schulz step, closer to U V^T in the same 5 steps), normuon=True = NorMuon (Li et al.
+2025: the orthogonalized update divided per output neuron by the root of an EMA of its mean square, then scaled back to
+RMS 0.2), cautious=True = Cautious mask (Liang et al. 2024: update entries whose sign disagrees with the current
+gradient zeroed, the rest scaled up by 1 / the kept share).
 """
 
 import math
@@ -13,16 +19,32 @@ import math
 import torch
 
 
+# Polar Express (Amsel et al. 2025, as in modded-nanogpt): one quintic per step, with the safety factor 1.02 in the
+# normalization; steps past the 5th reuse the last one
+POLAR_EXPRESS = ((8.156554524902461, -22.48329292557795, 15.878769915207462),
+                 (4.042929935166739, -2.808917465908714, 0.5000178451051316),
+                 (3.8916678022926607, -2.772484153217685, 0.5060648178503393),
+                 (3.285753657755655, -2.3681294933425376, 0.46449024233003106),
+                 (2.3465413258596377, -1.7097828382687081, 0.42323551169305323))
+NS_KINDS = ('quintic', 'polar')
+
+
 @torch.no_grad()
-def zeropower_via_newtonschulz5(G, steps=5):
-    """Approximate the orthogonal polar factor U V^T of G with a quintic Newton-Schulz iteration (in bf16)."""
-    a, b, c = 3.4445, -4.7750, 2.0315
+def zeropower_via_newtonschulz5(G, steps=5, kind='quintic'):
+    """Approximate the orthogonal polar factor U V^T of G with a quintic Newton-Schulz iteration (in bf16).
+    kind 'quintic': Keller Jordan's fixed coefficients; 'polar': Polar Express (POLAR_EXPRESS)."""
+    assert kind in NS_KINDS, kind
     X = G.bfloat16()
     transposed = G.size(-2) > G.size(-1)
     if transposed:
         X = X.mT
-    X = X / (X.norm(dim=(-2, -1), keepdim=True) + 1e-7)
-    for _ in range(steps):
+    if kind == 'polar':
+        X = X / (X.norm(dim=(-2, -1), keepdim=True) * 1.02 + 1e-6)
+        coeffs = [POLAR_EXPRESS[min(i, len(POLAR_EXPRESS) - 1)] for i in range(steps)]
+    else:
+        X = X / (X.norm(dim=(-2, -1), keepdim=True) + 1e-7)
+        coeffs = [(3.4445, -4.7750, 2.0315)] * steps
+    for a, b, c in coeffs:
         A = X @ X.mT
         B = b * A + c * A @ A
         X = a * X + B @ X
@@ -33,16 +55,21 @@ def zeropower_via_newtonschulz5(G, steps=5):
 
 class Muon(torch.optim.Optimizer):
     def __init__(self, params, lr=6e-4, momentum=0.95, nesterov=True, weight_decay=0.1, ns_steps=5,
-                 momentum_dtype=None, compile_ns=False, ns_chunk=8):
+                 momentum_dtype=None, compile_ns=False, ns_chunk=8, ns='quintic', normuon=False, normuon_beta2=0.95,
+                 cautious=False):
         # momentum_dtype: torch.bfloat16 halves the optimizer state (2 instead of 4 bytes per param). The buffer is a
         # smoothed direction that Newton-Schulz orthogonalizes in bf16 anyway; the fp32 weights still take the update.
         # Same-shaped matrices (qkv, attn proj, fc, mlp proj of every layer) run Newton-Schulz together as one batched
         # matmul, ns_chunk matrices at a time (caps the temporary memory: all 56 MLP matrices of a 450M model at once
         # ran out of memory on 8 GB); compile_ns=True also compiles it (one graph per shape).
+        # ns / normuon / cautious: the variants in the module docstring
+        assert ns in NS_KINDS, ns
         defaults = dict(lr=lr, momentum=momentum, nesterov=nesterov, weight_decay=weight_decay, ns_steps=ns_steps)
         super().__init__(params, defaults)
         self.momentum_dtype = momentum_dtype
         self.ns_chunk = ns_chunk
+        self.ns_kind = ns
+        self.normuon, self.normuon_beta2, self.cautious = normuon, normuon_beta2, cautious
         self.ns = torch.compile(zeropower_via_newtonschulz5) if compile_ns else zeropower_via_newtonschulz5
 
     @torch.no_grad()
@@ -70,8 +97,21 @@ class Muon(torch.optim.Optimizer):
                 # stacked straight into bf16 (what Newton-Schulz runs in), one chunk of a shape group at a time
                 g = torch.stack([(gr.add(buf, alpha=group['momentum']) if group['nesterov'] else buf).bfloat16()
                                  for gr, buf in zip(grads, bufs)])
-                update = self.ns(g, steps=group['ns_steps'])
+                update = self.ns(g, steps=group['ns_steps'], kind=self.ns_kind)
                 scale = 0.2 * max(shape[0], shape[1]) ** 0.5  # Moonlight: match AdamW update RMS
+                if self.normuon:  # per output neuron (row): / sqrt(EMA of the row's mean square), then RMS 0.2
+                    u = update.float()
+                    for p in params:
+                        if 'neuron_v' not in self.state[p]:
+                            self.state[p]['neuron_v'] = torch.zeros(shape[0], device=p.device)
+                    vs = [self.state[p]['neuron_v'] for p in params]
+                    torch._foreach_lerp_(vs, list(u.square().mean(-1).unbind(0)), 1 - self.normuon_beta2)
+                    u = u / (torch.stack(vs).sqrt() + 1e-8).unsqueeze(-1)
+                    update = u * (0.2 * (shape[0] * shape[1]) ** 0.5 / u.norm(dim=(-2, -1), keepdim=True).clamp_min(1e-12))
+                    scale = 1.0
+                if self.cautious:  # keep the entries that agree in sign with the current gradient, mean scale kept
+                    mask = (update * torch.stack(grads).to(update.dtype) > 0).to(update.dtype)
+                    update = update * mask / mask.mean(dim=(-2, -1), keepdim=True).clamp_min(1e-3)
                 torch._foreach_mul_(params, 1 - group['lr'] * group['weight_decay'])
                 torch._foreach_add_(params, list(update.unbind(0)), alpha=-group['lr'] * scale)
 
@@ -149,7 +189,8 @@ def build_adamw(model, weight_decay, learning_rate, betas, device_type, text_lr_
 
 
 def build_muon_optimizer(model, weight_decay, learning_rate, betas, device_type, momentum=0.95, style_lr_mult=1.0,
-                         momentum_dtype=None, compile_ns=False, text_lr_mult=1.0):
+                         momentum_dtype=None, compile_ns=False, text_lr_mult=1.0, ns='quintic', normuon=False,
+                         cautious=False):
     """Muon for the 2D matrices inside the transformer blocks, AdamW for embeddings, heads, norms.
     The style table (if any) gets its own AdamW group: lr x style_lr_mult (the train loop applies each group's
     'lr_mult'), no weight decay, so a zero-initialized conditioning vector can move far in a short fine-tune."""
@@ -175,8 +216,10 @@ def build_muon_optimizer(model, weight_decay, learning_rate, betas, device_type,
     adamw = torch.optim.AdamW(groups + text_group(model, text_lr_mult),
                               lr=learning_rate, betas=betas, **(dict(fused=True) if fused else {}))
     muon = Muon(muon_params, lr=learning_rate, momentum=momentum, weight_decay=weight_decay,
-                momentum_dtype=momentum_dtype, compile_ns=compile_ns)
-    print(f"Muon: {len(muon_params)} matrices, {sum(p.numel() for p in muon_params):,} params | "
+                momentum_dtype=momentum_dtype, compile_ns=compile_ns, ns=ns, normuon=normuon, cautious=cautious)
+    variant = ', '.join(x for x, on in ((f"ns {ns}", ns != 'quintic'), ('NorMuon', normuon), ('cautious', cautious)) if on)
+    print(f"Muon{f' ({variant})' if variant else ''}: {len(muon_params)} matrices, "
+          f"{sum(p.numel() for p in muon_params):,} params | "
           f"AdamW: {sum(p.numel() for p in adam_decay + adam_nodecay):,} params"
           + (f" | style table: {sum(p.numel() for p in style_params):,} params, lr x{style_lr_mult:g}" if style_params else ""))
     return CombinedOptimizer(muon, adamw)
@@ -208,14 +251,18 @@ def build_adamw8bit(model, weight_decay, learning_rate, betas, style_lr_mult=1.0
 
 
 def build_optimizer(name, model, weight_decay, learning_rate, betas, device_type, style_lr_mult=1.0,
-                    muon_momentum=0.95, muon_bf16=False, compile_ns=False, text_lr_mult=1.0, linear_lr_mult=1.0):
+                    muon_momentum=0.95, muon_bf16=False, compile_ns=False, text_lr_mult=1.0, linear_lr_mult=1.0,
+                    muon_ns='quintic', muon_normuon=False, muon_cautious=False):
     """name: 'adamw' | 'adamw8bit' | 'muon' (Muon for the transformer-block matrices, AdamW for the rest).
-    linear_lr_mult: AdamW only (build_adamw)."""
+    linear_lr_mult: AdamW only (build_adamw); muon_ns / muon_normuon / muon_cautious: Muon only (Muon variants)."""
+    assert name == 'muon' or (muon_ns, muon_normuon, muon_cautious) == ('quintic', False, False), \
+        'muon_ns / muon_normuon / muon_cautious: Muon only'
     assert linear_lr_mult == 1.0 or name == 'adamw', 'linear_lr_mult: AdamW only'
     if name == 'muon':
         return build_muon_optimizer(model, weight_decay, learning_rate, betas, device_type, momentum=muon_momentum,
                                     style_lr_mult=style_lr_mult, compile_ns=compile_ns,
-                                    momentum_dtype=torch.bfloat16 if muon_bf16 else None, text_lr_mult=text_lr_mult)
+                                    momentum_dtype=torch.bfloat16 if muon_bf16 else None, text_lr_mult=text_lr_mult,
+                                    ns=muon_ns, normuon=muon_normuon, cautious=muon_cautious)
     if name == 'adamw8bit':
         return build_adamw8bit(model, weight_decay, learning_rate, betas, style_lr_mult=style_lr_mult,
                                text_lr_mult=text_lr_mult)

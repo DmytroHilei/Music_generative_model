@@ -5,6 +5,7 @@ import contextlib
 import hashlib
 import io
 import json
+import math
 import os
 import random
 
@@ -31,6 +32,35 @@ def density_level(notes_per_s, n_density=16):
     """Notes per second -> level 1..n_density-1 (two per octave from 0.5 to 64 notes/s; 0 = none)."""
     nps = torch.as_tensor(notes_per_s, dtype=torch.float32)
     return (1 + (2 * torch.log2(nps.clamp(min=1e-3)) + 2).floor().clamp(0, n_density - 2)).long()
+
+
+REMAIN_END, REMAIN_MAX = 0.5, 1200.0  # seconds: the 'at the end' level, the start of the last level
+
+
+def remain_level(seconds, n_remain=33):
+    """Seconds to the end of the piece -> level 1..n_remain-1 (MusicConfig.n_remain): 1 = under REMAIN_END (the
+    last notes), then n_remain - 2 log steps from REMAIN_END to REMAIN_MAX (~28% each at 33 levels; longer = the last
+    level); 0 = none."""
+    s = torch.as_tensor(seconds, dtype=torch.float32)
+    n = n_remain - 2
+    step = torch.log(s.clamp(min=REMAIN_END) / REMAIN_END) / math.log(REMAIN_MAX / REMAIN_END)
+    return torch.where(s < REMAIN_END, 1, 2 + (step * n).floor().clamp(0, n - 1)).long()
+
+
+def remaining_seconds(pitch, delta_time, tail, dt_seconds=0.02):
+    """Seconds from each row's onset to the end of its piece, for the rows (R,) of a window: the delta_times of the
+    rows after it up to the next EOS (0 at an EOS, and in the padding after it), plus `tail` (the seconds of the piece
+    after the window's last row) where no EOS follows. Packed windows restart after each EOS."""
+    R = len(pitch)
+    c = torch.zeros(R + 1, dtype=torch.float64)
+    c[:R - 1] = delta_time[1:].double() * dt_seconds  # c[r] = the step from row r to row r + 1
+    c[R - 1] = tail
+    S = c.flip(0).cumsum(0).flip(0)  # S[r] = sum of c[r:], S[R] = 0
+    idx = torch.full((R,), R, dtype=torch.long)
+    eos = torch.nonzero(pitch == EOS_PITCH).flatten()
+    idx[eos] = eos
+    nxt = idx.flip(0).cummin(0).values.flip(0)  # the first EOS at or after each row (R = none)
+    return (S[:R] - S[nxt]).float()
 
 
 def section_change_scores(store, section_len, pad, version='v1'):
@@ -148,6 +178,7 @@ class NoteWindowDataset(Dataset):
         section_repeat=0,
         counterfactual=False,
         splice_frac=0.0,
+        remain=False,
     ):
         """
         csv_path:    one or more sources separated by ',': a CSV (paths inside relative to root_dir or absolute),
@@ -218,6 +249,9 @@ class NoteWindowDataset(Dataset):
                      changed section's event in its section captions, and the window index of that section's first
                      note; ('', 0, -1) = none (other windows, a dropped caption, the same caption). For the
                      counterfactual loss (GPT.forward cf): the new caption must beat the previous one on its first notes
+        remain:      length control (MusicConfig.n_remain): each window also returns, last in x, the seconds from each
+                     input row's onset to the end of its piece (remaining_seconds; float (block_size,), after the tempo
+                     stretch); bucketed and dropped in train.py (remain_level)
         splice_frac: training only, with section_len: this share of windows (drawn before change_frac) is spliced:
                      notes of one file up to a section boundary (at window index lead + margin .. block_size - margin,
                      as change windows), then a section of another long file of the same store from its own section
@@ -293,6 +327,7 @@ class NoteWindowDataset(Dataset):
         self.change_frac = change_frac if section_len and not eval_stride else 0.0
         self.counterfactual = bool(counterfactual and section_len and not eval_stride)
         self.splice_frac = splice_frac if section_len and not eval_stride else 0.0
+        self.remain = remain
 
         store_ids, starts, lengths, styles_kept, file_ids = [], [], [], [], []
         for i, store in enumerate(self.store_dirs):
@@ -586,16 +621,19 @@ class NoteWindowDataset(Dataset):
                     v = int(self.lengths[file_idx]) - self.block_size - 1  # ends with EOS
 
         splice = change if not self.eval_stride and change is not None and len(change) == 5 else None
+        tail = 0.0  # seconds of the (last) piece after the window, for remain
         if splice is not None:
             rows, program = self._read(file_idx, v)
             rows2, program2 = self._read(splice[3], splice[4])
             b = splice[2]
             rows = torch.cat([rows[:b], rows2[b:]])
             program = None if program is None else torch.cat([program[:b], program2[b:]])
+            tail = self._tail_seconds(splice[3], splice[4] + self.block_size) if self.remain else 0.0
         elif self.pack_short and self.short[file_idx]:
-            rows, program = self._read_packed(file_idx)
+            rows, program, tail = self._read_packed(file_idx)
         else:
             rows, program = self._read(file_idx, v)
+            tail = self._tail_seconds(file_idx, v + self.block_size) if self.remain else 0.0
         pitch, velocity, duration, delta_time = rows.unbind(1)
         drums = program == DRUM_PROGRAM if program is not None else None
         if drums is not None:
@@ -615,6 +653,8 @@ class NoteWindowDataset(Dataset):
                 s = (1 + self.aug_tempo) ** random.uniform(-1, 1)
                 duration = self._stretch(duration, s, self.max_duration_bin)
                 delta_time = self._stretch(delta_time, s, self.max_delta_bin)
+                tail *= s
+        remain = remaining_seconds(pitch, delta_time, tail, self.time_resolution) if self.remain else None
 
         streams = (pitch, velocity, duration, delta_time) + ((program,) if program is not None else ())
         n_rows = len(pitch)
@@ -639,7 +679,22 @@ class NoteWindowDataset(Dataset):
             x = x + (caps, pos)
             if self.counterfactual:
                 x = x + self._counterfactual(file_idx, v, change, caps, events)
+        if remain is not None:
+            if len(remain) < self.block_size + 1:
+                remain = F.pad(remain, (0, self.block_size + 1 - len(remain)))
+            x = x + (remain[:-1],)
         return x, y
+
+    def _tail_seconds(self, file_idx, last_row):
+        """Seconds of file_idx's notes after virtual row last_row (the sum of their delta_times; 0 from the last note
+        or EOS on)."""
+        store_id, start = int(self.store_ids[file_idx]), int(self.starts[file_idx])
+        n = int(self.lengths[file_idx]) - 2 * self.pad
+        a = max(last_row - self.pad + 1, 0)
+        if a >= n:
+            return 0.0
+        dt = np.asarray(self.tokens[store_id][start + a:start + n, 3], dtype=np.int64)
+        return float(dt.sum()) * self.time_resolution
 
     def _counterfactual(self, file_idx, v, change, caps, events):
         """(cf_text, cf_event, cf_start) of a window (see counterfactual): the caption of the section before the
@@ -747,7 +802,7 @@ class NoteWindowDataset(Dataset):
 
     def _read_packed(self, file_idx):
         """A short file followed by random short files of the same store (drawn per note), whole, cut at
-        block_size + 1 rows."""
+        block_size + 1 rows; (rows, programs, seconds of the cut file after the cut)."""
         idx, cum = self.short_files[int(self.store_ids[file_idx])]
         parts = [self._read(file_idx, 0)]
         n_rows = len(parts[0][0])
@@ -757,7 +812,11 @@ class NoteWindowDataset(Dataset):
             n_rows += len(parts[-1][0])
         rows = torch.cat([r for r, _ in parts])[:self.block_size + 1]
         program = torch.cat([p for _, p in parts])[:self.block_size + 1] if self.programs else None
-        return rows, program
+        tail = 0.0
+        if self.remain:  # the last file's last row in the window: virtual row len(last) - 1 - (rows cut off)
+            last = j if len(parts) > 1 else file_idx
+            tail = self._tail_seconds(last, len(parts[-1][0]) - 1 - (n_rows - self.block_size - 1))
+        return rows, program, tail
 
     @staticmethod
     def _stretch(bins, s, max_bin):
