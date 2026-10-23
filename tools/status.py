@@ -6,6 +6,8 @@ Live dashboard of everything running in this project: training runs, song downlo
     .venv/bin/python tools/status.py --web 8765 # no terminal view: serve it as a web page (phone on the same network:
                                                 # http://<laptop ip>:8765/?t=<token>, the token is printed);
                                                 # the project to-do list at /todo?t=<token> (tools/todo_web.py)
+    tools/dashboard_service.sh install          # the same, always on: systemd user service on 127.0.0.1, fixed token,
+                                                # https://<machine>.<tailnet>.ts.net through tailscale serve
 
 Everything is read from files (logs/*.log, data/audio, data/finetune) and nvidia-smi, so it never touches
 the running jobs. Long section runs (tools/sweeps/section_long.py, train.py in chunks) get their own table: the chunk
@@ -970,9 +972,25 @@ def render(show_all=False):
                  pipeline_table(), training_table(None if show_all else 4), jobs_table(keep=6 if show_all else 2))
 
 
-def serve(port, interval, show_all, token):
-    """The dashboard as a self-refreshing HTML page (rich's own HTML export of the same view) on port, for every
-    address of this machine, and the to-do page (tools/todo_web.py); requests without ?t=<token> get 403."""
+def tailscale_urls(port):
+    """https addresses that tailscale serve forwards to this port (none without tailscale or a serve config)."""
+    try:
+        out = subprocess.run(['tailscale', 'serve', 'status', '--json'], capture_output=True, text=True, timeout=5)
+        web = (json.loads(out.stdout or '{}') or {}).get('Web') or {}
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return []
+    urls = []
+    for hostport, conf in web.items():
+        host, _, p = hostport.rpartition(':')
+        for path, handler in (conf.get('Handlers') or {}).items():
+            if handler.get('Proxy', '').rstrip('/').endswith(f':{port}'):
+                urls.append(f'https://{host}' + ('' if p == '443' else f':{p}') + path.rstrip('/'))
+    return urls
+
+
+def serve(port, interval, show_all, token, host='0.0.0.0'):
+    """The dashboard as a self-refreshing HTML page (rich's own HTML export of the same view) on host:port (0.0.0.0:
+    every address of this machine), and the to-do page (tools/todo_web.py); requests without ?t=<token> get 403."""
     import io
     import threading
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -1007,10 +1025,11 @@ def serve(port, interval, show_all, token):
         def log_message(self, *args):
             pass
 
-    server = ThreadingHTTPServer(('0.0.0.0', port), Handler)
+    server = ThreadingHTTPServer((host, port), Handler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
-    ips = subprocess.run(['hostname', '-I'], capture_output=True, text=True).stdout.split()
-    print('dashboard on ' + ', '.join(f'http://{ip}:{port}/?t={token}' for ip in ips), flush=True)
+    ips = subprocess.run(['hostname', '-I'], capture_output=True, text=True).stdout.split() if host == '0.0.0.0' else [host]
+    urls = tailscale_urls(port) + [f'http://{ip}:{port}' for ip in ips]
+    print('dashboard on ' + ', '.join(f'{u}/?t={token}' for u in urls), flush=True)
     head = (f'<meta http-equiv="refresh" content="{max(5, int(interval))}">'
             '<meta name="viewport" content="width=device-width, initial-scale=1">')
     link = (f'<body><p style="font:15px system-ui,sans-serif;margin:8px"><a href="/todo?t={token}" '
@@ -1028,6 +1047,10 @@ def main():
     parser.add_argument('--once', action='store_true')
     parser.add_argument('--web', type=int, default=0, metavar='PORT', help='serve the view as a web page instead')
     parser.add_argument('--token', default='', help='access token of the web page (default: a random one)')
+    parser.add_argument('--token-file', default='', help='read the token from this file (created with a random one '
+                        'if missing): the link stays the same across restarts')
+    parser.add_argument('--host', default='0.0.0.0', help='address of the web page (127.0.0.1: this machine only, '
+                        'e.g. behind tailscale serve)')
     parser.add_argument('--interval', type=float, default=5)
     parser.add_argument('--all', action='store_true', help='also show old finished runs and sampling jobs')
     parser.add_argument('--long-dir', default='', help='directory of the long section runs (default logs/sections)')
@@ -1037,7 +1060,15 @@ def main():
         LONG_DIR = Path(args.long_dir).resolve()
     if args.web:
         import secrets
-        serve(args.web, max(args.interval, 10), args.all, args.token or secrets.token_urlsafe(8))
+        token = args.token
+        if args.token_file:
+            path = Path(args.token_file).expanduser()
+            if not path.exists():
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(secrets.token_urlsafe(12) + '\n')
+                path.chmod(0o600)
+            token = path.read_text().strip()
+        serve(args.web, max(args.interval, 10), args.all, token or secrets.token_urlsafe(8), args.host)
         return
     if args.once:
         from rich.console import Console
