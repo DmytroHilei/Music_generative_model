@@ -265,6 +265,25 @@ def test_section_caption_from_notes():
     assert all(caps) and section_caption(tok[:0], np.zeros(0, np.int64)) == ''
 
 
+def test_section_attributes_v2():
+    """v2: section-level thresholds, 'rhythm' + 'texture' instead of 'pace'; texture changes count and get named."""
+    import random
+    n = 64
+    single = np.stack([np.arange(n) % 12 + 60, np.full(n, 28), np.full(n, 10), np.full(n, 3)], 1)
+    chords = single.copy()
+    chords[:, 3] = np.where(np.arange(n) % 8 == 0, 12, 0)  # 8 notes per onset, 1.5 onsets/s
+    piano = np.zeros(n, np.int64)
+    a, c = section_attributes(single, piano, 'v2'), section_attributes(chords, piano, 'v2')
+    assert 'pace' not in a and a['rhythm'] == 'high' and a['texture'] == 'low' and a['dynamics'] == 'high', a
+    assert c['rhythm'] == 'low' and c['texture'] == 'high', c
+    assert 'texture' not in section_attributes(single, piano) and 'pace' in section_attributes(single, piano)  # v1
+    assert section_change(a, c) == 2 and section_changed(a, c) == {'rhythm': 'low', 'texture': 'high'}
+    caps = [section_caption(chords, piano, random.Random(i), prev=a, version='v2').lower() for i in range(30)]
+    assert all(any(w in cap for w in ('chordal', 'dense', 'акордов', 'щільн')) for cap in caps), caps
+    busy = [section_caption(single, piano, random.Random(i), lang='en', version='v2') for i in range(60)]
+    assert any('busy' in cap for cap in busy) and not any('dense' in cap for cap in busy), busy
+
+
 def test_dataset_section_events():
     with tempfile.TemporaryDirectory() as d:
         root = make_store(Path(d), notes=80)  # 80 notes + BOS + EOS = 82 rows per file
@@ -399,6 +418,10 @@ def test_dataset_section_style():
         c = change._section_caption(1, 3).lower()
         assert any(w in c for w in ('loud', 'powerful', 'гучн', 'потужн')), c
         assert any(w in c for w in ('high register', 'high-pitched', 'bright', 'регістр')), c
+        v2 = NoteWindowDataset(src, split='train', section_style='change', section_attrs='v2', **kw)
+        assert any(w in v2._section_caption(1, 3).lower() for w in ('loud', 'powerful', 'гучн', 'потужн'))
+        v2._find_changes(2)
+        assert list(store.glob('section_changes_*_v2.npy')), 'v2 change scores: own cache file'
 
 
 def test_dataset_previous_and_repeat():

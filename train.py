@@ -140,10 +140,12 @@ section_xattn_every = 2
 section_dropout = 0.2     # training: share of section captions replaced by the null caption
 section_max_length = 48   # encoder tokens per section caption
 section_style = 'plain'   # 'change': section captions always name what changed vs the previous section
+section_attrs = 'v1'      # 'v2': section-level thresholds, rhythm + texture words (musicar.text.captions SECTION_Q_V2)
 section_change_frac = 0.0  # training: share of windows around a section change (NoteWindowDataset change_frac)
 section_change_min = 2    # points of change (dynamics / pace / register / drums / instruments)
 section_repeat = 0        # > 0: a section's caption arrives again every this many notes inside it (MusicConfig)
 linear_attn = ''          # MusicConfig.linear_attn: on a finetune, these blocks' attention becomes a Gated DeltaNet
+linear_lr_mult = 1.0      # AdamW: LR multiplier of the linear attention layers' parameters (fresh from a conversion)
                           # ('hybrid4' = 3 linear : 1 full; musicar/model/linear_attn.py)
 attn_transfer = False     # stage 1 of that conversion: only the linear layers train, on the relative MSE to the
                           # output of the attention they replace (forward's loss); needs compile=False
@@ -235,7 +237,7 @@ extra_names = (['program'] if n_programs else []) + (['style'] if styles else []
 data_kw = dict(root_dir=root_dir, cache_dir=cache_dir, special_tokens=special_tokens, styles=styles,
                programs=n_programs > 0, pad_short=pad_short, min_notes=min_notes, captions=captions or None,
                caption_uk=caption_uk, section_len=section_len, section_lead=section_lead, section_style=section_style,
-               section_repeat=section_repeat)
+               section_attrs=section_attrs, section_repeat=section_repeat)
 assert not section_cf_weight or section_len, 'section_cf_weight needs section captions'
 cf_names = ['cf_text', 'cf_event', 'cf_start'] if section_cf_weight else []
 cf_from_iter = int(section_cf_from * lr_decay_iters)
@@ -362,7 +364,7 @@ if freeze_trunk:
     freeze_params(model, '*', except_prefixes=freeze_trunk_keep)
 optimizer = build_optimizer(optimizer_name, model, weight_decay, learning_rate, (beta1, beta2), device_type,
                             style_lr_mult=style_lr_mult, muon_momentum=muon_momentum, muon_bf16=muon_bf16,
-                            compile_ns=compile, text_lr_mult=text_lr_mult)
+                            compile_ns=compile, text_lr_mult=text_lr_mult, linear_lr_mult=linear_lr_mult)
 encoder = None
 if text_encoder:
     from musicar.text.encoder import TextEncoder

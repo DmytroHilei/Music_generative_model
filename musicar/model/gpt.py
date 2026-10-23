@@ -433,6 +433,7 @@ class KVCache:
         self.slots = torch.arange(block_size, device=device)
         self.mask = torch.zeros(1, 1, 1, block_size, dtype=torch.bool, device=device)
         self.chunk_start = None  # set by GPT.encode_chunk: append a chunk at this slot
+        self.lin = {}            # layer -> state of a linear attention layer (musicar.model.linear_attn.GatedDeltaNet)
 
 
 class GPT(nn.Module):

@@ -5,6 +5,7 @@ GPU-side training throughput benchmark on synthetic data (no data loader): forwa
     python tools/bench/bench.py --n_layer 6 --n_embd 256 --n_head 8 --micro 6 24 48 --compile 0 1
 
 Reports tokens/s, ms per optimizer step (at a fixed tokens-per-step budget) and peak memory.
+--linear_attn '' hybrid4 --gdn_kernel torch fla: Gated DeltaNet layers (musicar/model/linear_attn.py) and their kernel.
 --profile: time per phase (forward / backward incl. checkpoint recompute / clip / optimizer) and the top CUDA kernels.
 Steps carry NVTX ranges; for a timeline in Nsight Systems:
     nsys profile --trace=cuda,nvtx --capture-range=cudaProfilerApi -o logs/prof/x python tools/bench/bench.py ... --profile
@@ -56,21 +57,27 @@ def parse_args():
     p.add_argument('--fp8_skip', default='', help="Linear name suffixes kept in bf16, e.g. 'attn.c_proj'")
     p.add_argument('--fp8_cache', type=int, default=0, help='cast each fp8 weight once per step (tensorwise)')
     p.add_argument('--compile_ns', type=int, default=0, help='Muon: compile the batched Newton-Schulz')
+    p.add_argument('--linear_attn', nargs='+', default=[''], help="MusicConfig.linear_attn values, '' = full attention")
+    p.add_argument('--gdn_kernel', nargs='+', default=['torch'], choices=['torch', 'fla'],
+                   help='linear attention kernel (ignored without linear_attn)')
     p.add_argument('--profile', action='store_true', help='profile one config (first of each list): top CUDA kernels')
     p.add_argument('--profile_steps', type=int, default=2, help='steps timed per phase in --profile')
     return p.parse_args()
 
 
-def bench(args, micro, compiled, attn, fp8, profile=False, act_ckpt=0):
+def bench(args, micro, compiled, attn, fp8, profile=False, act_ckpt=0, linear_attn='', gdn_kernel='torch'):
+    import musicar.model.linear_attn as la
+    la.KERNEL = gdn_kernel
     torch.manual_seed(0)
     cfg = MusicConfig(n_layer=args.n_layer, n_embd=args.n_embd, n_head=args.n_head, block_size=args.block,
                       pos_emb=args.pos_emb, dropout=0.0, label_smoothing=0.0, n_programs=args.n_programs,
-                      norm=args.norm, mlp=args.mlp, qk_norm=bool(args.qk_norm))
+                      norm=args.norm, mlp=args.mlp, qk_norm=bool(args.qk_norm), linear_attn=linear_attn)
     model = GPT(cfg).cuda()
     model.act_ckpt = act_ckpt
     model.act_ckpt_save = args.ckpt_save
     if fp8:  # only transformer matmuls; heads/embeddings stay bf16
-        convert_fp8(model.transformer.h, args.fp8_recipe, args.fp8_skip, cache_weights=bool(args.fp8_cache))
+        skip = ','.join(filter(None, [args.fp8_skip, 'attn.ab_proj' if linear_attn else '']))  # as train.py
+        convert_fp8(model.transformer.h, args.fp8_recipe, skip, cache_weights=bool(args.fp8_cache))
         refresh_fp8_weights(model)
     if args.optim == 'adamw':
         from musicar.training.optim import build_adamw
@@ -174,24 +181,28 @@ def main():
     print(f"model {args.n_layer}L x {args.n_embd} ({n / 1e6:.1f}M), block {args.block} {args.pos_emb}, "
           f"{args.tokens_per_step:,} tokens/step, {torch.cuda.get_device_name()}")
     print(f"optimizer {args.optim}, n_programs {args.n_programs}")
-    print(f"{'micro':>6}{'compile':>8}{'attn':>10}{'fp8':>5}{'ckpt':>5}{'tok/s':>11}{'ms/step':>9}{'peak GB':>9}")
+    print(f"{'micro':>6}{'compile':>8}{'attn':>10}{'fp8':>5}{'ckpt':>5}{'linear':>9}{'kernel':>7}{'tok/s':>11}"
+          f"{'ms/step':>9}{'peak GB':>9}")
     if args.profile:
         print(bench(args, args.micro[0], args.compile[0], args.attn[0], args.fp8[0], profile=True,
-                    act_ckpt=args.act_ckpt[0]))
+                    act_ckpt=args.act_ckpt[0], linear_attn=args.linear_attn[0], gdn_kernel=args.gdn_kernel[0]))
         return
+    variants = [(la, k) for la in args.linear_attn for k in (args.gdn_kernel if la else ['torch'])]
     for fp8 in args.fp8:
         for attn in args.attn:
             for compiled in args.compile:
                 for micro in args.micro:
                     for ck in args.act_ckpt:
-                        try:
-                            tps, ms, mem = bench(args, micro, compiled, attn, fp8, act_ckpt=ck)
-                            print(f"{micro:>6}{compiled:>8}{attn:>10}{fp8:>5}{ck:>5}{tps:>11,.0f}{ms:>9.0f}{mem:>9.2f}",
-                                  flush=True)
-                        except Exception as e:  # OOM, unsupported backend, ...
-                            print(f"{micro:>6}{compiled:>8}{attn:>10}{fp8:>5}{ck:>5}   failed: {type(e).__name__}: "
-                                  f"{str(e).splitlines()[0][:70]}", flush=True)
-                        torch.cuda.empty_cache()
+                        for la, kernel in variants:
+                            head = f"{micro:>6}{compiled:>8}{attn:>10}{fp8:>5}{ck:>5}{la or 'full':>9}{kernel:>7}"
+                            try:
+                                tps, ms, mem = bench(args, micro, compiled, attn, fp8, act_ckpt=ck, linear_attn=la,
+                                                     gdn_kernel=kernel)
+                                print(f"{head}{tps:>11,.0f}{ms:>9.0f}{mem:>9.2f}", flush=True)
+                            except Exception as e:  # OOM, unsupported backend, ...
+                                print(f"{head}   failed: {type(e).__name__}: {str(e).splitlines()[0][:70]}",
+                                      flush=True)
+                            torch.cuda.empty_cache()
 
 
 if __name__ == '__main__':

@@ -52,7 +52,16 @@ KEY_CONF_MEDIAN = 0.072
 UK_VOWELS = set('аеєиіїоуюя')
 # section captions: what can change inside a piece, read from the section's own notes (the file caption keeps mood,
 # genre, key, length); per attribute the chance of naming it
-SECTION_P = dict(instruments=0.7, pace=0.6, dynamics=0.6, register=0.5, drums=1.0, solo=1.0, no_drums=0.5)
+SECTION_P = dict(instruments=0.7, pace=0.6, dynamics=0.6, register=0.5, drums=1.0, solo=1.0, no_drums=0.5, rhythm=0.6,
+                 texture=0.6)
+# section attributes 'v2' (loader section_attrs, train.py --section_attrs; text_control.md B3 / B5): section-level
+# thresholds (20 / 80% of 256-note sections of the replay store, report 2026-10-20: onsets/s 4.17 / 8.88, velocity bin
+# 18.25 / 25.0, mean pitch 54.2 / 64.2) so 'loud' is the loudest fifth of sections, not of files; pace split into
+# 'rhythm' (onsets/s, words without 'dense') and 'texture' (pitched notes per pitched onset, 2.0 / 5.2 on 17.7k
+# sections, Spearman -0.06 with onsets/s): 'busy' no longer has to stand for stacked chords
+SECTION_Q_V2 = dict(rhythm=(4.17, 8.88), dynamics=(18.25, 25.0), register=(54.2, 64.2), texture=(2.0, 5.2))
+SECTION_ATTRS = ('v1', 'v2')
+LEVEL_KEYS = ('pace', 'dynamics', 'register', 'rhythm', 'texture')
 # change-aware section captions (section_caption prev=, loader section_style 'change'): what changed vs the previous
 # section is always named (entering instruments first, at most CHANGE_INSTRUMENTS), the rest subsampled with these
 # chances (register is rare: ~7% of sections each way); the tags form also names the drum noun and the register
@@ -284,11 +293,15 @@ class StoreCaptions:
         return a
 
 
-def section_attributes(tok, prog):
+def section_attributes(tok, prog, version='v1'):
     """Language-neutral attribute ids of a stretch of notes from the notes themselves (tok (n, 4) pitch, velocity,
     duration, delta_time bins; prog (n,) GM programs, 128 = drums), with the file caption's thresholds: pace from
     onsets/s, dynamics from the mean velocity bin, register from the mean pitch of pitched notes, the instruments with
-    >= 2% of the notes (at least 4), drums-only / solo / without drums. {} for no notes."""
+    >= 2% of the notes (at least 4), drums-only / solo / without drums. {} for no notes.
+    version 'v2': section-level thresholds (SECTION_Q_V2), 'rhythm' instead of 'pace', and 'texture' (pitched notes
+    per pitched onset, with >= 8 pitched notes)."""
+    assert version in SECTION_ATTRS, version
+    q = SECTION_Q_V2 if version == 'v2' else dict(pace=OPS_Q, dynamics=VEL_Q, register=PITCH_Q)
     n = len(tok)
     if n == 0:
         return {}
@@ -307,14 +320,20 @@ def section_attributes(tok, prog):
                 a['solo'] = True
             elif 'drums' not in ids:
                 a['no_drums'] = True
-        level = _level(float(pitch[~drums].mean()), PITCH_Q)
+        level = _level(float(pitch[~drums].mean()), q['register'])
         if level:
             a['register'] = level
     seconds = max(float(dt[1:].sum()) * DT, 0.5)
-    for name, value, q in (('pace', float((dt[1:] > 0).sum()) / seconds, OPS_Q), ('dynamics', float(vel.mean()), VEL_Q)):
-        level = _level(value, q)
+    pace = 'rhythm' if version == 'v2' else 'pace'
+    for name, value in ((pace, float((dt[1:] > 0).sum()) / seconds), ('dynamics', float(vel.mean()))):
+        level = _level(value, q[name])
         if level:
             a[name] = level
+    if version == 'v2' and (~drums).sum() >= 8:
+        onsets = np.cumsum(dt)[~drums]
+        level = _level(len(onsets) / len(np.unique(onsets)), q['texture'])
+        if level:
+            a['texture'] = level
     return a
 
 
@@ -329,7 +348,7 @@ def section_change(a, b):
     that differ by >= 2 instruments (one instrument near the 2% threshold flips often). 0 when b has no notes."""
     if not b:
         return 0
-    score = sum(a.get(k) != b.get(k) for k in ('dynamics', 'pace', 'register')) + (_drums_state(a) != _drums_state(b))
+    score = sum(a.get(k) != b.get(k) for k in LEVEL_KEYS) + (_drums_state(a) != _drums_state(b))
     return score + (len(set(a.get('instruments', ())) ^ set(b.get('instruments', ()))) >= 2)
 
 
@@ -341,7 +360,7 @@ def section_changed(prev, new):
     out = {}
     if not new:
         return out
-    for k in ('pace', 'dynamics', 'register'):
+    for k in LEVEL_KEYS:
         if new.get(k) and new.get(k) != prev.get(k):
             out[k] = new[k]
     if new.get('drums') and not prev.get('drums'):
@@ -355,12 +374,13 @@ def section_changed(prev, new):
     return out
 
 
-def section_caption(tok, prog, rng=random, uk_share=UK_SHARE, lang=None, prev=None):
+def section_caption(tok, prog, rng=random, uk_share=UK_SHARE, lang=None, prev=None, version='v1'):
     """A caption of a section from its own notes (section_attributes): a random subset (SECTION_P, at least one;
     instrument lists of <= 3 named whole with FULL_LIST, else 1-3 of them) rendered like the file captions. '' when
     nothing describes it. prev: the section_attributes of the section before (loader section_style 'change'): what
-    changed (section_changed) is always named, see _change_caption; None = the plain caption."""
-    attrs = section_attributes(tok, prog)
+    changed (section_changed) is always named, see _change_caption; None = the plain caption. version: of
+    section_attributes (prev must be of the same version)."""
+    attrs = section_attributes(tok, prog, version)
     if not attrs:
         return ''
     if prev is not None:
@@ -436,9 +456,12 @@ def render_en(a, rng, tags_all=False):
                 feel.append(word)
         elif e.get('en_post'):
             post.append(rng.choice(e['en_post']))
-    for name, table in (('dynamics', V.DYNAMICS), ('pace', V.PACE)):
+    for name, table in (('dynamics', V.DYNAMICS), ('pace', V.PACE), ('rhythm', V.RHYTHM)):
         if name in a:
             adjs.append(rng.choice(table[a[name]]['en']))
+    if 'texture' in a:  # section attributes v2: an adjective or 'with a chordal texture'
+        e = V.TEXTURE[a['texture']]
+        adjs.append(rng.choice(e['en'])) if rng.random() < 0.5 else post.append(rng.choice(e['en_post']))
     if 'tempo' in a:
         cls, italian, bpm = a['tempo']
         if bpm and rng.random() < 0.3:
@@ -480,6 +503,8 @@ def render_en(a, rng, tags_all=False):
         + (['no drums'] if a.get('no_drums') else []) + ([f'{a["key"][0]} {a["key"][1]}'] if 'key' in a else [])
     if 'tempo' in a and a['tempo'][1] and not any(t in V.TEMPO[a['tempo'][0]]['en'] for t in tags):
         tags.append(a['tempo'][1])
+    if 'texture' in a and not any(w in tags for w in V.TEXTURE[a['texture']]['en']):
+        tags.append(V.TEXTURE[a['texture']]['tag'][0])
     if tags_all:  # no draws here: the plain captions keep their random sequence
         tags = ([noun] if a.get('drums') else []) + tags
         if 'register' in a and not any(w in tags for w in V.REGISTER[a['register']]['en']):
@@ -541,9 +566,13 @@ def render_uk(a, rng, tags_all=False):
             adjs.append(rng.choice(e['uk']))
         elif e.get('uk_post'):
             post.append(rng.choice(e['uk_post']))
-    for name, table in (('dynamics', V.DYNAMICS), ('pace', V.PACE)):
+    for name, table in (('dynamics', V.DYNAMICS), ('pace', V.PACE), ('rhythm', V.RHYTHM)):
         if name in a:
             adjs.append(rng.choice(table[a[name]]['uk']))
+    if 'texture' in a:
+        e = V.TEXTURE[a['texture']]
+        adjs.append(rng.choice(e['uk'])) if rng.random() < 0.5 else post.append(rng.choice(e['uk_post']))
+        tags.append(e['tag'][1])
     if 'tempo' in a:
         cls, italian, bpm = a['tempo']
         t = V.TEMPO[cls]

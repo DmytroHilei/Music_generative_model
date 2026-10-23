@@ -10,6 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from helpers import batch, run, tiny  # noqa: E402
 from musicar.model.checkpoint import ARCH_KEYS, load_expanded, merge_model_args  # noqa: E402
+from musicar.model.gpt import KVCache  # noqa: E402
 from musicar.model.linear_attn import (GatedDeltaNet, chunk_gated_delta_rule, linear_layers,  # noqa: E402
                                        recurrent_gated_delta_rule)
 
@@ -143,6 +144,93 @@ def test_transfer_reduces_mse():
         opt.step()
         losses.append(loss.item())
     assert sum(losses[-10:]) < 0.7 * sum(losses[:10]), (losses[:3], losses[-3:])
+
+
+def test_layer_cache_prefill_step_chunk():
+    """Generation state of one layer: prefill + one-note steps + an appended chunk = the full sequence; a prefill and
+    a step at slot 0 start from zero (the junk of a CUDA-graph warm-up does not leak in)."""
+    layer = tiny(linear_attn='0', block_size=64).transformer.h[0].attn
+    x = torch.randn(2, 30, 32)
+    with torch.no_grad():
+        full = layer(x)
+        cache = KVCache(1, 2, 2, 64, 16, 'cpu', torch.float32)
+        cache.pos.fill_(5)
+        layer(x[:, :7], cache)                       # junk state
+        parts = [layer(x[:, :20], cache)]            # prefill resets
+        for t in range(20, 25):
+            cache.pos.fill_(t)
+            parts.append(layer(x[:, t:t + 1], cache))
+        cache.chunk_start = 25
+        parts.append(layer(x[:, 25:], cache))
+        cache.chunk_start = None
+        assert torch.allclose(torch.cat(parts, 1), full, atol=1e-4), (torch.cat(parts, 1) - full).abs().max()
+        cache.pos.fill_(0)
+        assert torch.allclose(layer(x[:, :1], cache), full[:, :1], atol=1e-5)   # step at slot 0 starts fresh
+
+
+def test_model_cached_decode_matches_forward():
+    m = tiny(linear_attn='hybrid4', block_size=64, n_layer=4)
+    streams, _, _ = batch(B=2, T=24)
+    with torch.no_grad():
+        full = m.encode(*streams)
+        cache = KVCache(4, 2, m.config.n_head, 64, m.config.n_embd // m.config.n_head, 'cpu', torch.float32)
+        hs = [m.encode(*(s[:, :16] for s in streams), cache=cache)]
+        for t in range(16, 24):
+            cache.pos.fill_(t)
+            hs.append(m.encode(*(s[:, t:t + 1] for s in streams), cache=cache))
+    assert torch.allclose(torch.cat(hs, 1), full, atol=1e-4), (torch.cat(hs, 1) - full).abs().max()
+
+
+def test_cuda_graph_decode_matches_eager():
+    """generate() with the one-note step captured in a CUDA graph gives the eager notes (cache refills included)."""
+    if not torch.cuda.is_available():
+        print('  (skipped: needs CUDA)')
+        return
+    from musicar.generation.sampling import generate
+    m = tiny(linear_attn='hybrid2', n_layer=4, pos_emb='rope', block_size=48).cuda()
+    start = [torch.full((2, 1), 60, device='cuda')] + [torch.zeros(2, 1, dtype=torch.long, device='cuda')] * 3
+    out = []
+    for graph in (False, True):
+        torch.manual_seed(1)
+        out.append(generate(m, *start, max_new_tokens=120, top_k=1, program=None, cuda_graph=graph))
+    assert all(torch.equal(a, b) for a, b in zip(*out))
+
+
+def test_linear_lr_mult_groups():
+    from musicar.training.optim import build_adamw, set_lr
+    m = tiny(linear_attn='0', n_layer=2)
+    opt = build_adamw(m, 0.1, 1e-4, (0.9, 0.95), 'cpu', linear_lr_mult=10.0)
+    set_lr(opt, 1e-4)
+    lin = {id(p) for p in m.transformer.h[0].attn.parameters()}
+    for g in opt.param_groups:
+        if g['params']:
+            want = 1e-3 if id(g['params'][0]) in lin else 1e-4
+            assert all((id(p) in lin) == (want == 1e-3) for p in g['params']) and abs(g['lr'] - want) < 1e-12
+    assert sum(p.numel() for g in opt.param_groups for p in g['params']) == \
+        sum(p.numel() for p in m.parameters() if p.requires_grad)
+
+
+def test_fla_kernel_matches():
+    """The fused kernel (MUSICAR_GDN_KERNEL=fla) gives the PyTorch path's outputs and gradients (CUDA + fla-core only)."""
+    import importlib.util
+    import musicar.model.linear_attn as la
+    if not torch.cuda.is_available() or importlib.util.find_spec('fla') is None:
+        print('  (skipped: needs CUDA and fla-core)')
+        return
+    torch.manual_seed(0)
+    layer = tiny(linear_attn='0', n_embd=128, n_head=2).transformer.h[0].attn.cuda()
+    x = torch.randn(2, 150, 128, device='cuda')
+    outs = []
+    for kernel in ('torch', 'fla'):
+        la.KERNEL = kernel
+        layer.zero_grad()
+        with torch.autocast('cuda', dtype=torch.bfloat16):
+            y = layer.mix(x)
+        y.float().pow(2).sum().backward()
+        outs.append((y.float(), layer.c_attn.weight.grad.clone(), layer.A_log.grad.clone()))
+    la.KERNEL = 'torch'
+    for a, b in zip(*outs):
+        assert (a - b).norm() / b.norm() < 0.03, (a - b).norm() / b.norm()
 
 
 if __name__ == '__main__':

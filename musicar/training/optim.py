@@ -116,20 +116,34 @@ def text_group(model, text_lr_mult):
     return [{'params': params, 'weight_decay': 0.0, 'lr_mult': text_lr_mult}] if params else []
 
 
-def build_adamw(model, weight_decay, learning_rate, betas, device_type, text_lr_mult=1.0):
+def build_adamw(model, weight_decay, learning_rate, betas, device_type, text_lr_mult=1.0, linear_lr_mult=1.0):
     """AdamW (fused on CUDA). Weight decay on the 2D tensors (matmul weights, embeddings); none on biases, norms and
-    the cascade's condition embeddings (they must stay at the scale of h)."""
+    the cascade's condition embeddings (they must stay at the scale of h). linear_lr_mult != 1: the parameters of the
+    linear attention layers (musicar.model.linear_attn.GatedDeltaNet, e.g. fresh from a conversion) in their own
+    groups with lr x linear_lr_mult."""
     import inspect
-    decay, nodecay = [], []
+    from musicar.model.linear_attn import GatedDeltaNet
+    linear = {id(p) for m in model.modules() if isinstance(m, GatedDeltaNet) for p in m.parameters()} \
+        if linear_lr_mult != 1.0 else set()
+    decay, nodecay, lin_decay, lin_nodecay = [], [], [], []
     for n, p in model.named_parameters():
         if not p.requires_grad or n.startswith(TEXT_PREFIX):
             continue
-        (decay if p.dim() >= 2 and 'cond_emb' not in n else nodecay).append(p)
+        d = p.dim() >= 2 and 'cond_emb' not in n
+        if id(p) in linear:
+            (lin_decay if d else lin_nodecay).append(p)
+        else:
+            (decay if d else nodecay).append(p)
     print(f"num decayed parameter tensors: {len(decay)}, with {sum(p.numel() for p in decay):,} parameters")
     print(f"num non-decayed parameter tensors: {len(nodecay)}, with {sum(p.numel() for p in nodecay):,} parameters")
+    if linear:
+        print(f"linear attention layers: {sum(p.numel() for p in lin_decay + lin_nodecay):,} params, "
+              f"lr x{linear_lr_mult:g}")
     fused = 'fused' in inspect.signature(torch.optim.AdamW).parameters and device_type == 'cuda'
     print(f"using fused AdamW: {fused}")
-    groups = [{'params': decay, 'weight_decay': weight_decay}, {'params': nodecay, 'weight_decay': 0.0}]
+    groups = [{'params': decay, 'weight_decay': weight_decay}, {'params': nodecay, 'weight_decay': 0.0},
+              {'params': lin_decay, 'weight_decay': weight_decay, 'lr_mult': linear_lr_mult},
+              {'params': lin_nodecay, 'weight_decay': 0.0, 'lr_mult': linear_lr_mult}]
     return torch.optim.AdamW([g for g in groups if g['params']] + text_group(model, text_lr_mult),
                              lr=learning_rate, betas=betas, **(dict(fused=True) if fused else {}))
 
@@ -194,8 +208,10 @@ def build_adamw8bit(model, weight_decay, learning_rate, betas, style_lr_mult=1.0
 
 
 def build_optimizer(name, model, weight_decay, learning_rate, betas, device_type, style_lr_mult=1.0,
-                    muon_momentum=0.95, muon_bf16=False, compile_ns=False, text_lr_mult=1.0):
-    """name: 'adamw' | 'adamw8bit' | 'muon' (Muon for the transformer-block matrices, AdamW for the rest)."""
+                    muon_momentum=0.95, muon_bf16=False, compile_ns=False, text_lr_mult=1.0, linear_lr_mult=1.0):
+    """name: 'adamw' | 'adamw8bit' | 'muon' (Muon for the transformer-block matrices, AdamW for the rest).
+    linear_lr_mult: AdamW only (build_adamw)."""
+    assert linear_lr_mult == 1.0 or name == 'adamw', 'linear_lr_mult: AdamW only'
     if name == 'muon':
         return build_muon_optimizer(model, weight_decay, learning_rate, betas, device_type, momentum=muon_momentum,
                                     style_lr_mult=style_lr_mult, compile_ns=compile_ns,
@@ -204,7 +220,8 @@ def build_optimizer(name, model, weight_decay, learning_rate, betas, device_type
         return build_adamw8bit(model, weight_decay, learning_rate, betas, style_lr_mult=style_lr_mult,
                                text_lr_mult=text_lr_mult)
     assert name == 'adamw', f"unknown optimizer {name!r}"
-    return build_adamw(model, weight_decay, learning_rate, betas, device_type, text_lr_mult=text_lr_mult)
+    return build_adamw(model, weight_decay, learning_rate, betas, device_type, text_lr_mult=text_lr_mult,
+                       linear_lr_mult=linear_lr_mult)
 
 
 def freeze_params(model, prefixes, except_prefixes=''):

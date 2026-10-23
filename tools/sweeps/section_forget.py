@@ -36,7 +36,10 @@ ARMS = {
     'nocf_s50': ['--section_splice_frac=0.5', '--section_repeat=64'],
     'cfcool': CF + ['--section_splice_frac=0.25', '--section_repeat=64', '--section_cf_from=0.8'],
     'cf1': CF + ['--section_splice_frac=0.25', '--section_repeat=64', '--section_cf_rows=1'],
+    # overshoot fix B3 + B5 (2026-10-23): 'all' with section attributes v2 (section-level thresholds, rhythm + texture)
+    'all_v2': CF + ['--section_splice_frac=0.25', '--section_repeat=64', '--section_attrs=v2'],
 }
+FOLLOW_PROMPTS = {'all_v2': 'section_v2'}  # section_follow --prompts (default 'section')
 ITERS = {'nocf': 2700, 'nocf_s50': 2700, 'cfcool': 2350, 'cf1': 2200}  # others MAX_ITERS
 TABLE = ROOT / 'logs/sections/forget.md'
 BASELINE = 'checkpoints/v2_A0'
@@ -73,7 +76,8 @@ def train(arm, args):
 def follow(arm, args):
     out = follow_dir(arm)
     cmd = ['.venv/bin/python', 'eval/compare/section_follow.py', '--checkpoints', f'checkpoints/forget_{arm}',
-           '--cfg', '2', '--prompts', 'section', '--parts', 'hold,switch', '--mp3', '--out', str(out)]
+           '--cfg', '2', '--prompts', FOLLOW_PROMPTS.get(arm, 'section'), '--parts', 'hold,switch', '--mp3', '--out',
+           str(out)]
     print(f'{time.strftime("%H:%M")} ' + ' '.join(cmd[1:]), flush=True)
     if args.dry_run:
         return 0

@@ -10,6 +10,10 @@ Arms:
               MSE to the attention they replace (the rest of the model sees the original states; no compile / fp8),
               then stage 2 = the 1,500 it recipe on everything
   h4_direct   stage 2 only, straight from the copied weights (does stage 1 matter?)
+  h4_all      not in the default --arms: h4's stage-1 weights (kept as checkpoints/linear_h4_s1_init) + 1,500 it of
+              the long-run section recipe ('all' of tools/sweeps/section_forget.py: cf + recognition head + splice
+              0.25 + repeat 64); the linear layers at 10x the LR
+              (1e-3 = stage 1's; h4 at 1e-4 was still 0.19 above forget_ctrl at it 1000); reference forget_all
 
 Each stage runs through tools/sweeps/section_long.py (one chunk + the change probe); an arm whose stage-2 probe is at
 the last iteration is not trained again (restartable). Table logs/sections/linear.md: held-out / Aria CE, val section
@@ -28,6 +32,7 @@ linear_<arm>_quick*, no clean-up; table logs/sections/linear_quick.md with forge
 
 import argparse
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -40,8 +45,15 @@ MAX_ITERS = 1500
 S1_ITERS = 300
 S1_ARGS = ['--attn_transfer=True', '--compile=False', '--fp8=False', '--learning_rate=1e-3', '--warmup_iters=20',
            '--eval_interval=100']
+ALL = ['--section_cf_weight=1.0', '--section_cf_eta=0.05', '--section_cls_weight=0.1', '--section_splice_frac=0.25',
+       '--section_repeat=64']  # section_forget.py 'all'
 ARMS = {'h4': dict(linear_attn='hybrid4', transfer=True),
-        'h4_direct': dict(linear_attn='hybrid4', transfer=False)}
+        'h4_direct': dict(linear_attn='hybrid4', transfer=False),
+        'h4_all': dict(linear_attn='hybrid4', transfer=False, init='checkpoints/linear_h4_s1_init/model_bf16.pt',
+                       extra=ALL + ['--linear_lr_mult=10', '--batch_size=2', '--gradient_accumulation_steps=32',
+                                    '--section_cf_rows=2'], reference='forget_all')}
+# h4_all: fla + fp8 went NaN; the PyTorch kernel with the cf forward OOMs at micro 4 (8 GB): micro 2 x 32 (same notes
+# per step, cf on every row as in forget_all)
 REFERENCE = 'forget_ctrl'  # v2_A0 + the same 1,500 it with full attention (tools/sweeps/section_forget.py)
 TABLE = ROOT / 'logs/sections/linear.md'
 STEP = re.compile(r'step (\d+): train loss ([\d.]+).*?\| \S+ CE ([\d.]+) \(.*?\| aria_labeled CE ([\d.]+).*?'
@@ -51,7 +63,7 @@ SPEED = re.compile(r'([\d.]+)s/it')
 
 def parse_args():
     p = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-    p.add_argument('--arms', default=','.join(ARMS))
+    p.add_argument('--arms', default='h4,h4_direct')
     p.add_argument('--minutes', type=float, default=240, help='training minutes per stage (one chunk)')
     p.add_argument('--quick', action='store_true', help='~30-minute check instead of the full arms')
     p.add_argument('--table-only', action='store_true')
@@ -59,7 +71,7 @@ def parse_args():
     return p.parse_args()
 
 
-def run_stage(name, iters, extra, args, minutes=None):
+def run_stage(name, iters, extra, args, minutes=None, kernel='torch'):
     chunks = '1' if args.quick else '0'
     cmd = ['.venv/bin/python', 'tools/sweeps/section_long.py', '--name', name, '--out-dir', f'checkpoints/{name}',
            '--max-iters', str(iters), '--minutes', f'{minutes or args.minutes:g}', '--chunks', chunks,
@@ -68,7 +80,10 @@ def run_stage(name, iters, extra, args, minutes=None):
         cmd += ['--config', c]
     cmd += ['--', *extra, f'--wandb_run_name=sec-{name.replace("_", "-")}']
     print(f'{time.strftime("%H:%M")} ' + ' '.join(cmd[1:]), flush=True)
-    return 0 if args.dry_run else subprocess.run(cmd, cwd=ROOT).returncode
+    if kernel != 'torch':
+        print(f'  kernel {kernel}', flush=True)
+    env = {**os.environ, 'MUSICAR_GDN_KERNEL': kernel}
+    return 0 if args.dry_run else subprocess.run(cmd, cwd=ROOT, env=env).returncode
 
 
 def probe_row(name):
@@ -90,7 +105,9 @@ def train_arm(arm, args):
     spec = ARMS[arm]
     name = run_name(arm, args)
     s1_iters = 150 if args.quick else S1_ITERS
-    extra = [f'--linear_attn={spec["linear_attn"]}']
+    extra = [f'--linear_attn={spec["linear_attn"]}'] + spec.get('extra', [])
+    if spec.get('init'):
+        extra.append(f'--init_ckpt={spec["init"]}')
     if spec['transfer']:
         s1 = probe_row(f'{name}_s1')
         if not (s1 and s1['iter'] >= s1_iters - 1):
@@ -100,7 +117,8 @@ def train_arm(arm, args):
         extra.append(f'--init_ckpt=checkpoints/{name}_s1/ckpt.pt')
     if args.quick:
         extra.append('--eval_interval=200')
-    return run_stage(name, MAX_ITERS, extra, args, minutes=12 if args.quick else None)
+    return run_stage(name, MAX_ITERS, extra, args, minutes=12 if args.quick else None,
+                     kernel=os.environ.get('MUSICAR_GDN_KERNEL', spec.get('kernel', 'torch')))
 
 
 def clean_up(arm, args):
@@ -126,13 +144,14 @@ def write_table(arms, args):
              'reading of the run (laptop, 65,536 notes/it).', '',
              '| arm | stage 1: MSE start -> end, held-out CE | iter | held-out CE | Aria CE | val sec gain vs shuffled / '
              'none / prev | probe vs shuffled | vs none | vs previous | s/it |', '|---' * 10 + '|']
-    for arm in [REFERENCE] + arms:
-        name = arm if arm == REFERENCE else run_name(arm, args)
+    refs = list(dict.fromkeys([REFERENCE] + [ARMS[a].get('reference', REFERENCE) for a in arms]))
+    for arm in refs + arms:
+        name = arm if arm in refs else run_name(arm, args)
         found = STEP.findall(log_text(name))
-        if args.quick and arm == REFERENCE:
+        if args.quick and arm in refs:
             found = [f for f in found if f[0] == '500']
         ev = found[-1] if found else None
-        s1 = STEP.findall(log_text(f'{name}_s1')) if arm != REFERENCE and ARMS[arm]['transfer'] else []
+        s1 = STEP.findall(log_text(f'{name}_s1')) if arm not in refs and ARMS[arm]['transfer'] else []
         stage1 = f'{s1[1][1]} -> {s1[-1][1]}, {s1[-1][2]}' if len(s1) > 1 else ''
         pr = probe_row(name)
         speed = SPEED.findall(log_text(name))

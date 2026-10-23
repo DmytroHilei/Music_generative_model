@@ -109,7 +109,8 @@ def probe(ck, encoder, args):
     labels = ROOT / (train_setting(ck, 'captions', '') or 'data/labels')  # the label tables the model trained with
     kw = dict(root_dir=str(ROOT), split='validation', block_size=args.block, eval_stride=args.block,
               special_tokens=True, programs=True, pad_short=True, captions=str(labels), caption_uk=0.3,
-              section_len=S, section_lead=cfg.section_lead, section_style=style, section_repeat=cfg.section_repeat)
+              section_len=S, section_lead=cfg.section_lead, section_style=style, section_repeat=cfg.section_repeat,
+              section_attrs=train_setting(ck, 'section_attrs', 'v1'))
     sets = {m: NoteWindowDataset(VAL_SOURCE, section_caption_mode=m, **kw) for m in MODES}
     ds = sets['true']
     if args.at_changes:
@@ -121,7 +122,7 @@ def probe(ck, encoder, args):
     n = len(ds)
     idx = [int(i * n / args.windows) for i in range(min(args.windows, n))]
     # change score of every section of every file: (store, file in store) -> its first section's index in scores
-    scores = [section_change_scores(store, S, ds.pad) for store in ds.store_dirs]
+    scores = [section_change_scores(store, S, ds.pad, ds.section_attrs) for store in ds.store_dirs]
     first_sec = []
     for store in ds.store_dirs:
         n_sec = -(-(np.diff(np.load(store / 'offsets.npy')) + 2 * ds.pad) // S)

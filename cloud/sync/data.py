@@ -5,7 +5,10 @@ Move the token stores between the laptop and the rented GPU through a private Hu
   instance: python cloud/sync/data.py download     # cloud/setup/setup_instance.sh runs this and then `verify`
             python cloud/sync/data.py verify       # every file present, right size, right sha256
 
-The repo holds data/cache/<store>/... for the stores in cloud/sync/hub.py plus manifest.json (size + sha256 per file).
+The repo holds data/cache/<store>/... for the stores in cloud/sync/hub.py, their label / caption tables (labels/,
+captions/ from --labels-dir / --captions-dir; on the instance data/labels and data/captions link to them) plus
+manifest.json (size + sha256 per file). A store that is no longer on the laptop keeps its entries from the manifest
+already on the Hub, so the tables can be re-uploaded without the 41 GB of notes.
 The upload goes through a staging folder of symlinks (data/hf_upload), so nothing is copied. One commit per store;
 a re-run skips stores already on the Hub with the right file sizes, and the Xet backend deduplicates chunks it
 already has, so an interrupted 17 GB file doesn't start from zero. manifest.json goes last.
@@ -25,17 +28,31 @@ def upload(args):
     hf = hub.api()
     repo = hub.data_repo(hf, args.repo)
     stores = args.stores.split(',')
-    print(f'hashing {len(stores)} stores in {args.cache_dir} (cached after the first run) ...', flush=True)
-    manifest = hub.build_manifest(args.cache_dir, stores)
+    local = [s for s in stores if (Path(args.cache_dir) / s / 'meta.json').exists()]
+    remote_manifest = {}
+    if len(local) < len(stores):
+        from huggingface_hub import hf_hub_download
+        remote_manifest = json.loads(Path(hf_hub_download(repo, hub.MANIFEST, repo_type='dataset')).read_text())
+    kept = {rel: e for rel, e in remote_manifest.items() if rel.split('/')[0] in set(stores) - set(local)}
+    for store in set(stores) - set(local):
+        if not any(rel.split('/')[0] == store for rel in kept):
+            raise SystemExit(f'{store}: not in {args.cache_dir} and not on {repo}')
+        print(f'{store}: not local, entries kept from the Hub manifest', flush=True)
+    tables = hub.label_files(args.labels_dir, args.captions_dir, stores)
+    print(f'hashing {len(local)} stores in {args.cache_dir} + {len(tables)} label tables (cached after the first run) ...',
+          flush=True)
+    manifest = {**kept, **hub.build_manifest(args.cache_dir, local, extra=tables)}
     total = sum(e['size'] for e in manifest.values())
     print(f'{len(manifest)} files, {total / 1e9:.1f} GB -> {repo} (private dataset)', flush=True)
 
     staging = Path(args.staging)
     staging.mkdir(parents=True, exist_ok=True)
     for rel in manifest:
+        if rel in kept:
+            continue
         link = staging / rel
         link.parent.mkdir(parents=True, exist_ok=True)
-        target = (Path(args.cache_dir) / rel).resolve()
+        target = tables[rel] if rel in tables else (Path(args.cache_dir) / rel).resolve()
         if link.is_symlink() and link.resolve() == target:
             continue
         link.unlink(missing_ok=True)
@@ -48,7 +65,7 @@ def upload(args):
         return {f.path: f.size for f in hf.list_repo_tree(repo, repo_type='dataset', recursive=True)
                 if getattr(f, 'size', None) is not None}
 
-    for store in stores:
+    for store in stores + ['labels', 'captions']:
         files = {rel: e for rel, e in manifest.items() if rel.split('/')[0] == store}
         remote = remote_sizes()
         if all(remote.get(rel) == e['size'] for rel, e in files.items()):
@@ -80,7 +97,23 @@ def download(args):
     repo = hub.data_repo(hf, args.repo)
     print(f'downloading {repo} -> {args.cache_dir}', flush=True)
     snapshot_download(repo, repo_type='dataset', local_dir=args.cache_dir, max_workers=args.workers)
+    link_tables(args.cache_dir)
     print('download done')
+
+
+def link_tables(cache_dir):
+    """data/labels -> <cache>/labels and data/captions -> <cache>/captions (the paths train.py / StoreCaptions read)."""
+    for name in ('labels', 'captions'):
+        target, link = (Path(cache_dir) / name).resolve(), hub.ROOT / 'data' / name
+        if not target.is_dir():
+            continue
+        if link.is_symlink() and link.resolve() == target:
+            continue
+        if link.exists() or link.is_symlink():
+            print(f'note: {link} exists and is not a link to {target}: left as it is')
+            continue
+        link.symlink_to(target)
+        print(f'{link} -> {target}')
 
 
 def verify(args):
@@ -94,6 +127,7 @@ def verify(args):
         print('\n'.join(problems[:20]))
         raise SystemExit(f'data verification FAILED: {len(problems)} problems')
     print(f'data verified: {len(manifest)} files, {total / 1e9:.1f} GB' + (' (sizes only)' if args.quick else ''))
+    link_tables(args.cache_dir)
     free = shutil.disk_usage(args.cache_dir).free / 1e9
     print(f'free disk after the data: {free:.0f} GB')
 
@@ -104,6 +138,8 @@ def main():
     p.add_argument('--cache-dir', default=str(hub.ROOT / 'data' / 'cache'))
     p.add_argument('--repo', default=None, help='dataset repo (default <hf user>/music-stores or $MUSIC_DATA_REPO)')
     p.add_argument('--stores', default=','.join(hub.STORES))
+    p.add_argument('--labels-dir', default=str(hub.ROOT / 'data' / 'labels_next'), help='upload: label tables')
+    p.add_argument('--captions-dir', default=str(hub.ROOT / 'data' / 'captions'), help='upload: Ukrainian caption tables')
     p.add_argument('--staging', default=str(hub.ROOT / 'data' / 'hf_upload'))
     p.add_argument('--workers', type=int, default=8)
     p.add_argument('--quick', action='store_true', help='verify: sizes only, no sha256')

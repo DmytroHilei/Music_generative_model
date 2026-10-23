@@ -33,14 +33,14 @@ def density_level(notes_per_s, n_density=16):
     return (1 + (2 * torch.log2(nps.clamp(min=1e-3)) + 2).floor().clamp(0, n_density - 2)).long()
 
 
-def section_change_scores(store, section_len, pad):
+def section_change_scores(store, section_len, pad, version='v1'):
     """musicar.text.captions.section_change of every section of every file of a token store vs the section before it
     (int8, files in store order, ceil((notes + 2 * pad) / section_len) sections each; 0 for the first one and those
     with < section_len / 2 notes); sections as in
-    NoteWindowDataset._section_notes. Cached in <store>/section_changes_<section_len>_<pad>.npy (~1 min for 168M
-    notes)."""
+    NoteWindowDataset._section_notes. Cached in <store>/section_changes_<section_len>_<pad>[_<version>].npy (~1 min
+    for 168M notes); version: of section_attributes ('v1' keeps the old cache name)."""
     from musicar.text.captions import section_attributes, section_change
-    cache = Path(store) / f"section_changes_{section_len}_{pad}.npy"
+    cache = Path(store) / f"section_changes_{section_len}_{pad}{'' if version == 'v1' else '_' + version}.npy"
     if cache.exists():
         return np.load(cache)
     offsets = np.load(Path(store) / "offsets.npy")
@@ -57,7 +57,7 @@ def section_change_scores(store, section_len, pad):
         for k in range(-(-(n + 2 * pad) // section_len)):
             lo = max(k * section_len - pad, 0)
             hi = max(min((k + 1) * section_len - pad, n), lo)
-            attrs = section_attributes(tok[lo:hi], prog[lo:hi])
+            attrs = section_attributes(tok[lo:hi], prog[lo:hi], version)
             # a file's short last section (or a short file) has too few notes for its attributes to mean much
             scores.append(0 if prev is None or hi - lo < section_len // 2 else section_change(prev, attrs))
             prev = attrs
@@ -142,6 +142,7 @@ class NoteWindowDataset(Dataset):
         section_dropout=0.0,
         section_caption_mode='true',
         section_style='plain',
+        section_attrs='v1',
         change_frac=0.0,
         change_min=2,
         section_repeat=0,
@@ -204,6 +205,8 @@ class NoteWindowDataset(Dataset):
                      section_style: 'plain' = each section described on its own; 'change' = what changed vs the
                      section before is always named (musicar.text.captions.section_changed), e.g. the instrument that
                      entered or 'loud' after a soft section (the first section of a file stays plain)
+                     section_attrs: musicar.text.captions.section_attributes version of the section captions and the
+                     change scores ('v2': section-level thresholds, rhythm + texture instead of pace)
         change_frac: training only, with section_len: this share of windows is placed around a section boundary where
                      the section differs from the one before by >= change_min points (section_change_scores: dynamics,
                      pace, register, drums, instruments), uniform over such boundaries of the drawn store, the
@@ -277,6 +280,7 @@ class NoteWindowDataset(Dataset):
         self.section_dropout, self.section_caption_mode = section_dropout, section_caption_mode
         assert section_style in ('plain', 'change'), section_style
         self.section_style = section_style
+        self.section_attrs = section_attrs
         assert not section_len or (captions and not self.pack_short), 'section captions need captions, no pack_short'
         assert 0 <= section_lead <= section_len
         # the caption in force at the window start + at most one per section_len rows inside it (+ the one before
@@ -359,7 +363,7 @@ class NoteWindowDataset(Dataset):
         self.change_range: (first, end) of each store's."""
         S, found = self.section_len, []
         for i, store in enumerate(self.store_dirs):
-            scores = section_change_scores(store, S, self.pad)
+            scores = section_change_scores(store, S, self.pad, self.section_attrs)
             n_sec = -(-(np.diff(np.load(store / "offsets.npy")) + 2 * self.pad) // S)
             assert len(scores) == n_sec.sum(), f"{store}: stale section_changes cache"
             fid = np.repeat(np.arange(len(n_sec)), n_sec)  # store file of every section
@@ -722,8 +726,10 @@ class NoteWindowDataset(Dataset):
         from musicar.text.captions import section_attributes, section_caption
         prev = None
         if self.section_style == 'change' and (k > 0 or prev_notes is not None):
-            prev = section_attributes(*(prev_notes if prev_notes is not None else self._section_notes(file_idx, k - 1)))
-        return section_caption(*self._section_notes(file_idx, k), rng, uk_share=self.caption_uk, prev=prev)
+            prev = section_attributes(*(prev_notes if prev_notes is not None else self._section_notes(file_idx, k - 1)),
+                                      version=self.section_attrs)
+        return section_caption(*self._section_notes(file_idx, k), rng, uk_share=self.caption_uk, prev=prev,
+                               version=self.section_attrs)
 
     def _section_notes(self, file_idx, k):
         """Tokens (n, 4) and programs (n,) of the real notes in rows k * section_len .. (k + 1) * section_len - 1 of

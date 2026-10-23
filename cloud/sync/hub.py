@@ -20,11 +20,15 @@ def load_secrets(path=ROOT / 'cloud' / 'secrets.env'):
 
 load_secrets()
 
-# token stores the long run reads (config/pretrain/long_450m.py): train mix + the three val sets
+# token stores the long run reads (config/pretrain/long_450m.py): train mix + the three val sets, + the captioned val set
 STORES = ['gigamidi_train', 'aria_train', 'discover_train',
-          'gigamidi_clean_validation', 'aria_validation', 'discover_validation']
+          'gigamidi_clean_validation', 'aria_validation', 'discover_validation', 'gigamidi_heldout_validation']
 STORE_FILES = ('meta.json', 'offsets.npy', 'tokens.u16', 'programs.u8')  # programs.u8 only in multi-instrument stores
 MANIFEST = 'manifest.json'
+# text-control side tables of those stores (musicar/text/captions.py StoreCaptions), in the repo as labels/<file> and
+# captions/<file>; on the instance data/labels and data/captions link to data/cache/labels and data/cache/captions
+LABEL_SUFFIXES = ('.jsonl', '.features.npz', '.pseudo.npz', '.pseudo.json')
+CAPTION_SUFFIXES = ('.uk.fixed.jsonl',)
 
 
 def api():
@@ -67,17 +71,31 @@ def store_files(cache_dir, stores):
     return files
 
 
-def build_manifest(cache_dir, stores, workers=8):
-    """{relative path: {size, sha256}}; hashes are cached by (size, mtime) in cloud/.hash_cache.json."""
+def label_files(labels_dir, captions_dir, stores):
+    """{repo path: local file} of the label / caption tables the stores have (symlinks resolved)."""
+    files = {}
+    for store in stores:
+        for d, top, suffixes in ((labels_dir, 'labels', LABEL_SUFFIXES), (captions_dir, 'captions', CAPTION_SUFFIXES)):
+            for suffix in suffixes:
+                p = Path(d) / f'{store}{suffix}'
+                if p.exists():
+                    files[f'{top}/{p.name}'] = p.resolve()
+    return files
+
+
+def build_manifest(cache_dir, stores, extra=None, workers=8):
+    """{relative path: {size, sha256}} of the stores' files under cache_dir plus extra {repo path: local file}; hashes
+    are cached by (size, mtime) in cloud/.hash_cache.json."""
     cache_path = ROOT / 'cloud' / '.hash_cache.json'
     cache = json.loads(cache_path.read_text()) if cache_path.exists() else {}
-    files = store_files(cache_dir, stores)
+    files = [(str(p.relative_to(cache_dir)), p) for p in store_files(cache_dir, stores)] + list((extra or {}).items())
 
-    def entry(p):
+    def entry(item):
+        rel, p = item
         st = p.stat()
         key = f'{p.resolve()}|{st.st_size}|{st.st_mtime_ns}'
         digest = cache.get(key) or sha256_file(p)
-        return str(p.relative_to(cache_dir)), key, st.st_size, digest
+        return rel, key, st.st_size, digest
 
     manifest = {}
     with ThreadPoolExecutor(workers) as pool:

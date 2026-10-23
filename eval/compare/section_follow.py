@@ -70,7 +70,10 @@ SECTION_TEXT = {
     'piano+': 'a solo piano piece', 'strings+': 'a piece with violin, viola and cello',
     'uk_loud+': 'гучна потужна мелодія', 'uk_loud-': "тиха м'яка мелодія", 'uk_drums+': 'барабанний біт',
 }
-PROMPT_SETS = {'section': SECTION_TEXT, 'file': dict(PROMPTS)}
+# section attributes v2 (train.py --section_attrs=v2): 'dense' names texture (stacked notes), not pace, so the busy
+# prompt asks for rhythm only
+SECTION_TEXT_V2 = {**SECTION_TEXT, 'fast+': 'a rhythmically busy piece'}
+PROMPT_SETS = {'section': SECTION_TEXT, 'section_v2': SECTION_TEXT_V2, 'file': dict(PROMPTS)}
 HOLD = ['fast+', 'fast-', 'loud+', 'loud-', 'drums+', 'nodrums+', 'piano+', 'strings+', 'uk_loud-', 'uk_drums+']
 # name -> (prompt before, prompt after, metric); the 'after' prompt should raise the metric
 SWITCH = {

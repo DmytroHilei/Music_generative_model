@@ -241,6 +241,17 @@ PACE = {'low': dict(en=['sparse', 'minimal'], uk=[('скупий', 'скупа')
         'high': dict(en=['busy', 'dense'], uk=[('насичений', 'насичена'), ('щільний', 'щільна')])}
 DYNAMICS = {'low': dict(en=['soft', 'gentle'], uk=[('тихий', 'тиха'), ("м'який", "м'яка")]),
             'high': dict(en=['loud', 'powerful'], uk=[('гучний', 'гучна'), ('потужний', 'потужна')])}
+# section attributes v2 (musicar/text/captions.py SECTION_Q_V2): rhythm = onsets/s without 'dense' / 'щільний',
+# texture = notes per onset (the words 'dense' / 'щільний' move here)
+RHYTHM = {'low': dict(en=['sparse', 'minimal'], uk=[('скупий', 'скупа'), ('мінімалістичний', 'мінімалістична')]),
+          'high': dict(en=['busy', 'rhythmically busy'],
+                       uk=[('рухливий', 'рухлива'), ('ритмічно насичений', 'ритмічно насичена')])}
+TEXTURE = {'low': dict(en=['thin-textured', 'light-textured'], en_post=['with a thin texture', 'with a light texture'],
+                       uk=[('прозорий', 'прозора')], uk_post=['з прозорою фактурою', 'з легкою фактурою'],
+                       tag=('thin texture', 'прозора фактура')),
+           'high': dict(en=['chordal', 'dense'], en_post=['with a chordal texture', 'with a dense texture'],
+                        uk=[('акордовий', 'акордова'), ('щільний', 'щільна')],
+                        uk_post=['з акордовою фактурою', 'зі щільною фактурою'], tag=('chordal texture', 'акордова фактура'))}
 REGISTER = {'low': dict(en=['low-pitched', 'deep'], en_post=['in a low register'], uk_post=['у низькому регістрі']),
             'high': dict(en=['high-pitched', 'bright'], en_post=['in a high register'],
                          uk_post=['у високому регістрі'])}
