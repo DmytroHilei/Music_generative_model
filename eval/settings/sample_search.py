@@ -160,6 +160,8 @@ def main():
     p.add_argument('--keep', default='12,4', help='configs kept after each stage but the last')
     p.add_argument('--new-notes', type=int, default=1000)
     p.add_argument('--seed', type=int, default=1234)
+    p.add_argument('--store', default=STORE, help='prompt store with programs (the laptop has '
+                                                  'data/cache/gigamidi_heldout_validation)')
     args = p.parse_args()
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
@@ -169,7 +171,7 @@ def main():
 
     stages = [int(x) for x in args.stages.split(',')]
     keep = [int(x) for x in args.keep.split(',')]
-    prompts = diverse_prompts(max(stages))
+    prompts = diverse_prompts(max(stages), store=args.store)
     print('prompts per kind: ' + ', '.join(f'{k} {len(v)}' for k, v in prompts.items()))
     # real-song reference: per row, and the spread across all real continuations (the s_i of the distance)
     real_all = {k: [row_metrics(torch.from_numpy(t[:, 0]), torch.from_numpy(t[:, 3]), torch.from_numpy(g),
@@ -177,7 +179,7 @@ def main():
     flat = [m for v in real_all.values() for m in v]
     scale = {k: max(float(np.std([m[k] for m in flat], ddof=1)), SD_FLOOR[k]) for k in METRICS}
 
-    configs = config_space(mcfg, args.configs)
+    configs = config_space(model.config, args.configs)
     default_cfg = configs[0]
     results = []
     for si, per_kind in enumerate(stages):
@@ -205,7 +207,7 @@ def main():
     final = [r for r in results if r['stage'] == len(stages)]
     final.sort(key=lambda r: r['paired'])
     default = next(r for r in final if r['config'] == name(default_cfg))
-    lines = [f'# Generation settings search: {args.checkpoint} (iter {ck.get("iter_num")})', '',
+    lines = [f'# Generation settings search: {args.checkpoint} (iter {it})', '',
              f'{len(results)} evaluations; final stage {final[0]["rows"]} songs ({stages[-1]} per kind: '
              f'{", ".join(KINDS)}), {args.new_notes:,} new notes each. Lower = closer to the real continuations.', '',
              '| rank | config | paired | D | ' + ' | '.join(KINDS) + ' | notes/s | top | takeover |',

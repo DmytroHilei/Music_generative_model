@@ -1,5 +1,5 @@
 """
-Checks and sizing on the training machine before the long run; writes checkpoints/<run>/run.env for cloud/launch.sh.
+Checks and sizing on the training machine before the long run; writes checkpoints/<run>/run.env for cloud/run/launch.sh.
 
   python cloud/setup/preflight.py --hours 40          # on the instance, after cloud/setup/setup_instance.sh
   python cloud/setup/preflight.py --hours 0.2 --run rehearsal   # what the laptop rehearsal ran
