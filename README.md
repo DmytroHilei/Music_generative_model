@@ -32,6 +32,29 @@ style.
 
 Full results: [`docs/experiments.md`](docs/experiments.md).
 
+## Architecture
+
+![Captioned music model](docs/figures/architecture.png)
+
+The figure shows the captioned layout of the 450M model (477M trainable parameters with the two caption adapters).
+The sections are numbered in reading order:
+
+- **1–4: the model.** Captions go through the frozen LaBSE encoder and a small learned-query adapter, and become a
+  few vectors inside the note sequence. The trunk is 28 pre-norm blocks over compound note tokens. The cascade heads
+  pick Δt, instrument, pitch, duration and velocity one after another, each seeing the values already chosen.
+- **5: generation**, with classifier-free guidance over the captions.
+- **6: the section-caption recipe.** Without it the model follows the first section's caption and ignores later ones.
+- **7: training curves** behind the design choices: trunk block, base pretraining, section-caption measures.
+- **8–9: training stages and the audio → MIDI pipeline** that builds the Ukrainian fine-tune set.
+
+Status: the music model without captions is trained. The caption stage at 450M (the F1 run) is still planned, so the
+caption results in the figure come from 107M pilots. The cascade-vs-independent-heads curve will be added after that
+A/B is re-run on the current setup; the only existing one is from an early 6M piano model.
+
+The figure is TikZ / pgfplots: [`docs/figures/architecture.tex`](docs/figures/architecture.tex) (PDF and SVG next to
+it). [`docs/figures/curves_data.py`](docs/figures/curves_data.py) rebuilds the curve data from the run logs, then
+`pdflatex architecture.tex` in `docs/figures/`.
+
 ## Layout
 
 ```
@@ -53,7 +76,7 @@ config/               run configs: pretrain/, finetune/, pilots/, smoke.py (stac
 data/                 datasets, token stores and their metadata (see data/README.md); skryabin/ = the hand-picked songs
 data_prep/            datasets/ (downloads, tokenization into stores, store splits), songs/ (song search, download,
                       audio -> MIDI, fine-tune CSVs), labels/ (features, labels, pseudo-labels, caption text)
-docs/                 experiment results (experiments.md)
+docs/                 experiment results (experiments.md), figures/ (architecture figure and its curve data)
 eval/                 settings/ (sampling sweeps, settings search), compare/ (seeded comparisons, text control,
                       sample statistics), probes/ (hidden-state probes, label coverage)
 tools/                status.py (dashboard), sweeps/ (fine-tune sweeps), bench/ (GPU / CPU throughput),

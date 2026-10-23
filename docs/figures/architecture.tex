@@ -1,91 +1,345 @@
-% Captioned music model (450M, F1 layout), drawn in the style of Sebastian Raschka's LLM architecture gallery:
-% main column in a grey container, the repeated block in teal with dashed sublayers, zoom panels with dotted borders,
-% the anti-forgetting training recipe as a panel and a monospace list. Shapes from musicar/model/gpt.py, recipe from
-% config/pilots/section_*.py + train.py, switch shares from logs/sections/forget.md.
-% Build: pdflatex architecture.tex  (TinyTeX: export PATH=$HOME/.local/bin:$PATH)
+% Captioned music model (477M, F1 layout), drawn in the style of Sebastian Raschka's LLM architecture gallery.
+% Colours: pink = captions only, teal = model structure (repeated block, sublayer labels, section numbers) and, in
+% the curves, what the model uses; grey = linear layers, embedding tables and the compared alternatives. Dotted frames / dotted boxes = zooms, dashed frames = modules drawn expanded in
+% place, solid frames = text panels. Sections are numbered in reading order.
+% Sources: shapes from musicar/model/gpt.py; recipe from config/pilots/section_*.py + train.py; switch scores and CE
+% from logs/sections/forget.md; base run from config/pretrain/long_450m.py + agents.md; F1 plan from
+% context/claude/text_control.md; fine-tune from config/finetune/finetune_ua450{,_multi}.py; song counts from
+% data/finetune/ukrainian_{multi_v1,reduction_v4}.csv; audio pipeline from data_prep/songs/audio_to_piano.py;
+% curves from curves/*.dat (python docs/figures/curves_data.py parses the run logs).
+% Build: pdflatex architecture.tex  (TinyTeX: export PATH=$HOME/.local/bin:$PATH; needs colortbl, mathastext, pgfplots)
 % SVG / PNG: pdftocairo -svg architecture.pdf architecture.svg ; pdftocairo -png -r 200 -singlefile architecture.pdf architecture
 \documentclass[border=8pt]{standalone}
+\usepackage[T1]{fontenc}
 \usepackage[scaled=0.92]{helvet}
 \renewcommand{\familydefault}{\sfdefault}
 \usepackage{inconsolata}
 \usepackage{amsmath}
+\usepackage[italic]{mathastext}     % maths letters and digits in Helvetica, like the text
+\usepackage[table]{xcolor}
+\usepackage{array}
+\usepackage{tabularx}
+\usepackage{pgfplots}
+\pgfplotsset{compat=1.18}
 \usepackage{tikz}
 \usetikzlibrary{arrows.meta,calc,decorations.pathreplacing,backgrounds}
+\usepackage[hidelinks]{hyperref}
+\hyphenpenalty=10000
+\exhyphenpenalty=10000
 
-\definecolor{tealT}{HTML}{3B7D70}   % title, brace
-\definecolor{tealF}{HTML}{C3E0D6}   % repeated block
+\definecolor{tealT}{HTML}{3B7D70}   % title, structure labels, section numbers, brace
+\definecolor{tealF}{HTML}{C3E0D6}   % repeated block, table header
 \definecolor{tealB}{HTML}{6FA696}
-\definecolor{greyF}{HTML}{E4E4E4}   % model container
-\definecolor{greyB}{HTML}{9C9C9C}
-\definecolor{pinkL}{HTML}{C2577A}   % caption path: lines, labels
+\definecolor{greyF}{HTML}{F2F2F2}   % containers, text panels
+\definecolor{greyB}{HTML}{8A8A8A}
+\definecolor{rowG}{HTML}{F2F2F2}    % alternating table rows
+\definecolor{pinkL}{HTML}{C2577A}   % captions: lines, labels
 \definecolor{pinkF}{HTML}{F6CCD9}
-\definecolor{boxG}{HTML}{D5D5D5}    % plain linear layers in zooms
-\definecolor{dark}{HTML}{4A4A4A}    % the component a zoom opens
-\definecolor{blueF}{HTML}{CFE0F2}   % the second file in a spliced window
+\definecolor{boxG}{HTML}{D5D5D5}    % linear layers, embedding tables
+\definecolor{altG}{HTML}{767676}    % curves: the alternative a choice was compared with (teal = what the model uses)
 
 \tikzset{
   box/.style={draw=black, fill=white, rounded corners=3pt, minimum height=5.6mm, inner sep=3pt, align=center,
               font=\footnotesize, line width=0.6pt},
   gbox/.style={box, fill=boxG},
   pbox/.style={box, fill=pinkF, draw=pinkL},
-  dbox/.style={box, fill=dark, draw=dark, text=white},
-  sub/.style={draw=pinkL, dashed, rounded corners=6pt, line width=0.9pt},
+  sub/.style={draw=tealB, dashed, rounded corners=6pt, line width=0.9pt},
+  sublab/.style={text=tealT, font=\footnotesize\bfseries},
   zoom/.style={draw=black, densely dotted, rounded corners=10pt, line width=1.5pt},
+  zline/.style={densely dotted, line width=1.5pt},
+  panel/.style={draw=greyB, fill=greyF, rounded corners=8pt, line width=1pt},
+  ptitle/.style={font=\small\bfseries, anchor=south west, inner sep=2pt},
   arr/.style={-{Stealth[length=2.4mm]}, line width=0.9pt},
   parr/.style={arr, draw=pinkL},
   sum/.style={draw=black, fill=white, circle, inner sep=0pt, minimum size=4.6mm, line width=0.8pt},
-  tok/.style={draw=black, minimum width=2.9mm, minimum height=2.9mm, inner sep=0pt, line width=0.4pt},
-  plab/.style={text=pinkL, font=\footnotesize\bfseries},
-  note/.style={font=\scriptsize, text=black!75, align=left},
-  head/.style={box, minimum width=12mm, inner sep=2pt},
+  tok/.style={draw=black, fill=white, minimum width=2.9mm, minimum height=2.9mm, inner sep=0pt, line width=0.4pt},
+  ptok/.style={tok, fill=pinkF, draw=pinkL},
+  note/.style={font=\scriptsize, text=black!85, align=left},
+  ptext/.style={font=\footnotesize, text=black!90, align=left, inner sep=8pt},
+  head/.style={box, minimum width=9mm, minimum height=7.5mm, inner sep=1pt, densely dotted, line width=1.1pt},
 }
+\newcommand{\rcite}[1]{{\scriptsize[#1]}}
+\newcommand{\capt}[1]{\textcolor{pinkL}{``#1''}}
+\newcommand{\badge}[1]{\tikz[baseline=(b.base)]\node[circle, fill=tealT, text=white, inner sep=0pt, minimum size=4.4mm,
+  font=\scriptsize\bfseries] (b) {#1};}
+\newcommand{\sect}[2]{\badge{#1}\hspace{4pt}#2}
 
+\newlength{\panelW}
+\setlength{\panelW}{\dimexpr 16.8cm + 9.2cm + 18pt\relax}
 \begin{document}
+%% ================= boxes used inside text panels =================
+\newsavebox{\spliceBox}
+\sbox{\spliceBox}{\begin{tikzpicture}
+  \node[draw=black, fill=white, minimum width=36mm, minimum height=5mm, font=\scriptsize] (sa) at (0, 0) {file A notes};
+  \node[draw=pinkL, fill=pinkF, minimum width=7mm, minimum height=5mm, font=\scriptsize, anchor=west] (sb) at (sa.east) {S$_B$};
+  \node[draw=black, fill=white, minimum width=36mm, minimum height=5mm, font=\scriptsize, anchor=west, densely dashed] at (sb.east) {file B section};
+\end{tikzpicture}}
+
+\newsavebox{\repeatBox}
+\sbox{\repeatBox}{\begin{tikzpicture}
+  \foreach \i in {0,1,2} {
+    \node[draw=pinkL, fill=pinkF, minimum width=4mm, minimum height=5mm, inner sep=0pt] at (2.8*\i, 0) {};
+    \node[draw=black, fill=white, minimum width=23mm, minimum height=5mm, font=\scriptsize] at (1.4+2.8*\i, 0) {64 notes};
+  }
+\end{tikzpicture}}
+
+\newsavebox{\cfBox}
+\sbox{\cfBox}{\begin{tikzpicture}
+  \node[pbox, minimum width=24mm] (ct) at (0, 0.42) {true caption $c_k$};
+  \node[box, minimum width=24mm] (cp) at (0, -0.42) {previous $c_{k-1}$};
+  \node[box, minimum height=14mm, minimum width=17mm] (m) at (2.45, 0) {model\\[-2pt] {\scriptsize same weights,}\\[-3pt] {\scriptsize two passes}};
+  \node[font=\footnotesize] (nt) at (4.15, 0.42) {NLL$_\text{true}$};
+  \node[font=\footnotesize] (np) at (4.15, -0.42) {NLL$_\text{prev}$};
+  \draw[arr] (ct.east) -- (m.west |- ct.east);
+  \draw[arr] (cp.east) -- (m.west |- cp.east);
+  \draw[arr] (m.east |- nt) -- (nt);
+  \draw[arr] (m.east |- np) -- (np);
+  \node[box, font=\scriptsize] (hinge) at (6.6, 0) {$\max\bigl(0,\ 0.05$\\$-\,(\text{NLL}_\text{prev}-\text{NLL}_\text{true})\bigr)$};
+  \draw[arr] (nt.east) -- (hinge.west |- nt.east);
+  \draw[arr] (np.east) -- (hinge.west |- np.east);
+\end{tikzpicture}}
+
+\newsavebox{\embBox}
+\sbox{\embBox}{\begin{tikzpicture}
+  \foreach \n/\v [count=\i] in {pitch/130, vel./32, dur./512, $\Delta t$/512} {
+    \node[gbox, minimum width=12mm, font=\scriptsize] (e\i) at (1.45*\i, 0) {\n\ \textcolor{black!70}{(\v)}};
+    \draw[arr] (e\i.north) -- (1.45*\i, 0.62);
+  }
+  \node[gbox, minimum width=56mm] (cat) at (3.625, 0.9) {concat ($4\times288 = 1152$), Linear $1152\to1152$};
+  \draw[arr] (cat.north) -- (3.625, 1.55) node[above, font=\scriptsize] {note vector};
+\end{tikzpicture}}
+
+\newsavebox{\genBox}
+\sbox{\genBox}{\begin{tikzpicture}
+  \node[box, minimum width=27mm, minimum height=13mm, text width=25mm] (kv) at (0, 0) {KV cache\\[-1pt] {\scriptsize notes so far + caption vectors}};
+  \node[box, minimum height=13mm, text width=24mm] (m) at (3.25, 0) {trunk + cascade\\[-1pt] {\scriptsize two batch rows: captions / null vectors}};
+  \node[pbox, font=\scriptsize] (lc) at (5.6, 0.38) {$\ell_\text{caption}$};
+  \node[box, font=\scriptsize] (ln) at (5.6, -0.38) {$\ell_\text{none}$};
+  \node[box, font=\scriptsize, minimum height=13mm] (cfg) at (7.95, 0) {$\ell_\text{none} + 2\,(\ell_\text{caption} - \ell_\text{none})$};
+  \node[box, minimum height=13mm, text width=19mm] (smp) at (10.65, 0) {sample $a_i$\\[-1pt] {\scriptsize temperature, optional top-p}};
+  \draw[arr] (kv) -- (m);
+  \draw[arr] (m.east |- lc) -- (lc);
+  \draw[arr] (m.east |- ln) -- (ln);
+  \draw[arr] (lc) -- (cfg.west |- lc);
+  \draw[arr] (ln) -- (cfg.west |- ln);
+  \draw[arr] (cfg) -- (smp);
+  \draw[arr, rounded corners=5pt] (smp.north) -- ++(0, 0.35) -| node[pos=0.25, above, font=\scriptsize] {next head ($E_i(a_i)$ added to $z$), five heads per note} (m.north);
+  \draw[arr, dashed, rounded corners=5pt] (smp.south) -- ++(0, -0.35) -| node[pos=0.25, below, font=\scriptsize] {after the 5th head: the note is appended} (kv.south);
+\end{tikzpicture}}
+
+%% ================= training curves (pgfplots) =================
+\pgfplotsset{cplot/.style={scale only axis, width=5.3cm, height=3.3cm, axis lines*=left, axis line style={black!55},
+  tick style={black!55}, grid=major, grid style={black!10}, tick label style={font=\scriptsize}, label style={font=\scriptsize},
+  every axis plot/.append style={line join=round}, clip=false, xlabel shift=-2pt, ylabel shift=-3pt,
+  scaled ticks=false, tick label style={/pgf/number format/fixed}}}
+
+\newsavebox{\curveBlock}
+\sbox{\curveBlock}{\begin{tikzpicture}
+\begin{axis}[cplot, xmin=250, xmax=1500, ymin=2.8, ymax=7.8, xtick={250,500,750,1000,1250,1500},
+    xlabel={training step}, ylabel={val CE (nats / note)}]
+  \foreach \s in {1,2,3} {
+    \addplot[altG, dashed, line width=0.5pt] table {curves/block_base_s\s.dat};
+    \addplot[tealT, line width=0.5pt] table {curves/block_newblock_s\s.dat};
+  }
+  \addplot[altG, dashed, line width=1.6pt] table {curves/block_base_mean.dat};
+  \addplot[tealT, line width=1.6pt] table {curves/block_newblock_mean.dat};
+  \node[anchor=west, font=\scriptsize, text=black!85, align=left] at (axis cs:1520, 3.95) {old 3.89};
+  \node[anchor=west, font=\scriptsize, text=black!85, align=left] at (axis cs:1520, 3.08) {new 3.14};
+\end{axis}
+\end{tikzpicture}}
+
+\newsavebox{\curveBase}
+\sbox{\curveBase}{\begin{tikzpicture}
+\begin{axis}[cplot, xmin=0, xmax=8.3, ymin=1.6, ymax=2.9, xtick={0,2,4,6,8}, ytick={1.6,1.8,2.0,2.2,2.4,2.6,2.8},
+    xlabel={notes seen (billions)}, ylabel={val CE (nats / note)}]
+  \fill[tealF!55] (axis cs:6.636, 1.6) rectangle (axis cs:8.3, 2.9);
+  \node[anchor=north, font=\scriptsize, text=black!75, align=center] at (axis cs:7.47, 2.88) {WSD\\cooldown};
+  \addplot[tealT, line width=1.6pt] table[x=notes, y=ce] {curves/base_450m.dat};
+  \fill[tealT] (axis cs:8.2956, 1.679) circle (2.2pt);
+  \node[anchor=west, font=\scriptsize, text=black!85] at (axis cs:8.4, 1.679) {1.679};
+  \node[anchor=south west, font=\scriptsize, text=black!85] at (axis cs:0.25, 2.807) {2.807 at 0.13B};
+\end{axis}
+\end{tikzpicture}}
+
+\newsavebox{\curveArms}
+\sbox{\curveArms}{\begin{tikzpicture}
+\pgfplotsset{arms/.style={cplot, width=2.75cm, ymin=-0.6, ymax=4.6, ytick={0,1,2,3,4}, grid=none, xmajorgrids,
+    axis y line*=none, y axis line style={draw=none}, ytick style={draw=none}}}
+\begin{axis}[arms, name=sw, xmin=0, xmax=1, xtick={0,0.5,1}, xlabel={switch score (higher = follows)},
+    yticklabels={none (ctrl), repeat, counterfactual, splice, all three}]
+  \draw[black!25, line width=1.2pt] (axis cs:0, 0) -- (axis cs:0.06, 0);
+  \node[anchor=west, font=\scriptsize, text=black!80, inner sep=4pt] at (axis cs:0.06, 0) {0.06};
+  \draw[black!25, line width=1.2pt] (axis cs:0, 1) -- (axis cs:0.09, 1);
+  \node[anchor=west, font=\scriptsize, text=black!80, inner sep=4pt] at (axis cs:0.09, 1) {0.09};
+  \draw[black!25, line width=1.2pt] (axis cs:0, 2) -- (axis cs:0.13, 2);
+  \node[anchor=west, font=\scriptsize, text=black!80, inner sep=4pt] at (axis cs:0.13, 2) {0.13};
+  \draw[black!25, line width=1.2pt] (axis cs:0, 3) -- (axis cs:0.59, 3);
+  \node[anchor=west, font=\scriptsize, text=black!80, inner sep=4pt] at (axis cs:0.59, 3) {0.59};
+  \draw[black!25, line width=1.2pt] (axis cs:0, 4) -- (axis cs:0.85, 4);
+  \node[anchor=west, font=\scriptsize, text=black!80, inner sep=4pt] at (axis cs:0.85, 4) {0.85};
+  \addplot[altG, only marks, mark=*, mark size=2.4pt] table[x=switch, y expr=\coordindex, skip coords between index={4}{5}] {curves/section_arms.dat};
+  \addplot[tealT, only marks, mark=*, mark size=2.8pt] table[x=switch, y expr=\coordindex, skip coords between index={0}{4}] {curves/section_arms.dat};
+\end{axis}
+\begin{axis}[arms, at={(sw.east)}, anchor=west, xshift=0.6cm, xmin=2.755, xmax=2.79, xtick={2.76,2.77,2.78,2.79},
+    xlabel={held-out CE (lower = better)}, yticklabels={}]
+  \addplot[altG, only marks, mark=*, mark size=2.4pt] table[x=ce, y expr=\coordindex, skip coords between index={4}{5}] {curves/section_arms.dat};
+  \addplot[tealT, only marks, mark=*, mark size=2.8pt] table[x=ce, y expr=\coordindex, skip coords between index={0}{4}] {curves/section_arms.dat};
+\end{axis}
+\end{tikzpicture}}
+
+\newsavebox{\setupBox}
+\sbox{\setupBox}{\footnotesize\renewcommand{\arraystretch}{1.25}%
+\begin{tabularx}{\panelW}{@{\hspace{7pt}}>{\raggedright}p{2.2cm}>{\raggedright}X>{\raggedright}X>{\raggedright\arraybackslash}X@{\hspace{7pt}}}
+\rowcolor{tealF}\textcolor{tealT}{\textbf{Setting}} & \textcolor{tealT}{\textbf{Base pretraining (done)}} &
+  \textcolor{tealT}{\textbf{Caption training, F1 run (planned)}} & \textcolor{tealT}{\textbf{Fine-tune on Ukrainian songs}}\\
+Start & from scratch & the base + the two new caption adapters & the base (done, no captions); the F1 model with captions (F2, planned)\\
+\rowcolor{rowG}Data & GigaMIDI \rcite{12} 0.4, Aria-MIDI \rcite{13} 0.3, Discover MIDI \rcite{19} 0.3; 8.3B notes (1.8 epochs) &
+  captioned MIDI in 3 tiers: MidiCaps \rcite{14} / XMIDI \rcite{20} / GigaMIDI metadata, Aria-MIDI metadata, the rest with feature captions; 2.5--4B notes &
+  5,358 songs transcribed from audio (section 9) 0.75 + GigaMIDI replay 0.25 against forgetting\\
+Captions & none: only the instrument-set and density conditions &
+  templates filled from metadata (genre, mood, artist, composer) and from features computed from the notes (tempo, loudness, register, instruments), 30\% in Ukrainian; MidiCaps' LLM-written captions; section captions from each section's own notes &
+  none in the done run; F2 adds them\\
+\rowcolor{rowG}Window & 2,048 notes ($\approx$1--4 min) & 2,048 notes + 16 file vectors + 4 per caption arrival (section start and every 64 notes): $\approx$2,190 positions & 2,048 notes\\
+Batch & 65,536 notes per step (32 windows) & same & 24,576 notes per step (12 windows)\\
+\rowcolor{rowG}Optimizer, LR & Muon \rcite{10} for weight matrices, AdamW for the rest; one LR $10^{-3}$ (Muon updates scaled to AdamW's size) &
+  AdamW, LR $10^{-4}$, adapters $10\times$ (as in the 107M pilots) & 8-bit AdamW, LR $2\cdot10^{-4}$\\
+Schedule & WSD \rcite{11}: warmup, constant, $1-\sqrt{\cdot}$ cooldown over the last 20\% & same & same\\
+\rowcolor{rowG}Steps & 126,582 ($\approx$41 h on one RTX 5090) & $\approx$38--61k & 1,500\\
+Precision & bf16 with fp8 matmuls, torch.compile & same & bf16\\
+\end{tabularx}}
+
+\newsavebox{\audioBox}
+\sbox{\audioBox}{\begin{tikzpicture}
+  \node[box, minimum height=10mm] (mp3) at (0, 0) {Song\\[-2pt] {\scriptsize (mp3)}};
+  \node[box, minimum height=10mm] (dm) at (2.55, 0) {Demucs \rcite{15}\\[-2pt] {\scriptsize htdemucs\_6s, 6 stems}};
+  \draw[arr] (mp3) -- (dm);
+  \foreach \n/\t/\y [count=\i] in {vocals/{basic-pitch \rcite{16}: one melody line}/1.2, bass/{basic-pitch: one bass line}/0.4,
+      {guitar, piano, other}/{basic-pitch: chords, $\le$ 6 notes at once}/-0.4, drums/{ADTOF \rcite{17}: 5 drum classes}/-1.2} {
+    \node[box, minimum width=27mm, font=\scriptsize, minimum height=5mm] (st\i) at (5.75, \y) {\n};
+    \node[box, minimum width=52mm, font=\scriptsize, minimum height=5mm] (tr\i) at (10.0, \y) {\t};
+    \draw[arr, rounded corners=3pt] (dm.east) -- ++(0.25, 0) |- (st\i.west);
+    \draw[arr] (st\i) -- (tr\i);
+  }
+  \node[box, minimum height=29mm, text width=24mm] (mid) at (14.45, 0) {Multi-track MIDI\\[-1pt] {\scriptsize one instrument per stem; or a piano reduction}};
+  \foreach \i in {1,...,4} { \draw[arr] (tr\i.east) -- (mid.west |- tr\i.east); }
+  \node[box, minimum height=10mm, text width=27mm] (tk) at (18.0, 0) {Note tokens\\[-1pt] {\scriptsize 5,358 songs multi-track, 5,890 as piano}};
+  \draw[arr] (mid) -- (tk);
+  \node[note, anchor=west, text width=5.3cm, font=\footnotesize] at (19.7, 0.1) {Every step adds errors: stem bleed, missed or
+    extra notes, octave and timing errors, drum classes mixed up, loudness guessed from activations; stems quieter than
+    $-30$ dB vs the mix are dropped. The model learns these errors as if they were music.};
+  \node[box, dashed, draw=black!60, text=black!80, font=\scriptsize, text width=13.0cm, align=left] (plan) at (9.3, -2.35)
+    {\textbf{Planned:} a pretrained audio tokenizer (neural codec such as EnCodec \rcite{18}) turns the recording itself
+     into tokens, so songs are learned without the transcription noise.};
+  \draw[arr, dashed, black!60, rounded corners=4pt] (mp3.south) |- (plan.west);
+\end{tikzpicture}}
+
+\newsavebox{\glossBox}
+\sbox{\glossBox}{\scriptsize\renewcommand{\arraystretch}{1.2}%
+\begin{tabular}{@{}>{\bfseries}l>{\raggedright}p{4.85cm}@{\hspace{12pt}}>{\bfseries}l>{\raggedright\arraybackslash}p{5.15cm}@{}}
+$\boldsymbol{\Delta t}$ & time since the previous note started (20 ms steps, 512 values) & RoPE \rcite{2} & rotary position embedding: positions as rotations of queries and keys\\
+instr. & instrument: General MIDI program 0--127 or drums (129 values) & RMSNorm \rcite{3} & layer normalisation by the root mean square only\\
+pitch & MIDI pitch 0--127 + start / end of piece (130 values) & SwiGLU \rcite{4} & feed-forward layer with a SiLU-gated linear unit\\
+dur. & note length (20 ms steps, 512 values) & QK-norm \rcite{5} & queries and keys normalised before the dot product\\
+vel. & velocity: how hard the note is played (32 levels) & LaBSE \rcite{1} & multilingual sentence encoder (109 languages)\\
+compound token & one sequence position = one whole note & NLL & negative log-likelihood of the true notes\\
+caption vector & a caption-adapter output placed in the sequence; no loss on it & nats & units of NLL with the natural log\\
+null vectors & learned stand-ins for ``no caption'' & BCE & binary cross-entropy (two-class loss)\\
+teacher forcing & training feeds the true earlier values, not samples & CFG \rcite{9} & classifier-free guidance: push logits away from the caption-free prediction\\
+KV cache & keys and values of earlier positions kept between steps & WSD \rcite{11} & warmup, stable, decay: LR schedule with a short final cooldown\\
+multi-hot & a 0/1 vector with a 1 for every instrument present & Muon \rcite{10} & optimizer that orthogonalises the update of each weight matrix\\
+stem & one separated part of a recording (vocals, bass, drums, ...) & Demucs \rcite{15} & neural source separation: a song into 6 stems\\
+\end{tabular}}
+
+\newsavebox{\refBox}
+\sbox{\refBox}{\scriptsize\renewcommand{\arraystretch}{1.1}%
+\newcommand{\rf}[3]{[#1] & #2, \href{https://arxiv.org/abs/#3}{\texttt{arXiv:#3}}\\}%
+\begin{tabular}{@{}r@{\hspace{4pt}}l@{}}
+\rf{1}{LaBSE: Language-agnostic BERT Sentence Embedding (2020)}{2007.01852}
+\rf{2}{RoFormer: rotary position embedding (2021)}{2104.09864}
+\rf{3}{Root Mean Square Layer Normalization (2019)}{1910.07467}
+\rf{4}{GLU Variants Improve Transformer (2020)}{2002.05202}
+\rf{5}{Query-Key Normalization for Transformers (2020)}{2010.04245}
+\rf{6}{Compound Word Transformer (2021)}{2101.02402}
+\rf{7}{Flamingo: learned-query resampler, gated adapters (2022)}{2204.14198}
+\rf{8}{MuseBarControl: counterfactual loss (2024)}{2407.04331}
+\rf{9}{Classifier-Free Diffusion Guidance (2022)}{2207.12598}
+\rf{10}{Muon is Scalable for LLM Training (2025)}{2502.16982}
+\rf{11}{Scaling laws beyond fixed training durations: WSD (2024)}{2405.18392}
+\rf{12}{The GigaMIDI Dataset (2025)}{2502.17726}
+\rf{13}{Aria-MIDI: a dataset of piano MIDI files (2025)}{2504.15071}
+\rf{14}{MidiCaps: MIDI with text captions (2024)}{2406.02255}
+\rf{15}{Demucs: Hybrid Transformers for Music Source Separation (2022)}{2211.08553}
+\rf{16}{basic-pitch: lightweight polyphonic note transcription (2022)}{2203.09893}
+\rf{17}{ADTOF: automatic drum transcription dataset and model (2021)}{2111.11737}
+\rf{18}{EnCodec: High Fidelity Neural Audio Compression (2022)}{2210.13438}
+{[19]} & Discover MIDI Dataset, \href{https://huggingface.co/datasets/projectlosangeles/Discover-MIDI-Dataset}{\texttt{Hugging Face dataset}}\\
+\rf{20}{XMusic: the XMIDI dataset (2025)}{2501.08809}
+\end{tabular}}
+
 \begin{tikzpicture}
 
-%% ================= main column =================
-\node[font=\fontsize{20}{22}\selectfont\bfseries, text=tealT] at (0, 16.55) {Captioned music model (477M)};
+%% ================= title + status =================
+\node[font=\fontsize{20}{22}\selectfont\bfseries, text=tealT] at (1.8, 19.25) {Captioned music model (477M)};
+\node[font=\footnotesize, text=black!85] at (1.8, 18.6) {477M trainable parameters: trunk 446M, cascade heads 16M, two caption adapters 13M, embeddings 2M.
+  The LaBSE text encoder (471M) is frozen and not counted.};
+\node[font=\footnotesize\bfseries, text=tealT] at (1.8, 18.15) {Status: the music model without caption adapters (462M) is trained. The caption stage
+  of this layout (F1) is planned; caption results here come from 107M pilots.};
+\node[font=\scriptsize, text=black!75] at (1.8, 17.75) {How to read: numbers give the reading order; \textcolor{pinkL}{pink} = captions; grey boxes = linear layers
+  and embedding tables; dashed frame = a module drawn open in place; dotted frame or box = a zoom (white panel) into the dotted part.};
 
-% container
+%% ================= 3: main column =================
+\node[ptitle] at (-4.3, 17.05) {\sect{3}{Music model}};
 \begin{scope}[on background layer]
-  \fill[greyF, draw=greyB, rounded corners=16pt, line width=0.8pt] (-4.3, 0.15) rectangle (4.3, 14.75);
+  \fill[greyF, draw=greyB, rounded corners=16pt, line width=1pt] (-4.3, -1.75) rectangle (4.3, 15.75);
   \fill[tealF, draw=tealB, rounded corners=12pt, line width=0.8pt] (-3.6, 3.45) rectangle (3.6, 11.35);
 \end{scope}
 
 % input
-\node[box] (inp) at (0, -0.65) {Note tokens};
-\node[font=\ttfamily\small] at (0, -1.5) {sample input: 2,048 notes + "loud rock, fast"};
+\node[box] (inp) at (0, -0.65) {Note tokens {\scriptsize (one position = one note: $\Delta t$, instr., pitch, dur., vel.)}};
+\node[font=\footnotesize, text=black!85] at (0, -1.35) {e.g. 2,048 notes + file caption \capt{loud rock, fast}};
 \draw[arr] (inp) -- (0, 0.67);
 
 % embedding + conditions
-\node[box, minimum width=34mm] (emb) at (0, 0.95) {Note embedding};
+\node[box] (emb) at (0, 0.95) {Note embedding {\scriptsize ($4\times288$, concat, Linear)}};
 \node[sum] (s0) at (0, 1.85) {$+$};
-\node[box] (cond) at (-2.45, 1.85) {Instrument,\\[-2pt] conditions};
+\node[box, font=\scriptsize] (cond) at (-2.5, 1.9) {Instrument (per note)\\[-2pt] + instr. set, density\\[-2pt] (per window)};
 \draw[arr] (emb) -- (s0);
-\draw[arr] (cond) -- (s0);
+\draw[arr] (cond.east |- s0) -- (s0);
+% legend
+\node[ptok] at (1.05, 2.2) {};
+\node[note, anchor=north west, inner sep=1pt] at (1.25, 2.33) {caption vector\\(RoPE position, no loss)};
+\node[tok] at (1.05, 1.5) {};
+\node[note, anchor=west] at (1.25, 1.5) {note vector};
 
-% interleaved sequence
-\foreach \i in {0,1,2} { \node[tok, fill=pinkF, draw=pinkL] (p\i) at (-2.5+0.32*\i, 2.85) {}; }
-\node[font=\scriptsize] at (-1.5, 2.85) {$\cdots$};
-\foreach \i in {0,...,4} { \node[tok, fill=white] (n\i) at (-0.64+0.32*\i, 2.85) {}; }
-\foreach \i in {0,1} { \node[tok, fill=pinkF, draw=pinkL] (s\i) at (1.15+0.32*\i, 2.85) {}; }
-\foreach \i in {0,...,3} { \node[tok, fill=white] (m\i) at (1.9+0.32*\i, 2.85) {}; }
-\node[font=\scriptsize] at (3.25, 2.85) {$\cdots$};
-\draw[arr] (s0) -- (n2.south);
-\node[text=pinkL, font=\scriptsize, anchor=south west, align=left] at (1.0, 3.0) {caption slots in the sequence};
+% input sequence: [file 16][section 4][64 notes][same section 4 again][64 notes] ... [next section 4][notes]
+\foreach \x in {-3.92, -3.6, -3.28} { \node[ptok] at (\x, 2.85) {}; }
+\foreach \x in {-2.86, -2.54} { \node[ptok] at (\x, 2.85) {}; }
+\foreach \x in {-2.12, -1.8, -1.48, -1.16} { \node[tok] at (\x, 2.85) {}; }
+\foreach \x in {-0.74, -0.42} { \node[ptok] at (\x, 2.85) {}; }
+\foreach \x in {0, 0.32, 0.64, 0.96} { \node[tok] at (\x, 2.85) {}; }
+\node[font=\scriptsize] at (1.32, 2.85) {$\cdots$};
+\foreach \x in {1.68, 2.0} { \node[ptok] at (\x, 2.85) {}; }
+\foreach \x in {2.42, 2.74, 3.06} { \node[tok] at (\x, 2.85) {}; }
+\node[font=\scriptsize] at (3.45, 2.85) {$\cdots$};
+\node[text=black!75, font=\tiny, anchor=south] at (-3.6, 3.0) {file 16};
+\node[text=black!75, font=\tiny, anchor=south] at (-2.7, 3.0) {sect. 4};
+\node[text=black!75, font=\tiny, anchor=south] at (-1.64, 3.0) {64 notes};
+\node[text=black!75, font=\tiny, anchor=south] at (-0.58, 3.0) {again};
+\node[text=black!75, font=\tiny, anchor=south] at (1.84, 3.0) {next sect.};
+\draw[arr] (s0) -- (0, 2.7);
 
 % transformer block
 \node[box, minimum width=26mm] (ln1) at (0, 4.5) {RMSNorm 1};
-\node[box, minimum width=36mm, minimum height=8mm] (att) at (0, 5.55) {Causal self-attention\\[-2pt] {\scriptsize 18 heads, RoPE, QK-norm}};
+\node[box, minimum width=36mm, minimum height=8mm] (att) at (0, 5.55) {Causal self-attention\\[-2pt] {\scriptsize 18 heads $\times$ 64, RoPE, QK-norm}};
 \node[sum] (a1) at (0, 6.95) {$+$};
 \node[box, minimum width=26mm] (ln2) at (0, 8.1) {RMSNorm 2};
 \node[box, minimum width=36mm, minimum height=8mm] (ffn) at (0, 9.2) {SwiGLU feed-forward\\[-2pt] {\scriptsize $1152\to3072\to1152$}};
 \node[sum] (a2) at (0, 10.65) {$+$};
 \draw[sub] (-2.3, 4.05) rectangle (2.3, 6.15);
-\node[plab, anchor=south west] at (-2.3, 6.15) {Attn sublayer};
+\node[sublab, anchor=south west] at (-2.3, 6.15) {Attn sublayer};
 \draw[sub] (-2.3, 7.6) rectangle (2.3, 9.85);
-\node[plab, anchor=south west] at (-2.3, 9.85) {FFN sublayer};
-\draw[arr] (0, 2.98) -- (ln1);
+\node[sublab, anchor=south west] at (-2.3, 9.85) {FFN sublayer};
+\draw[arr] (0, 3.0) -- (ln1);
 \draw[arr] (ln1) -- (att);
 \draw[arr] (att) -- (a1);
 \draw[arr] (a1) -- (ln2);
@@ -99,124 +353,230 @@
 % repeat brace
 \draw[decorate, decoration={brace, amplitude=7pt}, line width=1.2pt, draw=black] (-4.45, 3.45) -- (-4.45, 11.35);
 \node[font=\fontsize{15}{17}\selectfont\bfseries, text=tealT, anchor=east] at (-4.75, 7.4) {28 $\times$};
-\node[note, anchor=north west, text=tealT] at (-3.45, 11.2) {$d = 1152$};
+\node[sublab, anchor=north west] at (-3.45, 11.2) {width 1152};
 
-% final norm + cascade heads
+% final norm + cascade heads: a running state z (z_0 = h_t) read by each head, plus the embedding of each decided value
 \node[box, minimum width=34mm] (lnf) at (0, 11.9) {Final RMSNorm (note positions)};
 \draw[arr] (a2) -- (lnf);
-\draw[sub] (-4.05, 12.55) rectangle (4.05, 13.85);
-\node[plab, anchor=south west] at (-4.05, 13.85) {Cascade heads};
-\node[head] (h1) at (-3.2, 13.2) {$\Delta t$};
-\node[head] (h2) at (-1.6, 13.2) {instr.};
-\node[head] (h3) at (0, 13.2) {pitch};
-\node[head] (h4) at (1.6, 13.2) {dur.};
-\node[head] (h5) at (3.2, 13.2) {vel.};
-\draw[line width=0.9pt] (lnf.north) -- (0, 12.72);
-\draw[line width=0.9pt] (-3.2, 12.72) -- (3.2, 12.72);
-\foreach \h in {h1,h2,h4,h5} { \draw[arr] (\h.south |- 0,12.72) -- (\h.south); }
-\draw[arr] (0, 12.72) -- (h3.south);
-\foreach \a/\b in {h1/h2,h2/h3,h3/h4,h4/h5} { \draw[arr] (\a.east) -- (\b.west); }
-\draw[arr] (h3.north) -- (0, 15.35);
-\node[font=\small] at (0, 15.6) {Next note};
-
-%% ================= caption sources (left, bottom) =================
-\draw[line width=1pt, rounded corners=6pt] (-10.8, 0.15) rectangle (-6.0, 3.65);
-\node[font=\footnotesize\bfseries, anchor=north west] at (-10.7, 3.6) {Caption sources};
-\node[pbox] (fc) at (-9.55, 0.75) {File caption};
-\node[pbox] (sc) at (-7.35, 0.75) {Section captions\\[-2pt] {\scriptsize one per 256 notes}};
-\node[box, minimum width=40mm] (lab) at (-8.4, 1.85) {LaBSE encoder {\scriptsize (frozen, 471M)}};
-\node[dbox, minimum width=40mm] (ad) at (-8.4, 2.85) {Caption adapters\\[-2pt] {\scriptsize $K{=}16$ file, $K{=}4$ per section}};
-\draw[parr] (fc) -- (fc |- lab.south);
-\draw[parr] (sc) -- (sc |- lab.south);
-\draw[parr] (lab) -- (ad);
-\draw[parr, rounded corners=4pt] (ad.east) -- (-3.0, 2.85) -- (p0.west);
-\node[note, anchor=north] at (-8.4, -0.15) {no caption: $K$ learned null vectors (dropout, guidance)};
-
-%% ================= zoom: caption adapter (left, top) =================
-\draw[zoom] (-10.8, 4.55) rectangle (-6.0, 12.6);
-\node[font=\small\bfseries, anchor=south west] at (-10.8, 12.7) {Caption adapter (learned-query cross-attention)};
-\draw[densely dotted, line width=1.5pt] (ad.north) -- (-8.4, 4.55);
-\node[gbox, minimum width=19mm] (X) at (-9.6, 5.25) {Caption tokens\\[-2pt] {\scriptsize $L\times768$}};
-\node[pbox, minimum width=19mm] (P) at (-7.4, 5.25) {Learned queries\\[-2pt] {\scriptsize $K\times768$}};
-\node[box, minimum width=19mm] (lnx) at (-9.6, 6.45) {LayerNorm};
-\node[pbox, minimum width=40mm, minimum height=7mm] (xa) at (-8.4, 7.75) {Multi-head cross-attention};
-\node[sum] (b1) at (-8.4, 8.75) {$+$};
-\node[gbox, minimum width=30mm] (l1) at (-8.4, 9.6) {Linear $768\to2048$, GELU};
-\node[gbox, minimum width=30mm] (l2) at (-8.4, 10.45) {Linear $2048\to1152$};
-\node[sum] (g) at (-8.4, 11.3) {$\times$};
-\node[note, anchor=east] (gl) at (-9.25, 11.3) {gate, init 0.01};
-\node[font=\footnotesize, anchor=south] at (-8.4, 11.75) {$K\times1152$ vectors};
-\draw[arr] (X) -- (lnx);
-\draw[arr] (lnx.north) -- node[left, font=\footnotesize] {K, V} (lnx.north |- xa.south);
-\draw[arr] (P.north) -- node[right, font=\footnotesize] {Q} (P.north |- xa.south);
-\draw[arr] (xa) -- (b1);
-\draw[arr, rounded corners=4pt] (P.east) -- (-6.3, 5.25) |- (b1.east);
-\draw[arr] (b1) -- (l1);
-\draw[arr] (l1) -- (l2);
-\draw[arr] (l2) -- (g);
-\draw[arr] (gl.east) -- (g.west);
-\draw[arr] (g) -- (-8.4, 11.78);
-
-%% ================= zoom: anti-forgetting recipe (right) =================
-\draw[zoom] (5.4, 4.55) rectangle (14.6, 15.0);
-\node[font=\small\bfseries, anchor=south west] at (5.4, 15.1) {Keeping section captions in play (training)};
-
-% 1 change-aware captions
-\node[font=\footnotesize\bfseries, anchor=west] at (5.7, 14.45) {1. Change-aware captions};
-\node[note, anchor=north west, text width=8.6cm] at (5.7, 14.15)
-  {Each section caption names what changed vs the section before ("drums enter, louder"); half of the windows sit on a section change.};
-
-% 2 splice windows
-\node[font=\footnotesize\bfseries, anchor=west] at (5.7, 13.15) {2. Spliced windows (25\%)};
-\node[draw=black, fill=white, minimum width=36mm, minimum height=5mm, font=\scriptsize] (sa) at (7.6, 12.5) {file A notes};
-\node[draw=pinkL, fill=pinkF, minimum width=7mm, minimum height=5mm, font=\scriptsize] (sb) at (9.95, 12.5) {S$_B$};
-\node[draw=black, fill=blueF, minimum width=36mm, minimum height=5mm, font=\scriptsize] (sbn) at (12.1, 12.5) {file B section};
-\node[note, anchor=north west, text width=8.6cm] at (5.7, 12.1)
-  {File A up to a section boundary, then a section of file B with B's caption and no file caption: the caption contradicts the context and has to win.};
-
-% 3 repeat
-\node[font=\footnotesize\bfseries, anchor=west] at (5.7, 11.0) {3. Caption repeated every 64 notes};
-\foreach \i in {0,1,2} {
-  \node[draw=pinkL, fill=pinkF, minimum width=4mm, minimum height=5mm, inner sep=0pt] at (6.0+2.8*\i, 10.35) {};
-  \node[draw=black, fill=white, minimum width=23mm, minimum height=5mm, font=\scriptsize] at (7.4+2.8*\i, 10.35) {64 notes};
+\draw[sub] (-4.05, 12.3) rectangle (4.05, 15.25);
+\node[sublab, anchor=south east] at (4.0, 12.33) {Cascade heads};
+\def\ry{12.95}
+\foreach \x/\n/\v [count=\i] in {-3.1/$\Delta t$/512, -1.55/instr./129, 0/pitch/130, 1.55/dur./512, 3.1/vel./32} {
+  \node[head] (h\i) at (\x, 13.65) {\n\\[-3pt] {\tiny $V{=}\v$}};
+  \node[tok, minimum width=5mm, minimum height=4mm, font=\scriptsize] (t\i) at (\x, 14.5) {$a_{\i}$};
+  \draw[arr] (h\i) -- (t\i);
 }
-\node[note, anchor=north west, text width=8.6cm] at (5.7, 9.95)
-  {The same 4 section vectors are inserted again, so the caption is never far back in the context.};
+\foreach \x [count=\i] in {-3.1, -1.55, 0, 1.55} {
+  \node[gbox, minimum width=4mm, minimum height=5.6mm, inner sep=1pt, font=\scriptsize] (e\i) at (\x+0.78, 13.65) {$E_{\i}$};
+  \node[sum, minimum size=4mm] (c\i) at (\x+0.78, \ry) {$+$};
+  \draw[arr, rounded corners=3pt] (t\i.east) -| (e\i.north);
+  \draw[arr] (e\i) -- (c\i);
+}
+% the state rail, entered from the side of the final norm
+\draw[line width=0.9pt, rounded corners=4pt] (lnf.west) -- (-3.85, 11.9) -- (-3.85, \ry) -- (-3.1, \ry);
+\node[font=\scriptsize, anchor=south, inner sep=1pt] at (-3.48, \ry) {$h_t$};
+\draw[arr] (-3.1, \ry) -- (c1.west);
+\foreach \a/\b in {c1/c2, c2/c3, c3/c4} { \draw[arr] (\a.east) -- (\b.west); }
+\draw[line width=0.9pt] (c4.east) -- (3.1, \ry);
+\foreach \x [count=\i] in {-3.1, -1.55, 0, 1.55, 3.1} {
+  \draw[arr] (\x, \ry) -- (h\i.south);
+  \ifnum\i<5 \fill (\x, \ry) circle (1.4pt); \fi
+}
+% every head's value goes into its own field of the next note
+\foreach \x/\n [count=\i] in {-3.1/$\Delta t$, -1.55/instr., 0/pitch, 1.55/dur., 3.1/vel.} {
+  \node[draw=black, fill=white, minimum width=15.5mm, minimum height=5.5mm, inner sep=0pt, font=\footnotesize,
+        line width=0.6pt] (o\i) at (\x, 16.3) {\n};
+  \draw[arr] (t\i.north) -- (o\i.south);
+}
+\node[font=\footnotesize, anchor=south] at (0, 16.6) {Next note: one compound token};
+% generation loop: the sampled note becomes the next input
+\draw[arr, dashed, rounded corners=6pt] (o5.east) -- (4.85, 16.3) -- (4.85, -0.65) -- (inp.east);
 
-% 4 counterfactual loss
-\node[font=\footnotesize\bfseries, anchor=west] at (5.7, 9.05) {4. Counterfactual loss + recognition head};
-\node[pbox, minimum width=27mm] (ct) at (7.25, 8.3) {true caption $c_k$};
-\node[box, minimum width=27mm] (cp) at (7.25, 7.45) {previous $c_{k-1}$};
-\node[box] (mt) at (9.75, 8.3) {model};
-\node[box] (mp) at (9.75, 7.45) {model};
-\node[font=\footnotesize] (nt) at (11.15, 8.3) {NLL$_\text{true}$};
-\node[font=\footnotesize] (np) at (11.15, 7.45) {NLL$_\text{prev}$};
-\draw[arr] (ct) -- (mt); \draw[arr] (cp) -- (mp);
-\draw[arr] (mt) -- (nt); \draw[arr] (mp) -- (np);
-\node[box, align=center, font=\scriptsize] (hinge) at (13.15, 7.88) {$\max(0,\ 0.05$\\$-\,(\text{NLL}_\text{prev}-\text{NLL}_\text{true}))$};
-\draw[arr] (nt.east) -- (hinge.west |- nt.east);
-\draw[arr] (np.east) -- (hinge.west |- np.east);
-\node[note, anchor=north west, text width=8.6cm] at (5.7, 6.95)
-  {On the first 32 notes of a changed section the true caption must beat the previous one by 0.05 nats (weight 1.0); a linear head on those notes' states tells true from previous (BCE, weight 0.1). Training only.};
+%% ================= 4: cascade head zoom + note (right, top) =================
+\draw[zoom] (5.4, 12.2) rectangle (10.6, 16.95);
+\node[ptitle] at (5.4, 17.05) {\sect{4}{One cascade head (the 5 dotted boxes, own weights)}};
+\node[box] (rz) at (7.8, 12.75) {$z_{i-1}$ {\scriptsize (1152)}};
+\node[gbox, minimum width=40mm] (r1) at (7.8, 13.55) {LayerNorm, Linear $1152\to1152$};
+\node[gbox, minimum width=40mm] (r2) at (7.8, 14.3) {GELU, Linear $1152\to1152$};
+\node[sum] (rs) at (7.8, 15.05) {$+$};
+\node[gbox, minimum width=40mm] (ro) at (7.8, 15.75) {LayerNorm, Linear $1152\to V$};
+\draw[arr] (rz) -- (r1);
+\draw[arr] (r1) -- (r2);
+\draw[arr] (r2) -- (rs);
+\draw[arr] (rs) -- (ro);
+\draw[arr] (ro) -- (7.8, 16.32) node[above, font=\scriptsize, inner sep=1pt] {logits over the $V$ values};
+\fill (7.8, 13.13) circle (1.4pt);
+\draw[arr, rounded corners=4pt] (7.8, 13.13) -- (10.2, 13.13) |- (rs.east);
+\node[anchor=north west, text width=4.1cm, font=\footnotesize, text=black!90, align=left] (why) at (10.85, 16.95) {%
+\textbf{Why a cascade.} One position predicts all five values of the next note. Head $i$ reads the running state\\[2pt]\hspace*{0.5cm}$z_0 = h_t,\quad z_i = z_{i-1} + E_i(a_i)$,\\[2pt]the trunk state $h_t$ plus the embeddings $E$ of the values already chosen. So the note's probability follows the chain rule,
+$p(\Delta t)\,p(\text{instr.}\mid\Delta t)\,p(\text{pitch}\mid\Delta t,\text{instr.})\cdots$ (compound tokens as in \rcite{6}).\\[3pt]
+$a_i$ is the true value in training (teacher forcing) and the sampled value in generation.
+Loss: the sum of the five cross-entropies.};
 
-% 5 guidance
-\node[font=\footnotesize\bfseries, anchor=west] at (5.7, 5.75) {5. Dropout $\to$ guidance};
-\node[note, anchor=north west, text width=8.6cm] at (5.7, 5.45)
-  {File captions dropped 15\%, section captions 20\% (null vectors), so generation can use classifier-free guidance, scale 2.};
+%% ================= 1: caption path (left column, flows down) =================
+\begin{scope}[on background layer]
+  \fill[greyF, draw=greyB, rounded corners=16pt, line width=1pt] (-11.4, 3.4) rectangle (-6.6, 16.95);
+\end{scope}
+\node[ptitle] at (-11.4, 17.05) {\sect{1}{Caption path}};
+\node[pbox] (fc) at (-10.15, 16.3) {File caption\\[-2pt] {\scriptsize \capt{loud rock, fast}}};
+\node[pbox] (sc) at (-7.95, 16.3) {Section caption\\[-2pt] {\scriptsize every 256 notes}};
 
-%% ================= recipe list (right, bottom) =================
-\node[font=\ttfamily\small, anchor=north west, align=left] at (5.4, 3.95) {%
-\textbf{F1 section recipe}\\[-1pt]
-\rule{8.9cm}{0.6pt}\\
-\begin{tabular}{@{}l@{\ :\ }l@{}}
-section length      & 256 notes, 4 vectors\\
-change windows      & 50\%\\
-spliced windows     & 25\%\\
-caption repeat      & every 64 notes\\
-counterfactual loss & weight 1.0, margin 0.05\\
-recognition head    & weight 0.1\\
-switch share @1,024 & 0.01 (v2\_A0) $\to$ 0.85 (all)\\
-\end{tabular}};
+% LaBSE, drawn roughly (BERT-base layout)
+\draw[sub] (-11.2, 12.45) rectangle (-6.8, 15.65);
+\node[box, minimum width=40mm] (tk) at (-9.0, 14.95) {WordPiece tokens\\[-2pt] {\scriptsize 501k vocab, 109 languages}};
+\node[gbox, minimum width=40mm] (te) at (-9.0, 14.15) {Token + position embeddings};
+\node[box, minimum width=40mm, minimum height=8mm] (tl) at (-9.0, 13.35) {12 $\times$ encoder layer\\[-2pt] {\scriptsize bidirectional attention, 12 heads, $d$ 768}};
+\node[sublab, anchor=south east] at (-6.85, 12.47) {LaBSE \rcite{1}, frozen};
+\draw[parr] (fc.south) -- (fc.south |- tk.north);
+\draw[parr] (sc.south) -- (sc.south |- tk.north);
+\draw[arr] (tk) -- (te);
+\draw[arr] (te) -- (tl);
+
+% caption adapter, expanded in place
+\draw[sub] (-11.2, 3.9) rectangle (-6.8, 11.6);
+\node[box] (lnx) at (-10.0, 10.75) {LayerNorm};
+\node[box] (P) at (-7.95, 10.75) {Learned queries\\[-2pt] {\scriptsize $K\times768$}};
+\draw[arr] (lnx.north |- tl.south) -- node[right, note, pos=0.4] {token states $L\times768$} (lnx.north);
+\node[box, minimum width=36mm, minimum height=7mm] (xa) at (-9.15, 9.65) {Cross-attention {\scriptsize (16 heads)}};
+\draw[arr] (lnx.south) -- node[left, font=\scriptsize] {K, V} (lnx.south |- xa.north);
+\draw[arr] (P.south) -- node[left, font=\scriptsize] {Q} (P.south |- xa.north);
+\node[sum] (b1) at (-9.15, 8.95) {$+$};
+\draw[arr] (xa) -- (b1);
+\fill (-7.95, 10.27) circle (1.4pt);
+\draw[arr, rounded corners=4pt] (-7.95, 10.27) -- (-7.0, 10.27) |- (b1.east);
+\node[gbox, minimum width=34mm, minimum height=8mm] (mlp) at (-9.15, 8.15) {LayerNorm, GELU MLP\\[-2pt] {\scriptsize $768\to2048\to1152$}};
+\draw[arr] (b1) -- (mlp);
+\node[sum] (g) at (-9.15, 7.3) {$\times$};
+\draw[arr] (mlp) -- (g);
+\node[box, font=\scriptsize] (gate) at (-10.55, 7.3) {gate $g$};
+\draw[arr] (gate) -- (g);
+\node[note, anchor=north west, text width=1.55cm] at (-11.1, 6.95)
+  {$g$, one per channel, starts at 0.01, so captions start weak};
+% output: caption vectors (or the null vectors when there is no caption)
+\foreach \i in {0,...,3} { \node[ptok] (cv\i) at (-9.15+0.32*\i, 6.0) {}; }
+\draw[parr] (g.south) -- (cv0.north);
+\node[note, anchor=north west] at (-9.0, 5.8) {$K\times1152$;\\$K{=}16$ file,\\$K{=}4$ section};
+\node[box, font=\scriptsize, inner xsep=4pt] (null) at (-10.35, 4.5) {no caption:\\[-2pt] $K$ learned\\[-2pt] null vectors};
+\draw[arr] (null.east) -- (-9.22, 4.5);
+\node[font=\scriptsize, anchor=north, inner sep=1pt] at ($(null.east)+(0.3, -0.05)$) {or};
+\node[sublab, anchor=north east] at (-6.85, 11.57) {Caption adapter \rcite{7} {\scriptsize\mdseries ($\times$2)}};
+\draw[parr, rounded corners=5pt] (cv0.south) -- (-9.15, 2.85) -- (-4.07, 2.85);
+
+%% ================= 2: input embedding zoom (left, bottom) =================
+\node[anchor=north west, text width=6.2cm, ptext, fill=white] (embz) at (-11.4, 2.0) {%
+\usebox{\embBox}\\[4pt]
+\textbf{+ instrument of this note:} a table of 129 vectors (128 General MIDI programs + drums), added to the
+note vector. The output head \textit{instr.} predicts the next one.\\[3pt]
+\textbf{+ window conditions,} the same vector at every position: the \textbf{instrument set} of the window
+(129-dim multi-hot $\to$ Linear) and its \textbf{density} (notes per second in 15 levels + ``none'' $\to$ a table of 16 vectors).
+Both start at zero and are dropped 15\% of the time in training, so ``none'' stays usable. In generation they come
+from the user or are measured on the prompt.\\[3pt]
+\textbf{Time is absolute:} $\Delta t$ and durations in 20 ms steps, clipped at 10.22 s. There are no bars, beats or
+tempo tokens; the metre has to be read from the timing. 2,048 notes are about 1--4 minutes of music.};
+\draw[zoom] (embz.south west) rectangle (embz.north east);
+\node[ptitle] at (embz.north west) {\sect{2}{Input embedding}};
+\draw[zline] (embz.north east) -- (cond.west);
+\draw[zline] (embz.east |- emb) -- (emb.west);
+
+%% ================= 6: training recipe (right) =================
+\path let \p1 = (why.south), \n1 = {min(\y1 - 0.9cm, 11.25cm)} in coordinate (Rtop) at (5.4, \n1);
+\node[anchor=north west, text width=9.2cm, ptext, inner sep=9pt] (rec) at (Rtop) {%
+Without these measures the model follows the first section's caption and then ignores later ones.\\[5pt]
+\textbf{1. Change-aware captions.} Each section caption names what changed since the section before
+(\capt{drums enter, louder}). Half of the training windows contain a section change.\\[5pt]
+\textbf{2. Spliced windows (25\% of windows).}\\[2pt]
+\usebox{\spliceBox}\\[2pt]
+File A up to a section boundary, then a section of file B (dashed) with B's caption and no file caption: the caption
+contradicts the context and has to win.\\[5pt]
+\textbf{3. Caption repeated every 64 notes,} in training and in generation.\\[2pt]
+\usebox{\repeatBox}\\[2pt]
+The same 4 section vectors are inserted again, so the caption is never far back in the context.\\[5pt]
+\textbf{4. Counterfactual loss \rcite{8} + recognition head.}\\[2pt]
+\usebox{\cfBox}\\[2pt]
+NLL is measured on the first 32 notes of a changed section. The true caption must beat the previous one by
+0.05 nats (weight 1.0). A linear head on those notes' hidden states tells the true caption from the previous one
+(BCE, weight 0.1). Both are used in training only.\\[5pt]
+\textbf{5. Caption dropout $\to$ guidance.} File captions are replaced by null vectors 15\% of the time, section
+captions 20\%, so generation can use classifier-free guidance \rcite{9} with scale 2.\\[5pt]
+\textbf{Evidence so far} (107M pilot, 1,500 steps, one seed). Switch test: 6 prompt pairs A/B (e.g. soft / loud),
+16 samples each, the section caption changes at note 1,024, guidance 2. The matching attribute (velocity, notes per
+second, register, drum or string share) is measured per 256 notes, and the score is the share of a full flip
+(0 = keeps the first style, 1 = follows the new caption). Before measures 2--4 (v2\_A0): \textbf{0.01}; with all three:
+\textbf{0.85}; splice alone 0.59, counterfactual alone 0.13, repeat alone 0.09. Held-out NLL 2.783 vs 2.772 for the same
+steps without them. No error bars yet.};
+\begin{scope}[on background layer]
+  \draw[panel] (rec.south west) rectangle (rec.north east);
+\end{scope}
+\node[ptitle] at (rec.north west) {\sect{6}{Training recipe for section captions}};
+
+%% ================= 5: generation (centre, under the model) =================
+\path let \p1 = (rec.east) in coordinate (R) at (\x1, 0);
+\path let \p1 = (rec.south), \n1 = {min(\y1, -1.75cm)} in coordinate (G) at (-4.3, \n1 - 1.0cm);
+\node[anchor=north west, inner sep=9pt] (gend) at (G) {\usebox{\genBox}};
+\node[anchor=north west, text width=5.1cm, ptext, inner sep=0pt] (gent) at ($(gend.north east)+(0.3, -0.3)$) {%
+Classifier-free guidance \rcite{9} with scale 2: every step runs the batch twice as wide, once with the captions and
+once with null vectors.\\[3pt]
+Caption vectors enter the cache as in training: the file caption first, then a section's 4 vectors at its first note
+and again every 64 notes. Past 2,048 notes the window slides by a quarter.};
+\path let \p1 = (gend.south), \p2 = (gent.south), \n1 = {min(\y1, \y2 - 9pt)} in coordinate (Gs) at (R |- 0, \n1);
+\begin{scope}[on background layer]
+  \draw[panel] (gend.north west) rectangle (Gs);
+\end{scope}
+\node[ptitle] at (gend.north west) {\sect{5}{Generation}};
+
+%% ================= bottom strip =================
+\path let \p1 = (embz.south), \p2 = (Gs), \n1 = {min(\y1, \y2)} in coordinate (C) at (-11.4, \n1 - 1.0cm);
+
+% 7: training curves
+\node[anchor=north west, text width=8.1cm, font=\scriptsize, text=black!85, align=left, inner sep=10pt] (cv1) at (C) {%
+  {\footnotesize\bfseries Trunk block (42M, 98M notes, 3 seeds each)}\\[3pt]
+  \usebox{\curveBlock}\\[2pt]
+  Clean GigaMIDI validation. \textcolor{tealT}{\textbf{New}}: RMSNorm, SwiGLU, QK-norm; \textcolor{altG}{\textbf{old}} (dashed):
+  LayerNorm, GELU; both RoPE and Muon. Thin lines = seeds, thick = mean; $-0.75$ at the end.};
+\node[anchor=north west, text width=8.1cm, font=\scriptsize, text=black!85, align=left, inner sep=10pt] (cv2) at (cv1.north east) {%
+  {\footnotesize\bfseries Base model pretraining (462M, 8.3B notes)}\\[3pt]
+  \usebox{\curveBase}\\[2pt]
+  Clean GigaMIDI validation every 2,000 steps (65,536 notes per step); constant LR, then the $1-\sqrt{\cdot}$ cooldown in the
+  last 20\%. One run on one RTX 5090, $\approx$41 h.};
+\node[anchor=north west, text width=7.4cm, font=\scriptsize, text=black!85, align=left, inner sep=10pt] (cv3) at (cv2.north east) {%
+  {\footnotesize\bfseries Section-caption measures (107M pilot, 1,500 steps)}\\[3pt]
+  \usebox{\curveArms}\\[2pt]
+  Each row continues the same model (v2\_A0) for 1,500 steps with one measure, or all three. Switch score as in section 6;
+  one seed, no error bars. \textcolor{tealT}{\textbf{Teal}} = the recipe in use.};
+\begin{scope}[on background layer]
+  \path let \p1 = (cv1.south), \p2 = (cv2.south), \p3 = (cv3.south), \n1 = {min(\y1, \y2, \y3)} in
+    [panel] (C) rectangle (R |- 0, \n1);
+\end{scope}
+\path let \p1 = (cv1.south), \p2 = (cv2.south), \p3 = (cv3.south), \n1 = {min(\y1, \y2, \y3)} in coordinate (Cs) at (-11.4, \n1);
+\node[ptitle] at (C) {\sect{7}{Why these choices: training curves (teal = what the model uses)}};
+
+\coordinate (B) at ($(Cs)+(0, -1.0)$);
+
+% 7: training stages table with rounded corners
+\begin{scope}
+  \clip[rounded corners=8pt] (B) rectangle ++(\wd\setupBox, -\ht\setupBox-\dp\setupBox);
+  \node[anchor=north west, inner sep=0pt] (setup) at (B) {\usebox{\setupBox}};
+\end{scope}
+\draw[rounded corners=8pt, draw=greyB, line width=1pt] (setup.south west) rectangle (setup.north east);
+\node[ptitle] at (setup.north west) {\sect{8}{Training stages}};
+
+% 8: audio -> MIDI
+\node[anchor=north west, inner sep=10pt] (audio) at ($(setup.south west)+(0, -1.0)$) {\usebox{\audioBox}};
+\begin{scope}[on background layer]
+  \draw[panel] (audio.south west) rectangle (audio.north east -| R);
+\end{scope}
+\node[ptitle] at (audio.north west) {\sect{9}{Audio $\to$ MIDI: how songs become training notes (fine-tune data)}};
+
+% 9: glossary, 10: references (same height)
+\node[anchor=north west, inner sep=10pt] (gloss) at ($(audio.south west)+(0, -1.0)$) {\usebox{\glossBox}};
+\node[anchor=north east, inner sep=10pt] (refs) at (gloss.north -| R) {\usebox{\refBox}};
+\begin{scope}[on background layer]
+  \path let \p1 = (gloss.south), \p2 = (refs.south), \n1 = {min(\y1, \y2)} in
+    [panel] (gloss.north west) rectangle ([xshift=-0.8cm]refs.west |- 0, \n1)
+    [panel] (refs.north west) rectangle (refs.east |- 0, \n1);
+\end{scope}
+\node[ptitle] at (gloss.north west) {\sect{10}{Glossary}};
+\node[ptitle] at (refs.north west) {\sect{11}{References (links)}};
 
 \end{tikzpicture}
 \end{document}
