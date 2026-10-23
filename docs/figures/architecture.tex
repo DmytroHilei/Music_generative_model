@@ -1,10 +1,10 @@
-% Captioned music model (477M, F1 layout), drawn in the style of Sebastian Raschka's LLM architecture gallery.
+% Captioned music model (477M, F1 layout without the planned length input and infilling), drawn in the style of Sebastian Raschka's LLM architecture gallery.
 % Colours: pink = captions only, teal = model structure (repeated block, sublayer labels, section numbers) and, in
 % the curves, what the model uses; grey = linear layers, embedding tables and the compared alternatives. Dotted frames / dotted boxes = zooms, dashed frames = modules drawn expanded in
 % place, solid frames = text panels. Sections are numbered in reading order.
 % Sources: shapes from musicar/model/gpt.py; recipe from config/pilots/section_*.py + train.py; switch scores and CE
 % from logs/sections/forget.md; base run from config/pretrain/long_450m.py + agents.md; F1 plan from
-% context/claude/text_control.md; fine-tune from config/finetune/finetune_ua450{,_multi}.py; song counts from
+% context/claude/text_control.md + roadmap.md (items 11-13); fine-tune from config/finetune/finetune_ua450{,_multi}.py; song counts from
 % data/finetune/ukrainian_{multi_v1,reduction_v4}.csv; audio pipeline from data_prep/songs/audio_to_piano.py;
 % curves from curves/*.dat (python docs/figures/curves_data.py parses the run logs).
 % Build: pdflatex architecture.tex  (TinyTeX: export PATH=$HOME/.local/bin:$PATH; needs colortbl, mathastext, pgfplots)
@@ -111,20 +111,22 @@
 
 \newsavebox{\genBox}
 \sbox{\genBox}{\begin{tikzpicture}
-  \node[box, minimum width=27mm, minimum height=13mm, text width=25mm] (kv) at (0, 0) {KV cache\\[-1pt] {\scriptsize notes so far + caption vectors}};
-  \node[box, minimum height=13mm, text width=24mm] (m) at (3.25, 0) {trunk + cascade\\[-1pt] {\scriptsize two batch rows: captions / null vectors}};
-  \node[pbox, font=\scriptsize] (lc) at (5.6, 0.38) {$\ell_\text{caption}$};
-  \node[box, font=\scriptsize] (ln) at (5.6, -0.38) {$\ell_\text{none}$};
-  \node[box, font=\scriptsize, minimum height=13mm] (cfg) at (7.95, 0) {$\ell_\text{none} + 2\,(\ell_\text{caption} - \ell_\text{none})$};
-  \node[box, minimum height=13mm, text width=19mm] (smp) at (10.65, 0) {sample $a_i$\\[-1pt] {\scriptsize temperature, optional top-p}};
+  \node[box, minimum height=13mm, text width=19mm] (kv) at (0, 0) {KV cache\\[-1pt] {\scriptsize notes so far + caption vectors}};
+  \node[box, minimum height=13mm, text width=23mm] (m) at (2.85, 0) {trunk\\[-1pt] {\scriptsize once per note; two batch rows: captions / null vectors}};
+  \node[box, minimum height=13mm, text width=13mm, densely dotted, line width=1.1pt] (cas) at (5.35, 0) {cascade head $i$\\[-1pt] {\scriptsize reads $z_{i-1}$}};
+  \node[pbox, font=\scriptsize] (lc) at (6.95, 0.38) {$\ell_\text{caption}$};
+  \node[box, font=\scriptsize] (ln) at (6.95, -0.38) {$\ell_\text{none}$};
+  \node[box, font=\scriptsize, minimum height=13mm] (cfg) at (9.05, 0) {$\ell_\text{none} + 2\,(\ell_\text{caption} - \ell_\text{none})$};
+  \node[box, minimum height=13mm, text width=18mm] (smp) at (11.85, 0) {sample $a_i$\\[-1pt] {\scriptsize temperature (default 0.85), optional top-k / top-p}};
   \draw[arr] (kv) -- (m);
-  \draw[arr] (m.east |- lc) -- (lc);
-  \draw[arr] (m.east |- ln) -- (ln);
+  \draw[arr] (m) -- node[above, font=\scriptsize, inner sep=1pt] {$h_t$} (cas);
+  \draw[arr] (cas.east |- lc) -- (lc);
+  \draw[arr] (cas.east |- ln) -- (ln);
   \draw[arr] (lc) -- (cfg.west |- lc);
   \draw[arr] (ln) -- (cfg.west |- ln);
   \draw[arr] (cfg) -- (smp);
-  \draw[arr, rounded corners=5pt] (smp.north) -- ++(0, 0.35) -| node[pos=0.25, above, font=\scriptsize] {next head ($E_i(a_i)$ added to $z$), five heads per note} (m.north);
-  \draw[arr, dashed, rounded corners=5pt] (smp.south) -- ++(0, -0.35) -| node[pos=0.25, below, font=\scriptsize] {after the 5th head: the note is appended} (kv.south);
+  \draw[arr, rounded corners=5pt] (smp.north) -- ++(0, 0.35) -| node[pos=0.25, above, font=\scriptsize] {next head: $z_i = z_{i-1} + E_i(a_i)$, five heads per note (no new trunk step)} (cas.north);
+  \draw[arr, dashed, rounded corners=5pt] (smp.south) -- ++(0, -0.35) -| node[pos=0.25, below, font=\scriptsize] {after the 5th head: the note is appended, one trunk step} (kv.south);
 \end{tikzpicture}}
 
 %% ================= training curves (pgfplots) =================
@@ -192,20 +194,20 @@
 \begin{tabularx}{\panelW}{@{\hspace{7pt}}>{\raggedright}p{2.2cm}>{\raggedright}X>{\raggedright}X>{\raggedright\arraybackslash}X@{\hspace{7pt}}}
 \rowcolor{tealF}\textcolor{tealT}{\textbf{Setting}} & \textcolor{tealT}{\textbf{Base pretraining (done)}} &
   \textcolor{tealT}{\textbf{Caption training, F1 run (planned)}} & \textcolor{tealT}{\textbf{Fine-tune on Ukrainian songs}}\\
-Start & from scratch & the base + the two new caption adapters & the base (done, no captions); the F1 model with captions (F2, planned)\\
-\rowcolor{rowG}Data & GigaMIDI \rcite{12} 0.4, Aria-MIDI \rcite{13} 0.3, Discover MIDI \rcite{19} 0.3; 8.3B notes (1.8 epochs) &
+Start & from scratch & the base + the two new caption adapters; also planned, not drawn: a length-control input and infilling (roadmap 11--12) & the base (done, no captions); the F1 model with captions (F2, planned)\\
+\rowcolor{rowG}Data & GigaMIDI \rcite{12} 0.4, Aria-MIDI \rcite{13} 0.3, Discover MIDI \rcite{19} 0.3; 8.3B notes (1.8 epochs on average; Aria $\approx$4.5) &
   captioned MIDI in 3 tiers: MidiCaps \rcite{14} / XMIDI \rcite{20} / GigaMIDI metadata, Aria-MIDI metadata, the rest with feature captions; 2.5--4B notes &
-  5,358 songs transcribed from audio (section 9) 0.75 + GigaMIDI replay 0.25 against forgetting\\
+  5,358 songs transcribed from audio (section 9; 4,811 train, 547 val) 0.75 + GigaMIDI replay 0.25 against forgetting\\
 Captions & none: only the instrument-set and density conditions &
   templates filled from metadata (genre, mood, artist, composer) and from features computed from the notes (tempo, loudness, register, instruments), 30\% in Ukrainian; MidiCaps' LLM-written captions; section captions from each section's own notes &
   none in the done run; F2 adds them\\
-\rowcolor{rowG}Window & 2,048 notes ($\approx$1--4 min) & 2,048 notes + 16 file vectors + 4 per caption arrival (section start and every 64 notes): $\approx$2,190 positions & 2,048 notes\\
+\rowcolor{rowG}Window & 2,048 notes ($\approx$1--4 min) & 2,048 notes + 16 file vectors + 4 per caption arrival (section start and every 64 notes): 2,212 positions (37 caption slots per window, fixed shape; $\approx$2,192 used) & 2,048 notes\\
 Batch & 65,536 notes per step (32 windows) & same & 24,576 notes per step (12 windows)\\
 \rowcolor{rowG}Optimizer, LR & Muon \rcite{10} for weight matrices, AdamW for the rest; one LR $10^{-3}$ (Muon updates scaled to AdamW's size) &
   AdamW, LR $10^{-4}$, adapters $10\times$ (as in the 107M pilots) & 8-bit AdamW, LR $2\cdot10^{-4}$\\
-Schedule & WSD \rcite{11}: warmup, constant, $1-\sqrt{\cdot}$ cooldown over the last 20\% & same & same\\
+Schedule & WSD \rcite{11}: warmup, stable (constant LR), $1-\sqrt{\cdot}$ decay over the last 20\% & same; planned: section captions and the counterfactual loss weighted up in the decay (roadmap 13) & same\\
 \rowcolor{rowG}Steps & 126,582 ($\approx$41 h on one RTX 5090) & $\approx$38--61k & 1,500\\
-Precision & bf16 with fp8 matmuls, torch.compile & same & bf16\\
+Precision & bf16 with fp8 matmuls, torch.compile & same & same\\
 \end{tabularx}}
 
 \newsavebox{\audioBox}
@@ -242,7 +244,7 @@ pitch & MIDI pitch 0--127 + start / end of piece (130 values) & SwiGLU \rcite{4}
 dur. & note length (20 ms steps, 512 values) & QK-norm \rcite{5} & queries and keys normalised before the dot product\\
 vel. & velocity: how hard the note is played (32 levels) & LaBSE \rcite{1} & multilingual sentence encoder (109 languages)\\
 compound token & one sequence position = one whole note & NLL & negative log-likelihood of the true notes\\
-caption vector & a caption-adapter output placed in the sequence; no loss on it & nats & units of NLL with the natural log\\
+caption vector & a caption-adapter output placed in the sequence; no target of its own, but the last vector of a section caption predicts the next note & nats & units of NLL with the natural log\\
 null vectors & learned stand-ins for ``no caption'' & BCE & binary cross-entropy (two-class loss)\\
 teacher forcing & training feeds the true earlier values, not samples & CFG \rcite{9} & classifier-free guidance: push logits away from the caption-free prediction\\
 KV cache & keys and values of earlier positions kept between steps & WSD \rcite{11} & warmup, stable, decay: LR schedule with a short final cooldown\\
@@ -279,11 +281,12 @@ stem & one separated part of a recording (vocals, bass, drums, ...) & Demucs \rc
 \begin{tikzpicture}
 
 %% ================= title + status =================
-\node[font=\fontsize{20}{22}\selectfont\bfseries, text=tealT] at (1.8, 19.25) {Captioned music model (477M)};
-\node[font=\footnotesize, text=black!85] at (1.8, 18.6) {477M trainable parameters: trunk 446M, cascade heads 16M, two caption adapters 13M, embeddings 2M.
+\node[font=\fontsize{20}{22}\selectfont\bfseries, text=tealT] at (1.8, 19.75) {Captioned music model (477M)};
+\node[font=\footnotesize, text=black!85] at (1.8, 19.1) {477M trainable parameters: trunk 446M, cascade heads 16M, two caption adapters 13M, embeddings 2M.
   The LaBSE text encoder (471M) is frozen and not counted.};
-\node[font=\footnotesize\bfseries, text=tealT] at (1.8, 18.15) {Status: the music model without caption adapters (462M) is trained. The caption stage
-  of this layout (F1) is planned; caption results here come from 107M pilots.};
+\node[font=\footnotesize\bfseries, text=tealT, align=center] at (1.8, 18.38) {Status: the music model without caption adapters (464M) is trained. The caption stage
+  of this layout (F1) is planned; caption results here come from 107M pilots.\\ F1 will also add a length-control input and
+  infilling (roadmap 11--12); they are not drawn here yet.};
 \node[font=\scriptsize, text=black!75] at (1.8, 17.75) {How to read: numbers give the reading order; \textcolor{pinkL}{pink} = captions; grey boxes = linear layers
   and embedding tables; dashed frame = a module drawn open in place; dotted frame or box = a zoom (white panel) into the dotted part.};
 
@@ -300,14 +303,14 @@ stem & one separated part of a recording (vocals, bass, drums, ...) & Demucs \rc
 \draw[arr] (inp) -- (0, 0.67);
 
 % embedding + conditions
-\node[box] (emb) at (0, 0.95) {Note embedding {\scriptsize ($4\times288$, concat, Linear)}};
+\node[gbox, densely dotted, line width=1.1pt] (emb) at (0, 0.95) {Note embedding {\scriptsize ($4\times288$, concat, Linear)}};
 \node[sum] (s0) at (0, 1.85) {$+$};
-\node[box, font=\scriptsize] (cond) at (-2.5, 1.9) {Instrument (per note)\\[-2pt] + instr. set, density\\[-2pt] (per window)};
+\node[gbox, densely dotted, line width=1.1pt, font=\scriptsize] (cond) at (-2.5, 1.9) {Instrument (per note)\\[-2pt] + instr. set, density\\[-2pt] (per window)};
 \draw[arr] (emb) -- (s0);
 \draw[arr] (cond.east |- s0) -- (s0);
 % legend
 \node[ptok] at (1.05, 2.2) {};
-\node[note, anchor=north west, inner sep=1pt] at (1.25, 2.33) {caption vector\\(RoPE position, no loss)};
+\node[note, anchor=north west, inner sep=1pt] at (1.25, 2.33) {caption vector\\(RoPE position, no target)};
 \node[tok] at (1.05, 1.5) {};
 \node[note, anchor=west] at (1.25, 1.5) {note vector};
 
@@ -355,8 +358,9 @@ stem & one separated part of a recording (vocals, bass, drums, ...) & Demucs \rc
 \node[font=\fontsize{15}{17}\selectfont\bfseries, text=tealT, anchor=east] at (-4.75, 7.4) {28 $\times$};
 \node[sublab, anchor=north west] at (-3.45, 11.2) {width 1152};
 
-% final norm + cascade heads: a running state z (z_0 = h_t) read by each head, plus the embedding of each decided value
-\node[box, minimum width=34mm] (lnf) at (0, 11.9) {Final RMSNorm (note positions)};
+% final norm + cascade heads: a running state z (z_0 = h_t, read at the slot just before the next note: the note itself,
+% or the last vector of a section caption inserted before it) read by each head, plus the embedding of each decided value
+\node[box, minimum width=34mm] (lnf) at (0, 11.9) {Final RMSNorm {\scriptsize (the slot before each next note)}};
 \draw[arr] (a2) -- (lnf);
 \draw[sub] (-4.05, 12.3) rectangle (4.05, 15.25);
 \node[sublab, anchor=south east] at (4.0, 12.33) {Cascade heads};
@@ -467,7 +471,7 @@ Loss: the sum of the five cross-entropies.};
 \usebox{\embBox}\\[4pt]
 \textbf{+ instrument of this note:} a table of 129 vectors (128 General MIDI programs + drums), added to the
 note vector. The output head \textit{instr.} predicts the next one.\\[3pt]
-\textbf{+ window conditions,} the same vector at every position: the \textbf{instrument set} of the window
+\textbf{+ window conditions,} the same vector at every note position: the \textbf{instrument set} of the window
 (129-dim multi-hot $\to$ Linear) and its \textbf{density} (notes per second in 15 levels + ``none'' $\to$ a table of 16 vectors).
 Both start at zero and are dropped 15\% of the time in training, so ``none'' stays usable. In generation they come
 from the user or are measured on the prompt.\\[3pt]
@@ -500,10 +504,11 @@ NLL is measured on the first 32 notes of a changed section. The true caption mus
 captions 20\%, so generation can use classifier-free guidance \rcite{9} with scale 2.\\[5pt]
 \textbf{Evidence so far} (107M pilot, 1,500 steps, one seed). Switch test: 6 prompt pairs A/B (e.g. soft / loud),
 16 samples each, the section caption changes at note 1,024, guidance 2. The matching attribute (velocity, notes per
-second, register, drum or string share) is measured per 256 notes, and the score is the share of a full flip
-(0 = keeps the first style, 1 = follows the new caption). Before measures 2--4 (v2\_A0): \textbf{0.01}; with all three:
-\textbf{0.85}; splice alone 0.59, counterfactual alone 0.13, repeat alone 0.09. Held-out NLL 2.783 vs 2.772 for the same
-steps without them. No error bars yet.};
+second, register, drum or string share) is measured per 256 notes; the score is its change after the switch divided
+by its offset before it (0 = keeps the first style, 1 = a full flip; single prompts reach 1.5). The start model
+v2\_A0: 0.01. 1,500 more steps without measures 2--4 (control): \textbf{0.06}, held-out NLL 2.772; with all three:
+\textbf{0.85}, NLL 2.783; splice alone 0.59, counterfactual alone 0.13, repeat alone 0.09. Open cost: holding a
+caption overshoots (strings 15 notes per onset, 44\% of samples run away; the fix is being tested). No error bars yet.};
 \begin{scope}[on background layer]
   \draw[panel] (rec.south west) rectangle (rec.north east);
 \end{scope}
@@ -513,7 +518,7 @@ steps without them. No error bars yet.};
 \path let \p1 = (rec.east) in coordinate (R) at (\x1, 0);
 \path let \p1 = (rec.south), \n1 = {min(\y1, -1.75cm)} in coordinate (G) at (-4.3, \n1 - 1.0cm);
 \node[anchor=north west, inner sep=9pt] (gend) at (G) {\usebox{\genBox}};
-\node[anchor=north west, text width=5.1cm, ptext, inner sep=0pt] (gent) at ($(gend.north east)+(0.3, -0.3)$) {%
+\node[anchor=north west, text width=4.3cm, ptext, inner sep=0pt] (gent) at ($(gend.north east)+(0.3, -0.3)$) {%
 Classifier-free guidance \rcite{9} with scale 2: every step runs the batch twice as wide, once with the captions and
 once with null vectors.\\[3pt]
 Caption vectors enter the cache as in training: the file caption first, then a section's 4 vectors at its first note
@@ -534,7 +539,7 @@ and again every 64 notes. Past 2,048 notes the window slides by a quarter.};
   Clean GigaMIDI validation. \textcolor{tealT}{\textbf{New}}: RMSNorm, SwiGLU, QK-norm; \textcolor{altG}{\textbf{old}} (dashed):
   LayerNorm, GELU; both RoPE and Muon. Thin lines = seeds, thick = mean; $-0.75$ at the end.};
 \node[anchor=north west, text width=8.1cm, font=\scriptsize, text=black!85, align=left, inner sep=10pt] (cv2) at (cv1.north east) {%
-  {\footnotesize\bfseries Base model pretraining (462M, 8.3B notes)}\\[3pt]
+  {\footnotesize\bfseries Base model pretraining (464M, 8.3B notes)}\\[3pt]
   \usebox{\curveBase}\\[2pt]
   Clean GigaMIDI validation every 2,000 steps (65,536 notes per step); constant LR, then the $1-\sqrt{\cdot}$ cooldown in the
   last 20\%. One run on one RTX 5090, $\approx$41 h.};
@@ -552,7 +557,7 @@ and again every 64 notes. Past 2,048 notes the window slides by a quarter.};
 
 \coordinate (B) at ($(Cs)+(0, -1.0)$);
 
-% 7: training stages table with rounded corners
+% 8: training stages table with rounded corners
 \begin{scope}
   \clip[rounded corners=8pt] (B) rectangle ++(\wd\setupBox, -\ht\setupBox-\dp\setupBox);
   \node[anchor=north west, inner sep=0pt] (setup) at (B) {\usebox{\setupBox}};
@@ -560,14 +565,14 @@ and again every 64 notes. Past 2,048 notes the window slides by a quarter.};
 \draw[rounded corners=8pt, draw=greyB, line width=1pt] (setup.south west) rectangle (setup.north east);
 \node[ptitle] at (setup.north west) {\sect{8}{Training stages}};
 
-% 8: audio -> MIDI
+% 9: audio -> MIDI
 \node[anchor=north west, inner sep=10pt] (audio) at ($(setup.south west)+(0, -1.0)$) {\usebox{\audioBox}};
 \begin{scope}[on background layer]
   \draw[panel] (audio.south west) rectangle (audio.north east -| R);
 \end{scope}
 \node[ptitle] at (audio.north west) {\sect{9}{Audio $\to$ MIDI: how songs become training notes (fine-tune data)}};
 
-% 9: glossary, 10: references (same height)
+% 10: glossary, 11: references (same height)
 \node[anchor=north west, inner sep=10pt] (gloss) at ($(audio.south west)+(0, -1.0)$) {\usebox{\glossBox}};
 \node[anchor=north east, inner sep=10pt] (refs) at (gloss.north -| R) {\usebox{\refBox}};
 \begin{scope}[on background layer]

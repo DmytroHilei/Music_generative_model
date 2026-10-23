@@ -46,9 +46,11 @@ The sections are numbered in reading order:
 - **6: the section-caption recipe.** Without it the model follows the first section's caption and ignores later ones.
 - **7: training curves** behind the design choices: trunk block, base pretraining, section-caption measures.
 - **8–9: training stages and the audio → MIDI pipeline** that builds the Ukrainian fine-tune set.
+- **10–11: glossary and references.**
 
 Status: the music model without captions is trained. The caption stage at 450M (the F1 run) is still planned, so the
-caption results in the figure come from 107M pilots. The cascade-vs-independent-heads curve will be added after that
+caption results in the figure come from 107M pilots. F1 will also add a length-control input and infilling
+(roadmap items 11–12); the figure does not draw them yet. The cascade-vs-independent-heads curve will be added after that
 A/B is re-run on the current setup; the only existing one is from an early 6M piano model.
 
 The figure is TikZ / pgfplots: [`docs/figures/architecture.tex`](docs/figures/architecture.tex) (PDF and SVG next to
