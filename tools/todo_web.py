@@ -3,17 +3,20 @@ The project to-do list as a page of the web dashboard (tools/status.py --web): /
 Reminders / Microsoft To Do: a sidebar with smart lists (in progress, all open, completed, rejected), the tracks and
 the papers; the selected list (open items by priority, completed and rejected ones folded); a details pane that saves
 each field on change. On a phone one screen at a time (lists -> list -> details; the view is in the URL hash, so the
-back button works). Everything can be edited from the page (add, edit, status, move, delete); the list lives in
-context/todo.json, which agents edit too (keep the format). Papers (title, link, one-line idea) are a list of their
-own; items name theirs in 'papers' (ids), the details pane links / unlinks them.
+back button works). Everything can be edited from the page (add, edit, status, drag to reorder, delete with undo,
+keyboard shortcuts); the list lives in context/todo.json, which agents edit too (keep the format). Papers (title, link,
+one-line idea) are a list of their own; items name theirs in 'papers' (ids), the details pane links / unlinks them.
+An item's optional 'today' (YYYY-MM-DD) puts it on My Day for that date only (a smart list, like Microsoft To Do's).
 
     GET  /todo?t=<token>        the page
     GET  /api/todo?t=<token>    the list as JSON
     POST /api/todo?t=<token>    one operation, JSON: {"op": "add" | "update" | "delete" | "move", ...} -> the new list
 
 Operations apply to the file as it is on disk (agent edits in between are kept): add {item}, update {id, fields},
-delete {id}, move {id, dir: -1 | 1} (within the item's track and priority); paper_add {paper}, paper_update {id,
-fields}, paper_delete {id} (also removed from the items).
+delete {id}, restore {item} (a deleted item back with its id and order: undo), move {id, dir: -1 | 1} (within the
+item's track and priority), reorder {id, priority, before} (an open item placed before the open item 'before' of its
+track and that priority, '' = last; drag and drop); paper_add {paper}, paper_update {id, fields}, paper_delete {id}
+(also removed from the items).
 """
 
 import json
@@ -27,7 +30,7 @@ ROOT = Path(__file__).resolve().parent.parent
 TODO = ROOT / 'context/todo.json'
 STATUSES = ('todo', 'doing', 'done', 'rejected')
 PRIORITIES = ('P0', 'P1', 'P2', 'P3', '')
-FIELDS = ('track', 'title', 'priority', 'status', 'cost', 'note', 'evidence')
+FIELDS = ('track', 'title', 'priority', 'status', 'cost', 'note', 'evidence', 'today')
 PAPER_FIELDS = ('title', 'url', 'idea')
 _lock = threading.Lock()
 
@@ -85,18 +88,26 @@ def apply(data, req):
     op = req.get('op')
     if str(op).startswith('paper_'):
         return apply_paper(data, req)
-    today = time.strftime('%Y-%m-%d')
-    if op == 'add':
-        it = clean(req.get('item', {}))
+    date = time.strftime('%Y-%m-%d')
+    if op in ('add', 'restore'):
+        src = req.get('item', {})
+        it = clean(src)
         if not it.get('title'):
             raise ValueError('title required')
         it.setdefault('status', 'todo')
         it.setdefault('priority', '')
         it['id'] = secrets.token_hex(4)
         it['order'] = max([x.get('order', 0) for x in items] + [0]) + 1
-        it['updated'] = today
+        it['updated'] = date
+        if op == 'restore':
+            it['id'] = str(src.get('id') or '')
+            if not it['id'] or it['id'] in by_id:
+                raise ValueError('cannot restore: no id, or an item with this id exists')
+            if isinstance(src.get('order'), (int, float)) and not isinstance(src.get('order'), bool):
+                it['order'] = src['order']
+            it['updated'] = str(src.get('updated') or date)
         target = it
-    elif op in ('update', 'delete', 'move'):
+    elif op in ('update', 'delete', 'move', 'reorder'):
         target = by_id.get(req.get('id'))
         if target is None:
             raise ValueError('no such item (deleted or changed elsewhere: reload)')
@@ -115,8 +126,14 @@ def apply(data, req):
                 if target['order'] == peers[j]['order']:  # equal orders (hand-edited file): make them distinct
                     target['order'] += -0.5 if j < i else 0.5
             return
-        target.update(clean(req.get('fields', {})))
-        target['updated'] = today
+        if op == 'reorder':
+            return reorder(items, target, req, date)
+        fields = clean(req.get('fields', {}))
+        target.update(fields)
+        if target.get('today') == '':
+            del target['today']
+        if set(fields) - {'today'}:  # putting an item on My Day is not an update
+            target['updated'] = date
     else:
         raise ValueError(f'unknown op {op!r}')
     if target.get('status') not in STATUSES:
@@ -128,8 +145,31 @@ def apply(data, req):
     known = {x['id'] for x in data['papers']}
     if any(x not in known for x in target.get('papers', [])):
         raise ValueError('unknown paper')
-    if op == 'add':
+    if op in ('add', 'restore'):
         items.append(target)
+
+
+def reorder(items, target, req, date):
+    """Drag and drop: target (open) gets 'priority' and goes before the open item 'before' of its track and that
+    priority ('' or another item: last). The band's order values are reused (made distinct if equal)."""
+    pri = str(req.get('priority', target.get('priority', '')))
+    if pri not in PRIORITIES:
+        raise ValueError(f'priority must be one of {PRIORITIES}')
+    if target['status'] not in ('todo', 'doing'):
+        raise ValueError('only open items can be reordered')
+    peers = sorted((x for x in items if x is not target and x['track'] == target['track']
+                    and x.get('priority', '') == pri and x['status'] in ('todo', 'doing')),
+                   key=lambda x: x.get('order', 0))
+    values = sorted([x.get('order', 0) for x in peers] + [target.get('order', 0)])
+    if len(set(values)) < len(values):
+        values = [values[0] + k for k in range(len(values))]
+    i = next((k for k, x in enumerate(peers) if x['id'] == req.get('before')), len(peers))
+    peers.insert(i, target)
+    for x, v in zip(peers, values):
+        x['order'] = v
+    if pri != target.get('priority', ''):
+        target['priority'] = pri
+        target['updated'] = date
 
 
 def handle(method, path, body=b''):
@@ -303,9 +343,37 @@ textarea::placeholder,input::placeholder{color:var(--fg3)}
 .card.empty{padding:14px;text-align:left;font-size:14px}
 .pfoot{display:flex;align-items:center;justify-content:space-between;color:var(--fg2);font-size:12px;margin-top:22px;
  padding-top:8px;border-top:.5px solid var(--sep)}
-.pfoot .mv{display:flex}
 #err{position:fixed;bottom:16px;left:16px;right:16px;max-width:520px;margin:auto;background:var(--fg);color:var(--bg);
  padding:10px 14px;border-radius:12px;display:none;box-shadow:0 6px 24px rgba(0,0,0,.2);font-size:14px;z-index:9}
+
+#toast{position:fixed;left:50%;bottom:20px;transform:translate(-50%,calc(100% + 40px));visibility:hidden;display:flex;align-items:center;gap:14px;
+ max-width:calc(100% - 32px);background:#1c1c1e;color:#fff;padding:10px 10px 10px 16px;border-radius:12px;font-size:14px;
+ box-shadow:0 8px 28px rgba(0,0,0,.25);transition:transform .25s ease,visibility .25s;z-index:8}
+#toast.show{transform:translate(-50%,0);visibility:visible}
+#toast .tm{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#toast button{border:0;background:none;color:#0a84ff;font-weight:600;padding:4px 8px;border-radius:6px;cursor:pointer}
+#toast button:hover{background:rgba(255,255,255,.1)}
+@media (prefers-color-scheme:dark){#toast{background:#3a3a3c}}
+.tile.wide{grid-column:1/-1}
+.bang.P3{color:var(--fg3)}
+.meta .md{display:inline-flex;gap:3px;align-items:center;color:var(--c1)}
+#list .sub{color:var(--fg2);margin:-12px 0 16px;font-size:14px}
+.empty .hint{font-size:13px;color:var(--fg3);margin-top:6px}
+.myday{display:flex;align-items:center;padding-right:6px}
+.mdb{flex:1;display:flex;align-items:center;gap:12px;border:0;background:none;padding:13px 14px;text-align:left;cursor:pointer;
+ font-size:15px}
+.mdb svg{font-size:19px;color:var(--fg2)}
+.myday.on .mdb{color:var(--c1)}
+.myday.on .mdb svg{color:var(--c1)}
+.keys{display:flex;flex-wrap:wrap;gap:6px 12px;margin:4px 8px 0;font-size:12px;color:var(--fg2)}
+kbd{font:600 11px var(--font);border:.5px solid var(--sep);border-bottom-width:1.5px;border-radius:4px;padding:0 4px;
+ background:var(--card);color:var(--fg)}
+.row.dr{-webkit-user-select:none;user-select:none;-webkit-touch-callout:none}
+.list.sorting .row{transition:transform .15s}
+.list.sorting .row .body{border-top-color:transparent}
+.row.dragging{position:relative;z-index:5;background:var(--card);box-shadow:0 8px 24px rgba(0,0,0,.18);transition:none!important;
+ cursor:grabbing}
+body.noselect{-webkit-user-select:none;user-select:none;cursor:grabbing}
 
 /* phone: Lists -> list -> details, one screen at a time */
 @media (max-width:899px){
@@ -336,11 +404,12 @@ textarea::placeholder,input::placeholder{color:var(--fg3)}
 <body>
 <div id="shell"><aside id="side"></aside><main id="list"></main><section id="pane"></section></div>
 <div id="err"></div>
+<div id="toast" role="status"><span class="tm"></span><button type="button">Undo</button></div>
 <script>
 const T = new URLSearchParams(location.search).get('t') || '';
 const API = '/api/todo?t=' + encodeURIComponent(T);
 const PRI = ['P0', 'P1', 'P2', 'P3', ''];
-const BANG = {P0: '!!!', P1: '!!', P2: '!'};
+const BANG = {P0: '!!!', P1: '!!', P2: '!', P3: '!'};
 const ST = [['todo', 'To do'], ['doing', 'In progress'], ['done', 'Done'], ['rejected', 'Rejected']];
 const S = (d, w = 2) => `<svg viewBox="0 0 24 24" width="1em" height="1em" fill="none" stroke="currentColor"
   stroke-width="${w}" stroke-linecap="round" stroke-linejoin="round">${d}</svg>`;
@@ -353,16 +422,16 @@ const I = {
   doc: S('<path d="M7 3.5h6.5l4 4v13H7z"/><path d="M13.5 3.5V7.5h4"/>', 1.8),
   search: S('<circle cx="11" cy="11" r="6"/><path d="M19.5 19.5l-4.2-4.2"/>', 2.2),
   right: S('<path d="M9.5 6l6 6-6 6"/>', 2.2), left: S('<path d="M15 5.5L8.5 12l6.5 6.5"/>', 2.4),
-  plus: S('<path d="M12 5.5v13M5.5 12h13"/>', 2.2), up: S('<path d="M12 18.5v-13M6.5 11L12 5.5l5.5 5.5"/>'),
-  down: S('<path d="M12 5.5v13M6.5 13l5.5 5.5 5.5-5.5"/>'), close: S('<path d="M7 7l10 10M17 7L7 17"/>'),
+  plus: S('<path d="M12 5.5v13M5.5 12h13"/>', 2.2), close: S('<path d="M7 7l10 10M17 7L7 17"/>'),
   trash: S('<path d="M4.5 7h15M9.5 7V4.5h5V7M6.5 7l1 13h9l1-13M10 11v5M14 11v5"/>', 1.7),
   out: S('<path d="M13.5 5H19v5.5M19 5l-8 8"/><path d="M17 14v5H5V7h5"/>', 1.8),
   pulse: S('<path d="M3 12h4l2.5-6 5 12 2.5-6h4"/>'),
+  sun: S('<circle cx="12" cy="12" r="3.8"/><path d="M12 2.8v2M12 19.2v2M2.8 12h2M19.2 12h2M5.5 5.5l1.4 1.4M17.1 17.1l1.4 1.4M5.5 18.5l1.4-1.4M17.1 6.9l1.4-1.4"/>', 1.9),
 };
-const SMART = {doing: ['In progress', 'c0', I.clock], open: ['All open', 'grey', I.tray],
+const SMART = {today: ['My Day', 'c1', I.sun], doing: ['In progress', 'c0', I.clock], open: ['All open', 'grey', I.tray],
   done: ['Completed', 'c2', I.check], rejected: ['Rejected', 'grey', I.x]};
 const wide = matchMedia('(min-width: 900px)');
-let data = null, q = '';
+let data = null, q = '', drag = null, justDragged = false, scrollSel = false;
 const expanded = new Set();
 
 const $ = id => document.getElementById(id);
@@ -378,6 +447,7 @@ const el = (tag, attrs = {}, ...kids) => {
 };
 const safe = u => /^https?:\/\//.test(u || '') ? u : undefined;
 const paper = id => (data.papers || []).find(p => p.id === id);
+const item = id => data.items.find(i => i.id === id);
 const live = it => it.status === 'todo' || it.status === 'doing';
 const rank = it => PRI.indexOf(it.priority || '') * 1e6 + (it.order || 0);
 const recent = (a, b) => (b.updated || '').localeCompare(a.updated || '');
@@ -386,10 +456,25 @@ const tcol = id => `var(--c${Math.max(0, tIndex(id)) % 10})`;
 const trackName = id => (data.tracks.find(t => t.id === id) || {name: id}).name;
 const plural = (n, w) => `${n} ${w}${n === 1 ? '' : 's'}`;
 const fit = t => { t.style.height = 'auto'; t.style.height = t.scrollHeight + 'px'; };
+const short = s => '“' + (s.length > 48 ? s.slice(0, 46) + '…' : s) + '”';
+const editing = () => { const a = document.activeElement; return a && /^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName); };
+// My Day = items whose 'today' is the local date (it empties itself at midnight, like Microsoft To Do)
+const localDate = () => { const d = new Date(), p = n => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`; };
+const myDay = it => it.today === localDate();
 
 function err(msg) {
   const b = $('err'); b.textContent = msg; b.style.display = 'block';
   clearTimeout(err.t); err.t = setTimeout(() => b.style.display = 'none', 5000);
+}
+function toast(msg, undo) {
+  const t = $('toast'), b = t.querySelector('button');
+  const hide = () => t.classList.remove('show');
+  t.querySelector('.tm').textContent = msg;
+  b.style.display = undo ? '' : 'none';
+  b.onclick = () => { hide(); undo(); };
+  t.classList.add('show');
+  clearTimeout(toast.t); toast.t = setTimeout(hide, 6000);
 }
 async function load() {
   try {
@@ -410,8 +495,29 @@ async function op(body, {pane = true} = {}) {
   if (pane) render(); else { const rt = route(); renderSide(rt); renderList(rt); }
   return true;
 }
+function complete(it, btn) {
+  if (!live(it)) return op({op: 'update', id: it.id, fields: {status: 'todo'}});
+  const prev = it.status;
+  if (btn) {
+    btn.classList.add('ticking');
+    const row = btn.closest('.row'); if (row) row.classList.add('leaving');
+  }
+  setTimeout(() => op({op: 'update', id: it.id, fields: {status: 'done'}}).then(ok => ok &&
+    toast('Completed ' + short(it.title), () => op({op: 'update', id: it.id, fields: {status: prev}}))), 450);
+}
+function remove(it, view) {
+  const copy = {...it};
+  op({op: 'delete', id: it.id}).then(ok => {
+    if (!ok) return;
+    go(view);
+    toast('Deleted ' + short(it.title), () => op({op: 'restore', item: copy}).then(ok => ok &&
+      go(view, {kind: 'item', id: copy.id})));
+  });
+}
+const pin = it => op({op: 'update', id: it.id, fields: {today: myDay(it) ? '' : localDate()}});
 
-// location.hash = '<view>[/i:<item id> | /p:<paper id>]', view = track:<id> | doing | open | done | rejected | papers
+// location.hash = '<view>[/i:<item id> | /p:<paper id>]', view = track:<id> | today | doing | open | done | rejected
+// | papers
 function route() {
   const [v, s] = location.hash.slice(1).split('/');
   const view = v || (wide.matches && data.tracks.length ? 'track:' + data.tracks[0].id : '');
@@ -438,64 +544,68 @@ function render() {
   renderSide(r); renderList(r); renderPane(r); stage(r);
   document.querySelectorAll('textarea').forEach(fit);
   if (k) { const b = document.querySelector(`[data-k="${k}"]`); if (b && b !== a) b.focus(); }
+  if (scrollSel) { scrollSel = false; const s = document.querySelector('#list .row.on'); if (s) s.scrollIntoView({block: 'nearest'}); }
 }
-
 // which screen a phone shows: s-home (lists), s-list, s-search (search box over the results) or s-pane (details)
 function stage(r) {
   document.body.className = 's-' + (r.sel ? 'pane' : q ? 'search' : r.view ? 'list' : 'home') + (r.sel ? ' has-sel' : '');
 }
 function renderSide(r) {
   const side = $('side'), items = data.items; side.textContent = '';
-  const counts = {doing: items.filter(i => i.status === 'doing').length, open: items.filter(live).length,
-    done: items.filter(i => i.status === 'done').length, rejected: items.filter(i => i.status === 'rejected').length};
+  const counts = {today: items.filter(i => live(i) && myDay(i)).length, doing: items.filter(i => i.status === 'doing').length,
+    open: items.filter(live).length, done: items.filter(i => i.status === 'done').length,
+    rejected: items.filter(i => i.status === 'rejected').length};
   const search = el('input', {class: 'search', type: 'search', placeholder: 'Search', 'data-k': 'q', value: q,
     oninput: e => { q = e.target.value.trim(); const rt = route(); renderList(rt); stage(rt); }});
   const nav = (view, name, color, icon, n) => el('a', {class: 'nr' + (r.view === view && !q ? ' on' : ''), href: '#' + view,
     onclick: e => { e.preventDefault(); q = ''; go(view); }},
     el('span', {class: 'ni', style: 'background:' + color}, svg(icon)), el('span', {class: 'nn'}, name),
     el('span', {class: 'nc'}, n), el('span', {class: 'chev m-only'}, svg(I.right)));
+  const key = (k, what) => el('span', {}, el('kbd', {}, k), ' ' + what);
   side.append(
     el('div', {class: 'stop'}, el('a', {class: 'runs', href: '/?t=' + encodeURIComponent(T)}, svg(I.pulse), 'Runs')),
     el('div', {class: 'sw'}, svg(I.search), search),
     el('div', {class: 'tiles'}, ...Object.entries(SMART).map(([k, [name, c, icon]]) =>
-      el('a', {class: 'tile' + (r.view === k && !q ? ' on' : ''), href: '#' + k, style: `--tc:var(--${c})`,
-        onclick: e => { e.preventDefault(); q = ''; go(k); }},
+      el('a', {class: 'tile' + (k === 'today' ? ' wide' : '') + (r.view === k && !q ? ' on' : ''), href: '#' + k,
+        style: `--tc:var(--${c})`, onclick: e => { e.preventDefault(); q = ''; go(k); }},
         el('span', {class: 'ti'}, svg(icon)), el('b', {}, counts[k]), el('span', {class: 'tl'}, name)))),
     el('div', {class: 'scap'}, 'Tracks'),
     el('nav', {class: 'nav'}, ...data.tracks.map(t => nav('track:' + t.id, t.name, tcol(t.id), I.list,
       items.filter(i => i.track === t.id && live(i)).length))),
-    el('nav', {class: 'nav'}, nav('papers', 'Papers', 'var(--c7)', I.book, (data.papers || []).length)));
+    el('nav', {class: 'nav'}, nav('papers', 'Papers', 'var(--c7)', I.book, (data.papers || []).length)),
+    el('div', {class: 'keys d-only'}, key('n', 'new'), key('/', 'search'), key('j k', 'next / previous'),
+      key('x', 'complete'), key('t', 'My Day'), key('⌫', 'delete'), key('esc', 'close')));
 }
 
 function chk(it) {
   return el('button', {class: 'chk ' + it.status, title: live(it) ? 'Mark done' : 'Reopen', onclick: e => {
-    e.stopPropagation();
-    if (!live(it)) { op({op: 'update', id: it.id, fields: {status: 'todo'}}); return; }
-    e.currentTarget.classList.add('ticking');
-    const row = e.currentTarget.closest('.row'); if (row) row.classList.add('leaving');
-    setTimeout(() => op({op: 'update', id: it.id, fields: {status: 'done'}}), 450);
+    e.stopPropagation(); complete(it, e.currentTarget);
   }}, svg(it.status === 'rejected' ? I.x : I.check));
 }
-function itemRow(it, r, showTrack) {
+function itemRow(it, r, showTrack, sortable) {
   const on = r.sel && r.sel.kind === 'item' && r.sel.id === it.id;
   const info = [
     showTrack ? el('span', {class: 'tk', style: 'color:' + tcol(it.track)}, trackName(it.track)) : null,
+    myDay(it) && r.view !== 'today' ? el('span', {class: 'md'}, svg(I.sun), 'My Day') : null,
     it.cost ? el('span', {}, it.cost) : null,
     (it.papers || []).length ? el('span', {class: 'pp'}, svg(I.doc), it.papers.length) : null,
     !live(it) && it.updated ? el('span', {}, it.updated) : null].filter(Boolean);
-  return el('div', {class: 'row ' + it.status + (on ? ' on' : ''), style: '--tc:' + tcol(it.track),
-    onclick: () => go(r.view, {kind: 'item', id: it.id})},
+  const row = el('div', {class: 'row ' + it.status + (on ? ' on' : '') + (sortable ? ' dr' : ''), 'data-sel': 'i:' + it.id,
+    style: '--tc:' + tcol(it.track), onclick: () => { if (!justDragged) go(r.view, {kind: 'item', id: it.id}); }},
     chk(it),
     el('div', {class: 'body'},
-      el('div', {class: 't'}, BANG[it.priority] ? el('span', {class: 'bang'}, BANG[it.priority]) : null, it.title),
+      el('div', {class: 't'}, BANG[it.priority] ? el('span', {class: 'bang ' + it.priority}, BANG[it.priority]) : null,
+        it.title),
       it.note ? el('div', {class: 'nt'}, it.note) : null,
       info.length ? el('div', {class: 'meta'}, ...info) : null));
+  if (sortable) row.addEventListener('pointerdown', e => pressRow(e, it, row));
+  return row;
 }
 function paperRow(p, r) {
   const on = r.sel && r.sel.kind === 'paper' && r.sel.id === p.id;
   const n = data.items.filter(i => (i.papers || []).includes(p.id)).length;
   let host = ''; try { host = new URL(p.url).hostname.replace(/^www\./, ''); } catch (e) {}
-  return el('div', {class: 'row' + (on ? ' on' : ''), style: '--tc:var(--c7)',
+  return el('div', {class: 'row' + (on ? ' on' : ''), 'data-sel': 'p:' + p.id, style: '--tc:var(--c7)',
     onclick: () => go(r.view, {kind: 'paper', id: p.id})},
     el('span', {class: 'pi'}, svg(I.doc)),
     el('div', {class: 'body'}, el('div', {class: 't'}, p.title), p.idea ? el('div', {class: 'nt'}, p.idea) : null,
@@ -551,9 +661,19 @@ function renderList(r) {
     body.push(addRow('Add a task', m.color, v => {
       op({op: 'add', item: {title: v, track: m.track, status: 'todo'}});
     }));
-    body.push(open.length ? listOf(open.map(i => itemRow(i, r, false))) : el('div', {class: 'empty'}, 'All done'));
+    body.push(open.length ? listOf(open.map(i => itemRow(i, r, false, true))) : el('div', {class: 'empty'}, 'All done'));
     body.push(fold(r.view + ':done', 'Completed', its.filter(i => i.status === 'done').sort(recent).map(i => itemRow(i, r, false))),
       fold(r.view + ':rejected', 'Rejected', its.filter(i => i.status === 'rejected').sort(recent).map(i => itemRow(i, r, false))));
+  } else if (r.view === 'today') {
+    const its = items.filter(myDay), open = its.filter(live)
+      .sort((a, b) => tIndex(a.track) - tIndex(b.track) || rank(a) - rank(b));
+    n = open.length;
+    main.append(el('div', {class: 'sub'}, new Date().toLocaleDateString(undefined,
+      {weekday: 'long', day: 'numeric', month: 'long'})));
+    body.push(open.length ? listOf(open.map(i => itemRow(i, r, true)))
+      : el('div', {class: 'empty'}, 'Nothing planned for today', el('div', {class: 'hint'},
+        'Add items from their details (☀ Add to My Day), or select one and press t.')),
+      fold('today:done', 'Completed', its.filter(i => !live(i)).sort(recent).map(i => itemRow(i, r, true))));
   } else if (r.view === 'papers') {
     const ps = [...(data.papers || [])].sort((a, b) => a.title.localeCompare(b.title));
     n = ps.length;
@@ -574,6 +694,68 @@ function renderList(r) {
   h1.append(el('span', {class: 'hc'}, n));
   main.append(...body.filter(Boolean));
 }
+
+// drag to reorder the open items of a track: mouse = press and move, touch = long press then move. The item takes
+// the priority of the item it lands under (at the top: of the one below it).
+function pressRow(e, it, row) {
+  if (e.button !== 0 || e.target.closest('.chk') || drag) return;
+  const x0 = e.clientX, y0 = e.clientY, touch = e.pointerType !== 'mouse';
+  let started = false, timer = null;
+  const begin = y => { started = true; startDrag(it, row, y); if (touch && navigator.vibrate) navigator.vibrate(10); };
+  const move = ev => {
+    if (!started) {
+      if (touch) { if (Math.hypot(ev.clientX - x0, ev.clientY - y0) > 8) stop(); return; }
+      if (Math.abs(ev.clientY - y0) < 6) return;
+      begin(y0);
+    }
+    moveDrag(ev.clientY);
+  };
+  const up = () => { stop(); if (started) endDrag(); };
+  const stop = () => {
+    clearTimeout(timer);
+    removeEventListener('pointermove', move); removeEventListener('pointerup', up); removeEventListener('pointercancel', up);
+  };
+  if (touch) timer = setTimeout(() => begin(y0), 380);
+  addEventListener('pointermove', move); addEventListener('pointerup', up); addEventListener('pointercancel', up);
+}
+const scroller = () => wide.matches ? $('list') : document.scrollingElement;
+function startDrag(it, row, y) {
+  const list = row.parentElement, rows = [...list.children];
+  drag = {it, row, list, rows, y0: y, s0: scroller().scrollTop, idx: rows.indexOf(row), to: rows.indexOf(row),
+    h: row.getBoundingClientRect().height,
+    mids: rows.map(x => { const b = x.getBoundingClientRect(); return b.top + b.height / 2; })};
+  row.classList.add('dragging'); list.classList.add('sorting'); document.body.classList.add('noselect');
+}
+function moveDrag(y) {
+  const d = drag, sc = scroller(), box = wide.matches ? sc.getBoundingClientRect() : {top: 0, bottom: innerHeight};
+  if (y < box.top + 50) sc.scrollTop -= 12; else if (y > box.bottom - 50) sc.scrollTop += 12;
+  const dy = y - d.y0 + sc.scrollTop - d.s0, centre = d.mids[d.idx] + dy;
+  d.to = d.mids.filter((m, k) => k !== d.idx && m < centre).length;
+  d.row.style.transform = `translateY(${dy}px)`;
+  d.rows.forEach((x, k) => {
+    if (k === d.idx) return;
+    const o = k < d.idx ? k : k - 1, fin = o < d.to ? o : o + 1;
+    x.style.transform = fin === k ? '' : `translateY(${(fin - k) * d.h}px)`;
+  });
+}
+function endDrag() {
+  const d = drag; drag = null;
+  justDragged = true; setTimeout(() => justDragged = false, 0);
+  d.list.classList.remove('sorting'); d.row.classList.remove('dragging'); document.body.classList.remove('noselect');
+  d.rows.forEach(x => x.style.transform = '');
+  if (d.to === d.idx) return;
+  const others = d.rows.filter((x, k) => k !== d.idx);
+  d.list.insertBefore(d.row, others[d.to] || null);
+  const ids = others.map(x => x.dataset.sel.slice(2)), above = item(ids[d.to - 1]), below = item(ids[d.to]);
+  const pri = ((above || below).priority) || '', it = d.it, was = it.priority || '';
+  const before = below && (below.priority || '') === pri ? below.id : '';
+  const next = item((d.rows[d.idx + 1] || {dataset: {sel: '::'}}).dataset.sel.slice(2));
+  const wasBefore = next && (next.priority || '') === was ? next.id : '';
+  op({op: 'reorder', id: it.id, priority: pri, before}).then(ok => ok && pri !== was &&
+    toast('Priority ' + (was || 'none') + ' → ' + (pri || 'none'),
+      () => op({op: 'reorder', id: it.id, priority: was, before: wasBefore})));
+}
+addEventListener('touchmove', e => { if (drag) e.preventDefault(); }, {passive: false});
 
 function iconBtn(icon, title, onclick, cls = '') {
   return el('button', {class: 'ib ' + cls, title, 'aria-label': title, onclick}, svg(icon));
@@ -612,7 +794,7 @@ function renderPane(r) {
   const pane = $('pane'); pane.textContent = '';
   if (!r.sel) return;
   if (r.sel.kind === 'paper') return paperPane(pane, r);
-  const it = data.items.find(i => i.id === r.sel.id);
+  const it = item(r.sel.id);
   if (!it) return go(r.view);
   const set = fields => op({op: 'update', id: it.id, fields});
   const save = fields => op({op: 'update', id: it.id, fields}, {pane: false});
@@ -631,10 +813,14 @@ function renderPane(r) {
       el('option', {value: ''}, 'Link a paper'), ...rest.map(p => el('option', {value: p.id}, p.title)))));
   const track = el('select', {onchange: e => set({track: e.target.value})},
     ...data.tracks.map(t => el('option', {value: t.id, selected: t.id === it.track}, t.name)));
+  const day = myDay(it);
   pane.style.setProperty('--tc', tcol(it.track));
   pane.append(paneTop(r),
     el('div', {class: 'card head'}, chk(it), area('title', it.title, 'Title', v => save({title: v}), 'ttl')),
     seg(ST, it.status, s => set({status: s})),
+    el('div', {class: 'card'}, el('div', {class: 'myday' + (day ? ' on' : '')},
+      el('button', {type: 'button', class: 'mdb', onclick: () => pin(it)}, svg(I.sun), day ? 'Added to My Day' : 'Add to My Day'),
+      day ? iconBtn(I.close, 'Remove from My Day', () => pin(it)) : null)),
     el('div', {class: 'card form'},
       field('Track', track),
       field('Priority', seg(PRI.map(p => [p, p || 'None']), it.priority || '', p => set({priority: p}), 'small'), 'div'),
@@ -643,12 +829,8 @@ function renderPane(r) {
     el('div', {class: 'cap'}, 'Evidence'),
     el('div', {class: 'card'}, area('evidence', it.evidence, 'Source, result, numbers', v => save({evidence: v}))),
     el('div', {class: 'cap'}, 'Papers'), papers,
-    el('div', {class: 'pfoot'},
-      el('span', {class: 'mv'}, iconBtn(I.up, 'Move up', () => op({op: 'move', id: it.id, dir: -1})),
-        iconBtn(I.down, 'Move down', () => op({op: 'move', id: it.id, dir: 1}))),
-      el('span', {}, 'Updated ' + (it.updated || '?')),
-      iconBtn(I.trash, 'Delete', () => confirm('Delete “' + it.title + '”?') &&
-        op({op: 'delete', id: it.id}).then(ok => ok && go(r.view)), 'del')));
+    el('div', {class: 'pfoot'}, el('span', {}, 'Updated ' + (it.updated || '?')),
+      iconBtn(I.trash, 'Delete', () => remove(it, r.view), 'del')));
 }
 function paperPane(pane, r) {
   const p = paper(r.sel.id);
@@ -671,24 +853,46 @@ function paperPane(pane, r) {
       href: '#' + r.view + '/i:' + i.id}, el('span', {class: 'dot'}), i.title)))
       : el('div', {class: 'card empty'}, 'Not linked to any item yet'),
     el('div', {class: 'pfoot'}, el('span'), iconBtn(I.trash, 'Delete paper', () =>
-      confirm('Delete paper “' + p.title + '”?') &&
+      confirm('Delete paper “' + p.title + '”? It is also unlinked from its items.') &&
         op({op: 'paper_delete', id: p.id}).then(ok => ok && go(r.view)), 'del')));
 }
 
+// keyboard (desktop): n new, / search, j / k next / previous row, x complete, t My Day, Delete / Backspace delete,
+// Esc leaves a field or closes the details
+addEventListener('keydown', e => {
+  if (!data || drag) return;
+  const r = route(), a = document.activeElement;
+  if (e.key === 'Escape') {
+    if (editing()) { a.blur(); if (a.dataset.k === 'q' && q) { q = ''; render(); } return; }
+    if (r.sel) go(r.view);
+    return;
+  }
+  if (e.ctrlKey || e.metaKey || e.altKey || editing()) return;
+  const sel = r.sel && r.sel.kind === 'item' ? item(r.sel.id) : null;
+  const focus = css => { const x = document.querySelector(css); if (x) { e.preventDefault(); x.focus(); } };
+  if (e.key === 'n') focus('#list .add input');
+  else if (e.key === '/') focus('.search');
+  else if (e.key === 'j' || e.key === 'k') {
+    const rows = [...document.querySelectorAll('#list .row[data-sel]')];
+    if (!rows.length) return;
+    const cur = r.sel ? rows.findIndex(x => x.dataset.sel === r.sel.kind[0] + ':' + r.sel.id) : -1;
+    const next = rows[cur < 0 ? 0 : Math.max(0, Math.min(rows.length - 1, cur + (e.key === 'j' ? 1 : -1)))];
+    const [kind, id] = next.dataset.sel.split(':');
+    scrollSel = true;
+    go(r.view, {kind: kind === 'p' ? 'paper' : 'item', id});
+  } else if (sel && e.key === 'x') complete(sel, document.querySelector(`#list .row[data-sel="i:${sel.id}"] .chk`));
+  else if (sel && e.key === 't') pin(sel);
+  else if (sel && (e.key === 'Delete' || e.key === 'Backspace')) { e.preventDefault(); remove(sel, r.view); }
+});
 addEventListener('hashchange', render);
 wide.addEventListener('change', render);
 const refit = () => document.querySelectorAll('textarea').forEach(fit);
 addEventListener('resize', refit);
 addEventListener('load', refit);
 if (document.fonts) { document.fonts.ready.then(refit); document.fonts.addEventListener('loadingdone', refit); }
-addEventListener('keydown', e => {
-  if (e.key !== 'Escape' || !data) return;
-  const r = route(); if (r.sel) { document.activeElement.blur(); go(r.view); }
-});
 load();
 setInterval(() => {
-  const a = document.activeElement;
-  if (document.visibilityState === 'visible' && !(a && /^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName))) load();
+  if (document.visibilityState === 'visible' && !editing() && !drag) load();
 }, 30000);
 </script></body></html>
 """
