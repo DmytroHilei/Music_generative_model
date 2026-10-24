@@ -1,0 +1,7 @@
+# Piano covers (2026-10-12 listening winner): the AdamW-8bit fine-tune of the 450M, style cover, T 0.9, dt bias 0.1,
+# density of the prompt. Usage: generate.py --config piano --prompt song.mid --output x.mid
+checkpoint = "checkpoints/overfit_adamw8_1e-4/model_bf16_it349.pt"
+style = "cover"
+temperature = 0.9
+dt-bias = 0.1
+density = "prompt"

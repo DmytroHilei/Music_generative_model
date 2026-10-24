@@ -71,5 +71,25 @@ def test_caption_instrument_mask():
         assert len(loose) > 2, 'an untrained head samples many instruments when nothing limits it'
 
 
+def test_config_presets():
+    # --config: TOML presets (dashes or underscores), later presets over earlier ones, the command line over both;
+    # every shipped preset in config/generate/ parses
+    with tempfile.TemporaryDirectory() as d:
+        a, b = Path(d) / 'a.toml', Path(d) / 'b.toml'
+        a.write_text('checkpoint = "ck"\ndry-multiplier = 3\ndry_key = "pitch_class"\nbest-of = 4\n')
+        b.write_text('best-of = 2\n')
+        args = generate.parse_args(['--config', str(a), '--config', str(b), '--dry-multiplier', '1'])
+        assert (args.checkpoint, args.dry_multiplier, args.dry_key, args.best_of) == ('ck', 1.0, 'pitch_class', 2)
+        for text in ('dry_multipler = 3\n', 'dry-key = "chords"\n'):
+            a.write_text(text)
+            try:
+                generate.parse_args(['--config', str(a), '--checkpoint', 'ck'])
+                raise AssertionError(f'accepted {text!r}')
+            except SystemExit:
+                pass
+    for path in sorted(generate.PRESETS.glob('*.toml')):
+        assert generate.parse_args(['--config', path.stem]).checkpoint
+
+
 if __name__ == '__main__':
     run(globals())

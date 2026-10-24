@@ -1,0 +1,12 @@
+# Captioned band songs (2026-10-24): the caption picks a real 128-note GigaMIDI opening (LaBSE + measured attributes +
+# genre / mood labels), multi_control continues it, best 1 of 4 candidates per sample by caption match, DRY repetition
+# penalty on pitch-class chords. Usage: generate.py --config caption --text "..." --num-samples 4 --output x.mid
+checkpoint = "checkpoints/multi_control"
+retrieve = "gigamidi_replay_train"
+sample-instruments = true
+best-of = 4
+max-new-tokens = 1500
+dry-multiplier = 3
+dry-key = "pitch_class"
+dry-allowed = 16
+dry-base = 1.15

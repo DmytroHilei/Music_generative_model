@@ -1,6 +1,7 @@
 import argparse
 import random
 import time
+import tomllib
 from pathlib import Path
 
 import numpy as np
@@ -19,14 +20,38 @@ from musicar.generation.sampling import generate, with_bos
 
 
 COPY_MIN, COPY_FREE = 16, 0.25  # best-of: copies of >= 16 chords; real GigaMIDI band songs: 0-74% of notes, median ~13%
+PRESETS = Path(__file__).resolve().parent / "config" / "generate"
 
 
-def parse_args():
+def preset_defaults(parser, names):
+    """Option defaults from generation presets: TOML files of option names (dashes or underscores) and values, as a
+    path or a name in config/generate/; later presets override earlier ones, the command line overrides them all."""
+    actions = {a.dest: a for a in parser._actions}
+    out = {}
+    for name in names:
+        path = Path(name) if Path(name).is_file() else PRESETS / f"{name.removesuffix('.toml')}.toml"
+        if not path.is_file():
+            parser.error(f"--config {name}: no such file, nor {path} (presets: "
+                         f"{', '.join(sorted(f.stem for f in PRESETS.glob('*.toml')))})")
+        for key, value in tomllib.loads(path.read_text()).items():
+            action = actions.get(key.replace("-", "_"))
+            if action is None or action.dest in ("help", "config"):
+                parser.error(f"{path}: {key} is not a generate.py option")
+            if action.choices and value not in action.choices:
+                parser.error(f"{path}: {key} = {value!r} is not one of {', '.join(map(str, action.choices))}")
+            out[action.dest] = value
+    return out
+
+
+def parse_args(argv=None):
     parser = argparse.ArgumentParser(
         description="Generate MIDI (piano or multi-instrument) from a trained checkpoint.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    parser.add_argument("--checkpoint", type=str, required=True,
+    parser.add_argument("--config", action="append", default=[],
+                        help="generation preset (repeatable): a TOML file of options, or its name in config/generate/ "
+                             "(e.g. --config caption); options given on the command line override it")
+    parser.add_argument("--checkpoint", type=str, default=None,
                         help="checkpoint file, or a run directory (uses model_bf16.pt, else best.pt, else ckpt.pt)")
     parser.add_argument("--output", type=str, default="generated.mid",
                         help="output MIDI; with --num-samples > 1 a _<i> suffix is added")
@@ -114,7 +139,7 @@ def parse_args():
                              "match (what --text asks for that the notes show: instruments, drums, solo, key, pace, "
                              "dynamics, register; musicar/generation/caption_match.py) minus their runaway share "
                              "(10-s windows over 40 notes/s) and their verbatim repetition (share of the new pitched "
-                             f"notes inside copies of >= {COPY_MIN} chords, over {COPY_FREE:.0%})")
+                             f"notes inside copies of >= {COPY_MIN} chords, over {COPY_FREE * 100:.0f}%%)")
     parser.add_argument("--loose-instruments", action="store_true",
                         help="don't turn --text's instrument limits into a hard mask. By default 'only' / 'just' / "
                              "'лише' / 'тільки' with named instruments, or 'solo' with one ('solo piano', 'фортепіано "
@@ -156,7 +181,12 @@ def parse_args():
                         help="Post-processing: max simultaneous notes per time slot (default: off, raw model output)")
     parser.add_argument("--max-delta", type=float, default=None,
                         help="Post-processing: cap on seconds per time step (default: off, raw model output)")
-    return parser.parse_args()
+    presets, _ = parser.parse_known_args(argv)
+    parser.set_defaults(**preset_defaults(parser, presets.config))
+    args = parser.parse_args(argv)
+    if args.checkpoint is None:
+        parser.error("--checkpoint is required (on the command line or in a --config preset)")
+    return args
 
 
 def val_pieces(source, genre=None):

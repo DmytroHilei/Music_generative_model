@@ -1,0 +1,14 @@
+# Captions from scratch with the best caption model (section arm s50_v2: splice 0.5 + repeat 64 + section attributes
+# v2): from BOS, guidance 3 (2026-10-24: the closest of cfg 1 / 2 / 3 to a real band song's density, drums 0.47 vs
+# 0.03-0.08), best 1 of 4 by caption match, DRY on pitch-class chords. Add --retrieve gigamidi_replay_train to start
+# from a caption-matched real opening. Usage: generate.py --config s50 --text "..." --num-samples 4 --output x.mid
+checkpoint = "checkpoints/forget_s50_v2"
+sample-instruments = true
+cfg-scale = 3.0
+temperature = 0.9
+best-of = 4
+max-new-tokens = 1500
+dry-multiplier = 3
+dry-key = "pitch_class"
+dry-allowed = 16
+dry-base = 1.15
