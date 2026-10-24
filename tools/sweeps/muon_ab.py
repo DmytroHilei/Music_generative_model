@@ -3,7 +3,9 @@ Muon variants at 42M (todo c7cb78dd; optimizations.md "Paper search before F1"):
 block, Muon 1e-3 WSD, 1,500 it x 65,536 notes) on the local stores (config/pretrain/abl_2048_local.py), one arm per
 variant of musicar/training/optim.py Muon, seeds 1337 / 2 / 3 run round-robin (every arm at a seed before the next
 seed, so a stopped sweep still compares all arms). Arm rms = the step-size control for normuon (both update at RMS
-0.2 exactly; base Muon's Moonlight scale gives RMS 0.2 only when every orthogonalized singular value is 1). Final held-out GigaMIDI CE and Aria CE per run in logs/muon_ab.md;
+0.2 exactly; base Muon's Moonlight scale gives RMS 0.2 only when every orthogonalized singular value is 1). Arms indep /
+linear = the heads A/B on the same recipe (MusicConfig.heads) against the cascade of base: indep = the same residual
+heads without the chain, linear = independent linear heads (the 2026-09-28 baseline of the cascade's -0.41). Final held-out GigaMIDI CE and Aria CE per run in logs/muon_ab.md;
 a run whose log has its last eval is skipped. ckpt.pt and pre_cooldown.pt (optimizer state) deleted after each
 run, model_bf16.pt kept.
 
@@ -33,6 +35,8 @@ ARMS = {
     'normuon': ['--muon_normuon=True'],
     'cautious': ['--muon_cautious=True'],
     'rms': ['--muon_rms=True'],  # NorMuon's step size (RMS 0.2 exactly) without its per-neuron division
+    'indep': ['--heads=independent'],  # heads A/B (todo 657cfb1c): the residual heads without the chain
+    'linear': ['--heads=linear'],  # heads A/B: independent linear heads (rejected.IndependentHeads, the 09-28 baseline)
 }
 SEEDS = (1337, 2, 3)
 LAST = 'step 1499:'
@@ -68,7 +72,11 @@ def on_battery():
 
 
 def table(arms, seeds):
-    lines = ['# Muon variants at 42M (tools/sweeps/muon_ab.py; abl_2048 recipe on the local stores, 1,500 it)', '',
+    # every arm with a finished run, over every seed, whatever subset this call ran (a partial call keeps the other rows)
+    arms = [a for a in ARMS if a in arms or any(result(a, s) for s in SEEDS)]
+    seeds = sorted(set(SEEDS) | set(seeds), key=lambda s: (s != 1337, s))
+    lines = ['# Muon variants and heads A/B at 42M (tools/sweeps/muon_ab.py; abl_2048 recipe on the local stores, '
+             '1,500 it)', '',
              '| arm | ' + ' | '.join(f'held-out s{s}' for s in seeds) + ' | held-out mean | vs base | Aria mean | vs base |',
              '|---|' + '---|' * (len(seeds) + 4)]
     means = {}

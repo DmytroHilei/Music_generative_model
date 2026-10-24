@@ -134,6 +134,7 @@ muon_bf16 = False         # Muon momentum buffer in bf16 (half the Muon optimize
 pack_short = False        # train only: short files fill their window with more short files (BOS..EOS each), no padding
 min_notes = 64            # with pad_short / pack_short: shorter files are still dropped
 n_programs = 0            # multi-instrument: 129 = GM programs + drums (needs a programs.u8 store or reads piano as 0)
+heads = 'cascade'         # output heads: 'cascade' | 'independent' (no chain) | 'linear' (rejected.py); heads A/B only
 # text control (context/claude/text_control.md): a caption per window from the label tables in `captions`, encoded by
 # the frozen `text_encoder`, added at every position through the model's zero-init text_proj (text_dim = its width)
 text_encoder = ''         # e.g. 'sentence-transformers/LaBSE'; '' = off

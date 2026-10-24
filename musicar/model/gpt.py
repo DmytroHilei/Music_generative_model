@@ -239,6 +239,10 @@ class MusicConfig:
     # multi-instrument: a 5th note attribute, the instrument (GM program 0-127, DRUM_PROGRAM = drums); 0 = off.
     # Added to the input embedding (zero init, like the style table) and predicted by a cascade head after dt.
     n_programs: int = 0
+    # output heads (heads A/B, todo 657cfb1c): 'cascade' = residual heads, each reading the values chosen before;
+    # 'independent' = the same residual heads without the chain (each reads the trunk state alone); 'linear' = one
+    # linear layer per attribute on the trunk state (rejected.IndependentHeads, the 2026-09-28 baseline)
+    heads: str = 'cascade'
     # positions: 'learned' = absolute table wpe (block_size rows, added to the input; old checkpoints), 'rope' = rotary
     # embedding of q/k in every attention layer (relative, no parameters, so block_size can change after training)
     pos_emb: str = 'learned'
@@ -325,7 +329,7 @@ class CascadeHeads(nn.Module):
         C = config.n_embd
         self.order = CASCADE_ORDER_PROGRAMS if config.n_programs else CASCADE_ORDER
         # the last attribute is never used as a condition, so it needs no embedding
-        self.cond_emb = nn.ModuleDict({
+        self.cond_emb = nn.ModuleDict({} if config.heads == 'independent' else {
             name: nn.Embedding(sizes[name], C) for name in self.order[:-1]
         })
         self.heads = nn.ModuleDict({name: ResidualHead(C, sizes[name], config.bias) for name in self.order})
@@ -544,7 +548,12 @@ class GPT(nn.Module):
             if config.text_center:
                 self.register_buffer('text_mean', torch.zeros(config.text_dim))
 
-        self.cascade = CascadeHeads(config)
+        if config.heads == 'linear':
+            from musicar.model.rejected import IndependentHeads
+            self.cascade = IndependentHeads(config)
+        else:
+            assert config.heads in ('cascade', 'independent'), config.heads
+            self.cascade = CascadeHeads(config)
 
         self.apply(self._init_weights)
         for pn, p in self.named_parameters():

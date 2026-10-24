@@ -32,6 +32,25 @@ def test_programs_head():
     assert m.cascade.order == ('delta_time', 'program', 'pitch', 'duration', 'velocity')
 
 
+def test_head_variants():
+    # heads 'independent' / 'linear': no condition embeddings, so the heads after dt ignore the dt target (the
+    # cascade's don't); every variant trains (finite loss, gradients) and samples
+    streams, program, targets = batch(n_programs=129)
+    other = [*targets[:3], (targets[3] + 1) % 512, *targets[4:]]
+    for heads in ('cascade', 'independent', 'linear'):
+        m = tiny(n_programs=129, heads=heads)
+        independent = heads != 'cascade'
+        assert (len(m.cascade.cond_emb) == 0) == independent and m.cascade.order[1] == 'program'
+        a, loss = m(*streams, program=program, targets=targets)
+        b, _ = m(*streams, program=program, targets=other)
+        assert all(torch.equal(a[k], b[k]) == independent for k in ('program', 'pitch', 'duration', 'velocity'))
+        loss.backward()
+        assert torch.isfinite(loss) and all(p.grad is not None for p in m.parameters())
+        h = torch.randn(2, 1, 32)
+        out = m.cascade.sample(h, lambda logits, name: logits.argmax(-1))
+        assert list(out) == list(m.cascade.order)
+
+
 def test_masked_targets_give_zero_not_nan():
     m = tiny()
     streams, _, targets = batch()

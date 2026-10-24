@@ -16,7 +16,7 @@ import torch.nn as nn
 from torch.nn import functional as F
 
 from musicar.data.loader import BOS_PITCH, DRUM_PROGRAM
-from musicar.model.gpt import CASCADE_ORDER, LayerNorm
+from musicar.model.gpt import CASCADE_ORDER, CASCADE_ORDER_PROGRAMS, LayerNorm
 
 
 # ---------------------------------------------------------------------------------------------------------------------
@@ -100,16 +100,20 @@ class DeepResidualHead(nn.Module):
 # Output head designs before the residual cascade (ab-indep / ab-cascade, 2026-09-28, d5b38ae)
 # Result (6M, 4 epochs, summed CE): independent heads 9.824, cascade v1 (plain MLP heads) 9.793, cascade v2
 # (model.ResidualHead, the default since) 9.412. v1's pitch head was worse than the independent one despite seeing dt.
-# To use again: GPT.cascade = IndependentHeads(...) (its forward ignores targets; sampling then samples every head from
+# To use again: MusicConfig.heads = 'linear' (its forward ignores targets; sampling then samples every head from
 # h alone), or CascadeHeads.heads = v1_cascade_heads(...) without the cond_emb init_std / no-weight-decay rule.
 
 class IndependentHeads(nn.Module):
-    """4 linear heads on h, P(note | h) = P(dt|h) P(pitch|h) P(dur|h) P(vel|h). Same call interface as CascadeHeads."""
+    """Linear heads on h, P(note | h) = P(dt|h) P(pitch|h) P(dur|h) P(vel|h) (and P(instrument|h) for multi-instrument
+    models, added for the 2026-10-25 heads A/B: MusicConfig.heads = 'linear'). Same call interface as CascadeHeads."""
 
-    def __init__(self, C, sizes):
+    def __init__(self, config):
         super().__init__()
-        self.order = CASCADE_ORDER
-        self.heads = nn.ModuleDict({name: nn.Linear(C, sizes[name], bias=False) for name in self.order})
+        sizes = dict(pitch=config.pitch_size, velocity=config.velocity_size,
+                     duration=config.duration_size, delta_time=config.delta_time_size, program=config.n_programs)
+        self.order = CASCADE_ORDER_PROGRAMS if config.n_programs else CASCADE_ORDER
+        self.cond_emb = nn.ModuleDict()  # no conditioning (GPT's init loops over it)
+        self.heads = nn.ModuleDict({name: nn.Linear(config.n_embd, sizes[name], bias=False) for name in self.order})
 
     def forward(self, h, targets=None):
         return {name: self.heads[name](h) for name in self.order}
