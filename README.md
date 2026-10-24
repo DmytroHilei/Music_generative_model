@@ -45,6 +45,9 @@ The sections are numbered in reading order:
   pick Δt, instrument, pitch, duration and velocity one after another, each seeing the values already chosen.
 - **5: generation**, with classifier-free guidance over the captions.
 - **6: the section-caption recipe.** Without it the model follows the first section's caption and ignores later ones.
+  Change-aware captions, half of the windows spliced from another file, the caption repeated every 64 notes and
+  caption words from section statistics take the 107M pilot's switch score from 0.06 to 0.98. A counterfactual loss
+  was tested and left out (0.85 with splice and repeat, at 1.8× the step time).
 - **7: training curves** behind the design choices: trunk block, base pretraining, section-caption measures, and
   the conversion to grouped-query attention.
 - **8–9: training stages and the audio → MIDI pipeline** that builds the Ukrainian fine-tune set.
@@ -63,7 +66,7 @@ it). [`docs/figures/curves_data.py`](docs/figures/curves_data.py) rebuilds the c
 
 ```
 train.py              training (nanoGPT-style configs: python train.py config/<group>/<run>.py --key=value)
-generate.py           sampling: MIDI + MP3, prompts from files or validation sets
+generate.py           sampling: MIDI + MP3, prompts from files, validation sets or caption retrieval; --config presets
 musicar/              core package
   model/              gpt.py (transformer, embeddings, cascade heads, KV cache), checkpoint.py (paths, loading into
                       a grown model, saving), rejected.py (tested-and-rejected options: MoE, future heads, ...)
@@ -76,7 +79,8 @@ musicar/              core package
                       settings_router.py (generation settings from the seed song)
   eval/               evaluations used during training and by the eval/ scripts
   jobstatus.py        progress files for the dashboard
-config/               run configs: pretrain/, finetune/, pilots/, smoke.py (stacks on any of them)
+config/               run configs: pretrain/, finetune/, pilots/, f1/, smoke.py (stacks on any of them);
+                      generate/ = generation presets (TOML)
 data/                 datasets, token stores and their metadata (see data/README.md); skryabin/ = the hand-picked songs
 data_prep/            datasets/ (downloads, tokenization into stores, store splits), songs/ (song search, download,
                       audio -> MIDI, fine-tune CSVs), labels/ (features, labels, pseudo-labels, caption text)
@@ -84,7 +88,7 @@ docs/                 experiment results (experiments.md), figures/ (architectur
 eval/                 settings/ (sampling sweeps, settings search), compare/ (seeded comparisons, text control,
                       sample statistics), probes/ (hidden-state probes, label coverage)
 tools/                status.py (dashboard), sweeps/ (fine-tune sweeps), bench/ (GPU / CPU throughput),
-                      checkpoints/ (bf16 export, weight interpolation)
+                      checkpoints/ (bf16 export, weight interpolation, checkpoint averaging)
 cloud/                rented-GPU pipeline: setup/ (instance setup, preflight), run/ (launch, auto-resume, stop),
                       sync/ (Hugging Face Hub checkpoints and data), status/
 tests/                CPU tests per package area: python tests/run.py [filter]  (or pytest tests/)
@@ -107,13 +111,27 @@ MP3 rendering needs `fluidsynth`, `ffmpeg` and a General MIDI soundfont (`fluid-
 
 ```bash
 .venv/bin/python train.py config/finetune/finetune_ua450.py                       # train / fine-tune
-.venv/bin/python generate.py --checkpoint checkpoints/ua_2048_v2 --style cover --temperature 0.9 \
-    --max-new-tokens 2000 --output samples/out.mid                       # sample
+.venv/bin/python generate.py --config caption --text "A melancholic pop rock song with drums, guitar and bass" \
+    --num-samples 4 --output samples/out.mid                             # sample with a preset
 .venv/bin/python tools/status.py                                         # live dashboard of runs and jobs
 .venv/bin/python eval/compare/seed_compare.py --checkpoints checkpoints/a checkpoints/b \
     --out-dir samples/compare                                            # continue Ukrainian songs, compare
 .venv/bin/python -m musicar.eval.structure_eval --checkpoints checkpoints/a   # whole-song structure metrics
 ```
+
+### Generation presets
+
+`generate.py --config NAME` loads `config/generate/NAME.toml`, a file of generate.py options (dashes or underscores),
+so the long sampling settings don't have to be typed each time. Presets stack (`--config a --config b`, the later one
+wins) and any flag given on the command line overrides them, e.g. `--config s50 --cfg-scale 2 --best-of 8`.
+
+| preset | model | settings | typical extra flags |
+|---|---|---|---|
+| `caption` | `multi_control` (band) | the caption picks a real 128-note opening (`--retrieve gigamidi_replay_train`), best 1 of 4 candidates by caption match, DRY repetition penalty on pitch-class chords, 1,500 notes | `--text`, `--num-samples`, `--output` |
+| `s50` | `forget_s50_v2` (107M caption pilot) | from the start token, guidance 3, T 0.9, best of 4, DRY, 1,500 notes | `--text`, `--num-samples`, `--output`; `--retrieve gigamidi_replay_train` to start from a real opening |
+| `piano` | `overfit_adamw8_1e-4` @349 (450M piano fine-tune) | style cover, T 0.9, Δt bias 0.1, density of the prompt | `--prompt song.mid`, `--output` |
+
+A new preset is one more `.toml` file in `config/generate/`; unknown option names and invalid values are refused.
 
 ## Data and licenses
 
