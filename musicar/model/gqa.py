@@ -18,6 +18,10 @@ each layer's attention input on calibration batches (collected through the teach
   (group size) key covariance gives the shared key; each query head's pair is scaled by the conjugate of its
   least-squares complex factor, which commutes with the rotation (RoPE stays exact). Mean pooling is the special
   case weights 1 / group, factor 1.
+- QK-norm models (RMSNorm on each head's q and k, before RoPE): each head's RMS is taken as its average over the
+  calibration inputs, so the normalized keys and queries are linear (gain x W x / average RMS) and the key merge runs
+  on those; the merged rows go back through the gains, and the GQA layer's own QK-norm removes their scale. The
+  teachers carry the checkpoint's q_norm / k_norm, so the transfer target stays exact.
 """
 
 import dataclasses
@@ -30,19 +34,34 @@ def _complex_rows(w, f, half):
     return w[f], w[f + half]
 
 
+def _safe_gain(g):
+    """A QK-norm gain (hs,) as float64 with entries kept away from 0 (the merged rows are divided by it)."""
+    g = g.double()
+    floor = 1e-3 * g.abs().mean().clamp(min=1e-12)
+    return torch.where(g.abs() < floor, torch.where(g < 0, -floor, floor), g)
+
+
 @torch.no_grad()
-def pca_merge(c_attn, c_proj, cov, n_head, n_kv, eps=1e-8):
+def pca_merge(c_attn, c_proj, cov, n_head, n_kv, eps=1e-8, q_gain=None, k_gain=None):
     """One attention layer: teacher c_attn (n_embd + 2 n_head hs, n_embd [+1]) and c_proj (n_embd, n_embd) weights
     and the second moment cov (in, in) of its inputs (augmented with a constant 1 when c_attn carries its bias as the
-    last column) -> the GQA c_attn (n_embd + 2 n_kv hs, in) and c_proj. float64 inside."""
+    last column) -> the GQA c_attn (n_embd + 2 n_kv hs, in) and c_proj. q_gain / k_gain (hs,): the teacher's QK-norm
+    weights (QK-norm models). float64 inside."""
     dt = c_attn.dtype
     W, Wo, S = c_attn.double(), c_proj.double().clone(), cov.double()
     C = Wo.shape[0]
     hs, r = C // n_head, n_head // n_kv
     half = hs // 2
     Wq = W[:C].clone().view(n_head, hs, -1)
-    Wk = W[C:C + n_head * hs].view(n_head, hs, -1)
+    Wk = W[C:C + n_head * hs].clone().view(n_head, hs, -1)
     Wv = W[C + n_head * hs:].view(n_head, hs, -1)
+    if q_gain is not None:
+        # normalized q / k ~= gain * (W x) / (average RMS of W x): linear, so the merge below applies
+        gq, gk = _safe_gain(q_gain).to(W.device), _safe_gain(k_gain).to(W.device)
+        for h in range(n_head):
+            for w, g in ((Wq, gq), (Wk, gk)):
+                rms = ((w[h] @ S * w[h]).sum() / hs).clamp(min=eps).sqrt()
+                w[h] = g[:, None] * w[h] / rms
     Wk_g = torch.zeros(n_kv, hs, W.shape[1], dtype=W.dtype, device=W.device)
     Wv_g = torch.zeros_like(Wk_g)
     for g in range(n_kv):
@@ -84,30 +103,37 @@ def pca_merge(c_attn, c_proj, cov, n_head, n_kv, eps=1e-8):
                 c = num / kg2 if kg2 > eps else torch.tensor(0j, dtype=torch.complex128)
                 gr, gi = c.real, -c.imag
                 Wq[h, f], Wq[h, f + half] = gr * qa[i] - gi * qb[i], gi * qa[i] + gr * qb[i]
+    if q_gain is not None:  # back through the gains; the GQA layer's QK-norm removes the scale
+        Wq, Wk_g = Wq / gq[None, :, None], Wk_g / gk[None, :, None]
     out = torch.cat([Wq.reshape(C, -1), Wk_g.reshape(n_kv * hs, -1), Wv_g.reshape(n_kv * hs, -1)])
     return out.to(dt), Wo.to(dt)
 
 
-def teacher_attention(config, c_attn, c_proj, device):
-    """A frozen full-attention copy (n_kv_head = n_head) of one layer from the checkpoint's own weights."""
+def teacher_attention(config, c_attn, c_proj, norms, device):
+    """A frozen full-attention copy (n_kv_head = n_head) of one layer from the checkpoint's own weights; norms: its
+    q_norm / k_norm state ({'q_norm.weight': ..., 'k_norm.weight': ...}, QK-norm models)."""
     from musicar.model.gpt import CausalSelfAttention
-    assert not config.qk_norm, 'GQA transfer from a QK-norm model: copy q_norm / k_norm too'
     attn = CausalSelfAttention(dataclasses.replace(config, n_kv_head=0)).to(device)
     attn.c_attn.load_state_dict(c_attn)
     attn.c_proj.load_state_dict(c_proj)
+    if config.qk_norm:
+        for name in ('q_norm', 'k_norm'):
+            state = {k.split('.', 1)[1]: v for k, v in norms.items() if k.startswith(name + '.')}
+            assert state, f'QK-norm teacher without the checkpoint\'s {name}'
+            getattr(attn, name).load_state_dict(state)
     return attn.eval().requires_grad_(False)
 
 
 def teacher_weights(state_dict):
-    """The attention weights of a checkpoint state dict, before load_expanded pools them: {layer: (c_attn, c_proj)}
-    as state dicts of the two Linears."""
+    """The attention weights of a checkpoint state dict, before load_expanded pools them: {layer: (c_attn, c_proj,
+    norms)}: state dicts of the two Linears and of q_norm / k_norm ('q_norm.weight', ...; empty without QK-norm)."""
     out = {}
+    slot = {'c_attn': 0, 'c_proj': 1, 'q_norm': 2, 'k_norm': 2}
     for k, v in state_dict.items():
         parts = k.split('.')
-        if len(parts) == 6 and parts[:2] == ['transformer', 'h'] and parts[3] == 'attn' \
-                and parts[4] in ('c_attn', 'c_proj'):
-            i = int(parts[2])
-            out.setdefault(i, ({}, {}))[0 if parts[4] == 'c_attn' else 1][parts[5]] = v.clone()
+        if len(parts) == 6 and parts[:2] == ['transformer', 'h'] and parts[3] == 'attn' and parts[4] in slot:
+            key = parts[5] if slot[parts[4]] < 2 else f'{parts[4]}.{parts[5]}'
+            out.setdefault(int(parts[2]), ({}, {}, {}))[slot[parts[4]]][key] = v.clone()
     return out
 
 
@@ -154,8 +180,10 @@ def apply_pca_init(model, cov):
         w = t.c_attn.weight
         if t.c_attn.bias is not None:
             w = torch.cat([w, t.c_attn.bias[:, None]], 1)
+        gains = (t.q_norm.weight.cpu(), t.k_norm.weight.cpu()) if t.q_norm is not None else (None, None)
         # on the CPU: many small float64 products per rotation pair
-        new_attn, new_proj = pca_merge(w.cpu(), t.c_proj.weight.cpu(), cov[i].cpu(), attn.n_head, attn.n_kv_head)
+        new_attn, new_proj = pca_merge(w.cpu(), t.c_proj.weight.cpu(), cov[i].cpu(), attn.n_head, attn.n_kv_head,
+                                       q_gain=gains[0], k_gain=gains[1])
         if t.c_attn.bias is not None:
             attn.c_attn.weight.copy_(new_attn[:, :-1])
             attn.c_attn.bias.copy_(new_attn[:, -1])

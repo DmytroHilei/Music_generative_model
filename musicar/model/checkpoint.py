@@ -20,6 +20,16 @@ LEGACY_DEFAULTS = {'n_kv_head': 0, 'n_styles': 0, 'n_programs': 0, 'pos_emb': 'l
                    'section_repeat': 0, 'linear_attn': ''}
 
 
+def torch_load(path, **kw):
+    """torch.load to the CPU (weights_only): torchao.optim imported first (when installed) registers its optimizer-state
+    subclasses, so a resumable ckpt.pt with 8-bit AdamW states loads."""
+    try:
+        import torchao.optim  # noqa: F401
+    except ImportError:
+        pass
+    return torch.load(path, map_location='cpu', **kw)
+
+
 def resolve_checkpoint(path):
     path = Path(path)
     if path.is_dir():
@@ -127,7 +137,7 @@ def load_model(path, device='cpu', dtype=torch.float32, quant=None):
     `device` in `dtype`. Keys a checkpoint predates take MusicConfig's defaults. quant: a musicar.model.quant spec
     (e.g. 'w4g32-a8-kv8'), applied in float32 before the cast to `dtype`. Returns (model, iter_num or None)."""
     from musicar.model.gpt import GPT, MusicConfig
-    ck = torch.load(resolve_checkpoint(path), map_location='cpu')
+    ck = torch_load(resolve_checkpoint(path))
     fields = MusicConfig.__dataclass_fields__
     model = GPT(MusicConfig(**{k: v for k, v in ck['model_args'].items() if k in fields}, dropout=0.0))
     state = strip_compile_prefix(ck['model'])

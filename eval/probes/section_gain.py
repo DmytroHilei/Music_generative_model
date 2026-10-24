@@ -33,7 +33,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
 from musicar.data.loader import NoteWindowDataset, collate_windows, section_change_scores  # noqa: E402
-from musicar.model.checkpoint import load_model, resolve_checkpoint  # noqa: E402
+from musicar.model.checkpoint import load_model, resolve_checkpoint, torch_load  # noqa: E402
 from musicar.model.gpt import STREAM_ORDER  # noqa: E402
 from musicar.text.encoder import TextEncoder  # noqa: E402
 
@@ -96,7 +96,7 @@ def bucket_means(gain, key, valid, buckets):
 
 def train_setting(ck, name, default):
     """A train.py setting saved in the checkpoint's config (default for checkpoints from before it existed)."""
-    return torch.load(resolve_checkpoint(ck), map_location='cpu', mmap=True).get('config', {}).get(name, default)
+    return torch_load(resolve_checkpoint(ck), mmap=True).get('config', {}).get(name, default)
 
 
 def probe(ck, encoder, args):

@@ -51,8 +51,14 @@ ARMS = {
     'len2_slack': ['--n_remain=33', '--n_progress=17', '--remain_slack=0.15', '--remain_lr_mult=10'],
     'len2_words': ['--n_remain=33', '--n_progress=17', '--remain_jitter=0.1', '--remain_lr_mult=10',
                    '--length_words=v2'],
+    # F1 at 107M (config/f1/f1.py's additions together): s50_v2's sections, len2_words, GQA 12 -> 4 from a stage-1
+    # checkpoint (merge + 300 it transfer, as gqa_lw_s1 of tools/sweeps/gqa_convert.py; logs/queue_20261024.sh trains
+    # it), 8-bit AdamW (control: ctrl; each alone: s50_v2, len2_words, gqa_lw)
+    'f1mix': ['--section_splice_frac=0.5', '--section_repeat=64', '--section_attrs=v2', '--n_remain=33',
+              '--n_progress=17', '--remain_jitter=0.1', '--remain_lr_mult=10', '--length_words=v2', '--n_kv_head=4',
+              '--init_ckpt=checkpoints/f1mix_s1/ckpt.pt', '--optimizer_name=adamw8bit'],
 }
-FOLLOW_PROMPTS = {'all_v2': 'section_v2', 's50_v2': 'section_v2'}  # section_follow --prompts (default 'section')
+FOLLOW_PROMPTS = {'all_v2': 'section_v2', 's50_v2': 'section_v2', 'f1mix': 'section_v2'}  # section_follow --prompts
 ITERS = {'nocf': 2700, 'nocf_s50': 2700, 'cfcool': 2350, 'cf1': 2200, 's50_v2': 2700}  # others MAX_ITERS
 TABLE = ROOT / 'logs/sections/forget.md'
 BASELINE = 'checkpoints/v2_A0'

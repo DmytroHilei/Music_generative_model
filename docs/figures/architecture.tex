@@ -1,8 +1,8 @@
-% Captioned music model (477M, F1 layout without the planned length input and infilling), drawn in the style of Sebastian Raschka's LLM architecture gallery.
+% Captioned music model (427M, F1 layout with GQA, without the planned length input), drawn in the style of Sebastian Raschka's LLM architecture gallery.
 % Colours: pink = captions only, teal = model structure (repeated block, sublayer labels, section numbers) and, in
 % the curves, what the model uses; grey = linear layers, embedding tables and the compared alternatives. Dotted frames / dotted boxes = zooms, dashed frames = modules drawn expanded in
 % place, solid frames = text panels. Sections are numbered in reading order.
-% Sources: shapes from musicar/model/gpt.py; recipe from config/pilots/section_*.py + train.py; switch scores and CE
+% Sources: shapes and parameter counts from musicar/model/gpt.py (config/f1/f1.py: n_kv_head 6); recipe from config/pilots/section_*.py + train.py; switch scores and CE
 % from logs/sections/forget.md; base run from config/pretrain/long_450m.py + agents.md; F1 plan from
 % context/claude/text_control.md + roadmap.md (items 11-13); fine-tune from config/finetune/finetune_ua450{,_multi}.py; song counts from
 % data/finetune/ukrainian_{multi_v1,reduction_v4}.csv; audio pipeline from data_prep/songs/audio_to_piano.py;
@@ -83,22 +83,6 @@
   }
 \end{tikzpicture}}
 
-\newsavebox{\cfBox}
-\sbox{\cfBox}{\begin{tikzpicture}
-  \node[pbox, minimum width=24mm] (ct) at (0, 0.42) {true caption $c_k$};
-  \node[box, minimum width=24mm] (cp) at (0, -0.42) {previous $c_{k-1}$};
-  \node[box, minimum height=14mm, minimum width=17mm] (m) at (2.45, 0) {model\\[-2pt] {\scriptsize same weights,}\\[-3pt] {\scriptsize two passes}};
-  \node[font=\footnotesize] (nt) at (4.15, 0.42) {NLL$_\text{true}$};
-  \node[font=\footnotesize] (np) at (4.15, -0.42) {NLL$_\text{prev}$};
-  \draw[arr] (ct.east) -- (m.west |- ct.east);
-  \draw[arr] (cp.east) -- (m.west |- cp.east);
-  \draw[arr] (m.east |- nt) -- (nt);
-  \draw[arr] (m.east |- np) -- (np);
-  \node[box, font=\scriptsize] (hinge) at (6.6, 0) {$\max\bigl(0,\ 0.05$\\$-\,(\text{NLL}_\text{prev}-\text{NLL}_\text{true})\bigr)$};
-  \draw[arr] (nt.east) -- (hinge.west |- nt.east);
-  \draw[arr] (np.east) -- (hinge.west |- np.east);
-\end{tikzpicture}}
-
 \newsavebox{\embBox}
 \sbox{\embBox}{\begin{tikzpicture}
   \foreach \n/\v [count=\i] in {pitch/130, vel./32, dur./512, $\Delta t$/512} {
@@ -165,10 +149,11 @@
 
 \newsavebox{\curveArms}
 \sbox{\curveArms}{\begin{tikzpicture}
-\pgfplotsset{arms/.style={cplot, width=2.75cm, ymin=-0.6, ymax=4.6, ytick={0,1,2,3,4}, grid=none, xmajorgrids,
-    axis y line*=none, y axis line style={draw=none}, ytick style={draw=none}}}
-\begin{axis}[arms, name=sw, xmin=0, xmax=1, xtick={0,0.5,1}, xlabel={switch score (higher = follows)},
-    yticklabels={none (ctrl), repeat, counterfactual, splice, all three}]
+\pgfplotsset{arms/.style={cplot, width=2.5cm, height=4.6cm, ymin=-0.6, ymax=6.6, ytick={0,1,2,3,4,5,6}, grid=none,
+    xmajorgrids, axis y line*=none, y axis line style={draw=none}, ytick style={draw=none},
+    yticklabel style={align=right}}}
+\begin{axis}[arms, name=sw, xmin=0, xmax=1.1, xtick={0,0.5,1}, xlabel={switch score (higher = follows)},
+    yticklabels={{none (ctrl)}, {repeat}, {counterfactual}, {splice}, {all three}, {all three\\+ v2 words}, {splice 50\%,\\repeat, v2}}]
   \draw[black!25, line width=1.2pt] (axis cs:0, 0) -- (axis cs:0.06, 0);
   \node[anchor=west, font=\scriptsize, text=black!80, inner sep=4pt] at (axis cs:0.06, 0) {0.06};
   \draw[black!25, line width=1.2pt] (axis cs:0, 1) -- (axis cs:0.09, 1);
@@ -179,13 +164,35 @@
   \node[anchor=west, font=\scriptsize, text=black!80, inner sep=4pt] at (axis cs:0.59, 3) {0.59};
   \draw[black!25, line width=1.2pt] (axis cs:0, 4) -- (axis cs:0.85, 4);
   \node[anchor=west, font=\scriptsize, text=black!80, inner sep=4pt] at (axis cs:0.85, 4) {0.85};
-  \addplot[altG, only marks, mark=*, mark size=2.4pt] table[x=switch, y expr=\coordindex, skip coords between index={4}{5}] {curves/section_arms.dat};
-  \addplot[tealT, only marks, mark=*, mark size=2.8pt] table[x=switch, y expr=\coordindex, skip coords between index={0}{4}] {curves/section_arms.dat};
+  \draw[black!25, line width=1.2pt] (axis cs:0, 5) -- (axis cs:0.94, 5);
+  \node[anchor=west, font=\scriptsize, text=black!80, inner sep=4pt] at (axis cs:0.94, 5) {0.94};
+  \draw[black!25, line width=1.2pt] (axis cs:0, 6) -- (axis cs:0.98, 6);
+  \node[anchor=west, font=\scriptsize, text=black!80, inner sep=4pt] at (axis cs:0.98, 6) {0.98};
+  \addplot[altG, only marks, mark=*, mark size=2.4pt] table[x=switch, y expr=\coordindex, skip coords between index={6}{7}] {curves/section_arms.dat};
+  \addplot[tealT, only marks, mark=*, mark size=2.8pt] table[x=switch, y expr=\coordindex, skip coords between index={0}{6}] {curves/section_arms.dat};
 \end{axis}
 \begin{axis}[arms, at={(sw.east)}, anchor=west, xshift=0.6cm, xmin=2.755, xmax=2.79, xtick={2.76,2.77,2.78,2.79},
     xlabel={held-out CE (lower = better)}, yticklabels={}]
-  \addplot[altG, only marks, mark=*, mark size=2.4pt] table[x=ce, y expr=\coordindex, skip coords between index={4}{5}] {curves/section_arms.dat};
-  \addplot[tealT, only marks, mark=*, mark size=2.8pt] table[x=ce, y expr=\coordindex, skip coords between index={0}{4}] {curves/section_arms.dat};
+  \addplot[altG, only marks, mark=*, mark size=2.4pt] table[x=ce, y expr=\coordindex, skip coords between index={6}{7}] {curves/section_arms.dat};
+  \addplot[tealT, only marks, mark=*, mark size=2.8pt] table[x=ce, y expr=\coordindex, skip coords between index={0}{6}] {curves/section_arms.dat};
+\end{axis}
+\end{tikzpicture}}
+
+\newsavebox{\curveGQA}
+\sbox{\curveGQA}{\begin{tikzpicture}
+\begin{axis}[cplot, clip=true, clip mode=individual, xmin=-300, xmax=1500, ymin=2.74, ymax=3.2,
+    xtick={-300,0,500,1000,1500}, ytick={2.8,2.9,3.0,3.1,3.2}, xlabel={training step (transfer at $-300$ to 0)},
+    ylabel={held-out CE (nats / note)}]
+  \fill[tealF!55] (axis cs:-300, 2.74) rectangle (axis cs:0, 3.2);
+  \node[anchor=north, font=\scriptsize, text=black!75] at (axis cs:-115, 3.19) {transfer};
+  \addplot[black!50, densely dotted, line width=1.1pt, mark=*, mark size=1.1pt] table {curves/gqa_full.dat};
+  \addplot[altG, dashed, line width=1.1pt, mark=*, mark size=1.1pt] table {curves/gqa_mean.dat};
+  \addplot[altG, line width=1.1pt, mark=*, mark size=1.1pt] table {curves/gqa_pca.dat};
+  \addplot[tealT, line width=1.6pt, mark=*, mark size=1.3pt] table {curves/gqa_lw.dat};
+  \node[anchor=west, font=\scriptsize, text=black!85] at (axis cs:1520, 2.762) {full attention 2.772};
+  \node[anchor=west, font=\scriptsize, text=tealT] at (axis cs:1520, 2.806) {merge + transfer 2.812};
+  \node[anchor=west, font=\scriptsize, text=black!85] at (axis cs:1520, 2.851) {merge only 2.841};
+  \node[anchor=west, font=\scriptsize, text=black!85] at (axis cs:1520, 2.972) {mean-pool 2.972};
 \end{axis}
 \end{tikzpicture}}
 
@@ -194,7 +201,7 @@
 \begin{tabularx}{\panelW}{@{\hspace{7pt}}>{\raggedright}p{2.2cm}>{\raggedright}X>{\raggedright}X>{\raggedright\arraybackslash}X@{\hspace{7pt}}}
 \rowcolor{tealF}\textcolor{tealT}{\textbf{Setting}} & \textcolor{tealT}{\textbf{Base pretraining (done)}} &
   \textcolor{tealT}{\textbf{Caption training, F1 run (planned)}} & \textcolor{tealT}{\textbf{Fine-tune on Ukrainian songs}}\\
-Start & from scratch & the base + the two new caption adapters; also planned, not drawn: a length-control input and infilling (roadmap 11--12) & the base (done, no captions); the F1 model with captions (F2, planned)\\
+Start & from scratch & the base with its attention made GQA (18 $\to$ 6 key / value heads: each group's K / V merged from the data, then 300 steps of per-layer attention transfer) + the two new caption adapters; also planned, not drawn: a length-control input (roadmap 11) & the base (done, no captions); the F1 model with captions (F2, planned)\\
 \rowcolor{rowG}Data & GigaMIDI \rcite{12} 0.4, Aria-MIDI \rcite{13} 0.3, Discover MIDI \rcite{19} 0.3; 8.3B notes (1.8 epochs on average; Aria $\approx$4.5) &
   captioned MIDI in 3 tiers: MidiCaps \rcite{14} / XMIDI \rcite{20} / GigaMIDI metadata, Aria-MIDI metadata, the rest with feature captions; 2.5--4B notes &
   5,358 songs transcribed from audio (section 9; 4,811 train, 547 val) 0.75 + GigaMIDI replay 0.25 against forgetting\\
@@ -204,8 +211,8 @@ Captions & none: only the instrument-set and density conditions &
 \rowcolor{rowG}Window & 2,048 notes ($\approx$1--4 min) & 2,048 notes + 16 file vectors + 4 per caption arrival (section start and every 64 notes): 2,212 positions (37 caption slots per window, fixed shape; $\approx$2,192 used) & 2,048 notes\\
 Batch & 65,536 notes per step (32 windows) & same & 24,576 notes per step (12 windows)\\
 \rowcolor{rowG}Optimizer, LR & Muon \rcite{10} for weight matrices, AdamW for the rest; one LR $10^{-3}$ (Muon updates scaled to AdamW's size) &
-  AdamW, LR $10^{-4}$, adapters $10\times$ (as in the 107M pilots) & 8-bit AdamW, LR $2\cdot10^{-4}$\\
-Schedule & WSD \rcite{11}: warmup, stable (constant LR), $1-\sqrt{\cdot}$ decay over the last 20\% & same; planned: section captions and the counterfactual loss weighted up in the decay (roadmap 13) & same\\
+  8-bit AdamW, LR $10^{-4}$, adapters $10\times$ (as in the 107M pilots) & 8-bit AdamW, LR $2\cdot10^{-4}$\\
+Schedule & WSD \rcite{11}: warmup, stable (constant LR), $1-\sqrt{\cdot}$ decay over the last 20\% & same; planned: captioned data weighted up in the decay (roadmap 13) & same\\
 \rowcolor{rowG}Steps & 126,582 ($\approx$41 h on one RTX 5090) & $\approx$38--61k & 1,500\\
 Precision & bf16 with fp8 matmuls, torch.compile & same & same\\
 \end{tabularx}}
@@ -247,9 +254,10 @@ compound token & one sequence position = one whole note & NLL & negative log-lik
 caption vector & a caption-adapter output placed in the sequence; no target of its own, but the last vector of a section caption predicts the next note & nats & units of NLL with the natural log\\
 null vectors & learned stand-ins for ``no caption'' & BCE & binary cross-entropy (two-class loss)\\
 teacher forcing & training feeds the true earlier values, not samples & CFG \rcite{9} & classifier-free guidance: push logits away from the caption-free prediction\\
-KV cache & keys and values of earlier positions kept between steps & WSD \rcite{11} & warmup, stable, decay: LR schedule with a short final cooldown\\
+KV cache & keys and values of earlier positions kept between steps (GQA: 6 heads per layer, a third of 18) & WSD \rcite{11} & warmup, stable, decay: LR schedule with a short final cooldown\\
 multi-hot & a 0/1 vector with a 1 for every instrument present & Muon \rcite{10} & optimizer that orthogonalises the update of each weight matrix\\
 stem & one separated part of a recording (vocals, bass, drums, ...) & Demucs \rcite{15} & neural source separation: a song into 6 stems\\
+& & GQA \rcite{21} & grouped-query attention: each group of 3 query heads shares one key / value head\\
 \end{tabular}}
 
 \newsavebox{\refBox}
@@ -276,17 +284,18 @@ stem & one separated part of a recording (vocals, bass, drums, ...) & Demucs \rc
 \rf{18}{EnCodec: High Fidelity Neural Audio Compression (2022)}{2210.13438}
 {[19]} & Discover MIDI Dataset, \href{https://huggingface.co/datasets/projectlosangeles/Discover-MIDI-Dataset}{\texttt{Hugging Face dataset}}\\
 \rf{20}{XMusic: the XMIDI dataset (2025)}{2501.08809}
+\rf{21}{GQA: multi-query models from multi-head checkpoints (2023)}{2305.13245}
 \end{tabular}}
 
 \begin{tikzpicture}
 
 %% ================= title + status =================
-\node[font=\fontsize{20}{22}\selectfont\bfseries, text=tealT] at (1.8, 19.75) {Captioned music model (477M)};
-\node[font=\footnotesize, text=black!85] at (1.8, 19.1) {477M trainable parameters: trunk 446M, cascade heads 16M, two caption adapters 13M, embeddings 2M.
+\node[font=\fontsize{20}{22}\selectfont\bfseries, text=tealT] at (1.8, 19.75) {Captioned music model (427M)};
+\node[font=\footnotesize, text=black!85] at (1.8, 19.1) {427M trainable parameters: trunk 396M, cascade heads 16M, two caption adapters 13M, embeddings 2M.
   The LaBSE text encoder (471M) is frozen and not counted.};
-\node[font=\footnotesize\bfseries, text=tealT, align=center] at (1.8, 18.38) {Status: the music model without caption adapters (464M) is trained. The caption stage
-  of this layout (F1) is planned; caption results here come from 107M pilots.\\ F1 will also add a length-control input and
-  infilling (roadmap 11--12); they are not drawn here yet.};
+\node[font=\footnotesize\bfseries, text=tealT, align=center] at (1.8, 18.38) {Status: the music model without caption adapters (464M, full attention) is trained. The caption stage
+  of this layout (F1, with GQA) is planned; caption results here come from 107M pilots.\\ F1 will also add a length-control
+  input (roadmap 11), not drawn here yet; infilling (roadmap 12) comes in a later fine-tune.};
 \node[font=\scriptsize, text=black!75] at (1.8, 17.75) {How to read: numbers give the reading order; \textcolor{pinkL}{pink} = captions; grey boxes = linear layers
   and embedding tables; dashed frame = a module drawn open in place; dotted frame or box = a zoom (white panel) into the dotted part.};
 
@@ -333,7 +342,7 @@ stem & one separated part of a recording (vocals, bass, drums, ...) & Demucs \rc
 
 % transformer block
 \node[box, minimum width=26mm] (ln1) at (0, 4.5) {RMSNorm 1};
-\node[box, minimum width=36mm, minimum height=8mm] (att) at (0, 5.55) {Causal self-attention\\[-2pt] {\scriptsize 18 heads $\times$ 64, RoPE, QK-norm}};
+\node[box, minimum width=36mm, minimum height=8mm] (att) at (0, 5.55) {Causal self-attention\\[-2pt] {\scriptsize 18 query / 6 key-value heads (GQA)}\\[-3pt] {\scriptsize head size 64, RoPE, QK-norm}};
 \node[sum] (a1) at (0, 6.95) {$+$};
 \node[box, minimum width=26mm] (ln2) at (0, 8.1) {RMSNorm 2};
 \node[box, minimum width=36mm, minimum height=8mm] (ffn) at (0, 9.2) {SwiGLU feed-forward\\[-2pt] {\scriptsize $1152\to3072\to1152$}};
@@ -488,27 +497,28 @@ tempo tokens; the metre has to be read from the timing. 2,048 notes are about 1-
 Without these measures the model follows the first section's caption and then ignores later ones.\\[5pt]
 \textbf{1. Change-aware captions.} Each section caption names what changed since the section before
 (\capt{drums enter, louder}). Half of the training windows contain a section change.\\[5pt]
-\textbf{2. Spliced windows (25\% of windows).}\\[2pt]
+\textbf{2. Spliced windows (50\% of windows).}\\[2pt]
 \usebox{\spliceBox}\\[2pt]
 File A up to a section boundary, then a section of file B (dashed) with B's caption and no file caption: the caption
 contradicts the context and has to win.\\[5pt]
 \textbf{3. Caption repeated every 64 notes,} in training and in generation.\\[2pt]
 \usebox{\repeatBox}\\[2pt]
 The same 4 section vectors are inserted again, so the caption is never far back in the context.\\[5pt]
-\textbf{4. Counterfactual loss \rcite{8} + recognition head.}\\[2pt]
-\usebox{\cfBox}\\[2pt]
-NLL is measured on the first 32 notes of a changed section. The true caption must beat the previous one by
-0.05 nats (weight 1.0). A linear head on those notes' hidden states tells the true caption from the previous one
-(BCE, weight 0.1). Both are used in training only.\\[5pt]
+\textbf{4. Section words from section statistics.} Loudness, pace and register words use thresholds over sections, not
+whole files (\capt{loud} = the loudest 20\% of sections), and pace is split into rhythm (onsets per second) and texture
+(notes per onset), so a section caption does not push the music to extremes.\\[5pt]
 \textbf{5. Caption dropout $\to$ guidance.} File captions are replaced by null vectors 15\% of the time, section
 captions 20\%, so generation can use classifier-free guidance \rcite{9} with scale 2.\\[5pt]
-\textbf{Evidence so far} (107M pilot, 1,500 steps, one seed). Switch test: 6 prompt pairs A/B (e.g. soft / loud),
+\textbf{Evidence so far} (107M pilot, one seed). Switch test: 6 prompt pairs A/B (e.g. soft / loud),
 16 samples each, the section caption changes at note 1,024, guidance 2. The matching attribute (velocity, notes per
 second, register, drum or string share) is measured per 256 notes; the score is its change after the switch divided
 by its offset before it (0 = keeps the first style, 1 = a full flip; single prompts reach 1.5). The start model
-v2\_A0: 0.01. 1,500 more steps without measures 2--4 (control): \textbf{0.06}, held-out NLL 2.772; with all three:
-\textbf{0.85}, NLL 2.783; splice alone 0.59, counterfactual alone 0.13, repeat alone 0.09. Open cost: holding a
-caption overshoots (strings 15 notes per onset, 44\% of samples run away; the fix is being tested). No error bars yet.};
+v2\_A0: 0.01. 1,500 more steps without measures 2--4 (control): \textbf{0.06}, held-out NLL 2.772; splice alone 0.59,
+repeat alone 0.09. The recipe above (2,700 steps): \textbf{0.98}, NLL 2.757. Tested and not used: a counterfactual
+loss \rcite{8} (the true caption must beat the previous one by 0.05 nats on the changed section's first 32 notes):
+alone 0.13, with splice and repeat 0.85 (0.94 with the section words above), at 1.8$\times$ the step time (a second
+forward). Open cost: holding a caption still overshoots: asked for strings, 34\% of samples run away (6.8 notes
+per onset; 24\% and 2.0 with the counterfactual loss). No error bars yet.};
 \begin{scope}[on background layer]
   \draw[panel] (rec.south west) rectangle (rec.north east);
 \end{scope}
@@ -544,15 +554,36 @@ and again every 64 notes. Past 2,048 notes the window slides by a quarter.};
   Clean GigaMIDI validation every 2,000 steps (65,536 notes per step); constant LR, then the $1-\sqrt{\cdot}$ cooldown in the
   last 20\%. One run on one RTX 5090, $\approx$41 h.};
 \node[anchor=north west, text width=7.4cm, font=\scriptsize, text=black!85, align=left, inner sep=10pt] (cv3) at (cv2.north east) {%
-  {\footnotesize\bfseries Section-caption measures (107M pilot, 1,500 steps)}\\[3pt]
+  {\footnotesize\bfseries Section-caption measures (107M pilot, 1,500--2,700 steps)}\\[3pt]
   \usebox{\curveArms}\\[2pt]
-  Each row continues the same model (v2\_A0) for 1,500 steps with one measure, or all three. Switch score as in section 6;
+  Each row continues the same model (v2\_A0) for 1,500 steps with one measure or several; the last row runs 2,700 steps,
+  the wall time of ``all three'' (no second forward). v2 words: measure 4 of section 6. Switch score as in section 6;
   one seed, no error bars. \textcolor{tealT}{\textbf{Teal}} = the recipe in use.};
+\path let \p1 = (cv1.south), \p2 = (cv2.south), \p3 = (cv3.south), \n1 = {min(\y1, \y2, \y3)} in coordinate (C2) at (-11.4, \n1);
+\node[anchor=north west, text width=9.9cm, font=\scriptsize, text=black!85, align=left, inner sep=10pt] (cv4) at (C2) {%
+  {\footnotesize\bfseries GQA conversion (107M pilot, 12 $\to$ 4 key / value heads)}\\[3pt]
+  \usebox{\curveGQA}\\[2pt]
+  v2\_A0 converted, then 1,500 steps on the section recipe's data, LR $10^{-4}$, no section measures; the dotted line
+  is the same 1,500 steps without the conversion. Off the scale at the start: mean-pool 10.15, merge 3.86--3.88. One seed.};
+\node[anchor=north west, text width=13.6cm, font=\scriptsize, text=black!85, align=left, inner sep=10pt] (cv5) at (cv4.north east) {%
+  {\footnotesize\bfseries Why GQA \rcite{21}, and how a trained model is converted}\\[4pt]
+  \textbf{What it buys.} Each group of 3 query heads shares one key / value head: the K / V projections and the KV cache
+  shrink 3$\times$, so the 450M has 49.5M fewer parameters (464M $\to$ 415M without the caption adapters). Generation
+  reads less per note: the 107M decodes 1.03$\times$ faster at 1 row and 2.28$\times$ at 64 rows (laptop GPU, bf16); on the
+  Raspberry Pi (int4 weights, int8 cache) the estimate from bytes read per note is $\approx$1.3$\times$ at 1 row and
+  $\approx$2.1$\times$ for 4 candidates with guidance.\\[4pt]
+  \textbf{Merge.} Mean-pooling a group's K / V weights starts at CE 10.15. Instead, each group's value heads are merged
+  by a PCA of their outputs weighted by the output projection, and the key heads per RoPE rotation pair by a rank-1
+  complex merge weighted by the query energy, so RoPE stays exact. Measured on 16 batches of the model's own inputs.\\[4pt]
+  \textbf{Transfer.} 300 steps in which only the attention layers train, each to reproduce its own full-attention output
+  (relative MSE) on the original layer inputs, LR $10^{-3}$; the rest of the model is frozen.\\[4pt]
+  \textbf{Result.} After 1,500 steps: mean-pool $+0.200$ vs full attention, merge only $+0.069$, merge + transfer
+  $+0.040$ and still closing. F1 converts the 450M the same way (18 $\to$ 6 heads) and trains $\approx$30$\times$ longer.};
 \begin{scope}[on background layer]
-  \path let \p1 = (cv1.south), \p2 = (cv2.south), \p3 = (cv3.south), \n1 = {min(\y1, \y2, \y3)} in
+  \path let \p1 = (cv4.south), \p2 = (cv5.south), \n1 = {min(\y1, \y2)} in
     [panel] (C) rectangle (R |- 0, \n1);
 \end{scope}
-\path let \p1 = (cv1.south), \p2 = (cv2.south), \p3 = (cv3.south), \n1 = {min(\y1, \y2, \y3)} in coordinate (Cs) at (-11.4, \n1);
+\path let \p1 = (cv4.south), \p2 = (cv5.south), \n1 = {min(\y1, \y2)} in coordinate (Cs) at (-11.4, \n1);
 \node[ptitle] at (C) {\sect{7}{Why these choices: training curves (teal = what the model uses)}};
 
 \coordinate (B) at ($(Cs)+(0, -1.0)$);

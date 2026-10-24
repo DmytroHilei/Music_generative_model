@@ -22,6 +22,7 @@ import torch
 from torch.nn.attention import SDPBackend, sdpa_kernel
 
 from musicar.training.fp8 import convert_fp8, refresh_fp8_weights
+from musicar.training.profile import kernel_report
 from musicar.model.gpt import GPT, MusicConfig
 
 BACKENDS = {
@@ -147,24 +148,7 @@ def bench(args, micro, compiled, attn, fp8, profile=False, act_ckpt=0, linear_at
                 step()
                 torch.cuda.synchronize()
             torch.cuda.profiler.stop()
-            events = pr.key_averages()
-            total = sum(e.device_time_total for e in events)
-            groups = {}
-            for e in events:
-                n = e.key.lower()
-                g = ('gemm' if any(k in n for k in ('gemm', 'cutlass', 'sm90', 'sm100', 'sm120', 'xmma', 'cublas'))
-                     else 'attention' if any(k in n for k in ('flash', 'fmha', 'attention', 'cudnn'))
-                     else 'cross-entropy/softmax' if any(k in n for k in ('softmax', 'nll', 'log_softmax', 'cross'))
-                     else 'fp8 scaling/casts' if any(k in n for k in ('amax', 'float8', 'fp8', 'e4m3', 'to_copy'))
-                     else 'layernorm' if 'norm' in n else 'optimizer' if 'adam' in n or 'foreach' in n
-                     else 'elementwise/other')
-                groups[g] = groups.get(g, 0) + e.device_time_total
-            print('  time by kernel group:')
-            for g, t_ in sorted(groups.items(), key=lambda x: -x[1]):
-                print(f'    {g:<24}{100 * t_ / total:6.1f}%')
-            print('  top kernels:')
-            for e in sorted(events, key=lambda e: -e.device_time_total)[:20]:
-                print(f'    {100 * e.device_time_total / total:5.1f}%  {e.count:>5}x  {e.key[:95]}')
+            print(kernel_report(pr.key_averages()))
         torch.cuda.reset_peak_memory_stats()
         t = time.perf_counter()
         for _ in range(args.steps):

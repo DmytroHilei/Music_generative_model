@@ -423,6 +423,81 @@ def train_sections(s):
     return f'{changes[0]} section changes in multi_train' if changes else ''
 
 
+def f1_train(s, name, init_ckpt, *overlays, check=True, **kw):
+    """config/f1/f1.py (+ overlays) from init_ckpt on the synthetic stores, 32-note sections (caption repeated every 8
+    notes, a quarter as in F1), GQA into 1 KV head; check=False: no val-loss check (a transfer stage trains on another
+    loss)."""
+    w = s.work
+    config = ['config/f1/f1.py', *overlays]
+    kw = dict(init_ckpt=init_ckpt, csv_path=f'store:{w}/multi#labeled,store:{w}/syn#labeled,store:{w}/multi#unlabeled',
+              val_csv_path=f'store:{w}/multi#labeled', val2_csv_path=f'store:{w}/multi#unlabeled', val_extra='',
+              captions=w / 'labels', section_len=32, section_repeat=8, n_kv_head=1, gqa_calib_batches=2, **kw)
+    if check:
+        return s.train(name, config=config, **kw)
+    over = {**TINY, 'out_dir': w / name, 'cache_dir': w, **kw}
+    return s.run([PY, 'train.py', *config, *(f'--{k}={v}' for k, v in over.items())])
+
+
+def f1_checks(out, s, name):
+    missing = [m for m in ('AdamW8bit', 'length tables:', 'text gain', 'section changes') if m not in out]
+    if missing:
+        raise Fail(f'not in the output: {missing}')
+    s.generate(name, s.work / name, '--text', 'a short loud piece with drums', '--cfg-scale', 2, '--length-seconds', 5,
+               '--eos-ramp', 1, '--length-stop', 1.5)
+    losses = val_losses(out)
+    return f'val {losses[0][1]:.3f} -> {losses[-1][1]:.3f}'
+
+
+@test('train-f1', gpu=True, needs=('train-recipe',))
+def train_f1(s):
+    """config/f1/f1.py from train-recipe's weights (the tiny long_450m): T2 text prefix, change-aware section captions
+    with splice + repeat and attributes v2, the length input v2 with length words, GQA by the pca merge, 8-bit AdamW
+    with the length tables' group, bf16 snapshots every 3 steps; a resume of its ckpt.pt (8-bit AdamW states) to step
+    9; then generate.py with a caption, guidance and a length."""
+    out = f1_train(s, 'train-f1', s.work / 'train-recipe' / 'model_bf16.pt', save_every=3, ckpt_interval_min=0.01)
+    if 'gqa_init pca: 2 layers merged' not in out:
+        raise Fail('no pca merge in the output')
+    if not (s.work / 'train-f1' / 'model_bf16_it3.pt').exists():
+        raise Fail('no snapshot model_bf16_it3.pt (save_every)')
+    res = f1_train(s, 'train-f1', None, check=False, init_from='resume', max_iters=9, lr_decay_iters=9,
+                   save_every=3, ckpt_interval_min=0.01)
+    if 'resume: loading' not in res or 'step 8:' not in res or ckpt_iter(s.work / 'train-f1' / 'ckpt.pt') != 9:
+        raise Fail('no resume of the 8-bit AdamW ckpt.pt to step 9')
+    return f1_checks(out, s, 'train-f1')
+
+
+@test('train-f1-lw', gpu=True, needs=('train-recipe',))
+def train_f1_lw(s):
+    """The GQA 'lw' path of F1: config/f1/f1_gqa_s1.py (pca merge + per-layer attention transfer, eager) from
+    train-recipe's weights, then config/f1/f1.py from its ckpt.pt (already 1 KV head: no merge again)."""
+    s1 = f1_train(s, 'train-f1-s1', s.work / 'train-recipe' / 'model_bf16.pt', 'config/f1/f1_gqa_s1.py', check=False,
+                  ckpt_interval_min=0.01)
+    if 'gqa_init pca: 2 layers merged' not in s1:
+        raise Fail('no pca merge in stage 1')
+    transfer = [float(x) for x in re.findall(r'step [1-9]\d*: train loss ([\d.]+)', s1)]
+    if not transfer or not all(math.isfinite(x) for x in transfer):
+        raise Fail(f'stage-1 train (transfer) losses {transfer}')
+    out = f1_train(s, 'train-f1-lw', s.work / 'train-f1-s1' / 'ckpt.pt', save_every=0)
+    if 'mean-pooled' in out or 'layers merged' in out:
+        raise Fail('F1 merged the converted checkpoint again')
+    return f1_checks(out, s, 'train-f1-lw')
+
+
+@test('profile-f1', gpu=True, needs=('train-recipe',))
+def profile_f1(s):
+    """train.py --profile_steps on config/f1/f1.py: steps timed as they run, per phase (forward, data + captions,
+    backward, clip, optimizer), one step under torch.profiler; out_dir/profile.txt with the kernel and op tables."""
+    out_dir = s.work / 'profile-f1'
+    f1_train(s, 'profile-f1', s.work / 'train-recipe' / 'model_bf16.pt', check=False, profile_steps=2, profile_wait=1,
+             max_iters=100, lr_decay_iters=100)
+    text = (out_dir / 'profile.txt').read_text() if (out_dir / 'profile.txt').exists() else ''
+    missing = [m for m in ('notes/s', 'per phase', 'forward', 'data', 'optimizer', 'CUDA kernel time', 'self CPU')
+               if m not in text]
+    if missing:
+        raise Fail(f'not in profile.txt: {missing}')
+    return re.search(r'notes as they run: (.*?),', text).group(1)
+
+
 @test('resume', gpu=True, needs=('train-gpu',))
 def resume(s):
     """train-gpu resumed from its ckpt.pt to step 9 (checkpoint save / load)."""

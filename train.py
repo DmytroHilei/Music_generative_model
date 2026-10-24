@@ -27,7 +27,7 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from musicar.model.checkpoint import (ARCH_KEYS, bf16_cpu_state, load_expanded, merge_model_args, save_atomic,
-                                strip_compile_prefix)
+                                strip_compile_prefix, torch_load)
 from musicar.data.loader import (NoteWindowDataset, collate_windows, load_styles, progress_level, remain_level,
                                  source_name, val_loader, window_conditions)
 from musicar.eval.val_loss import estimate_val_loss, summed_ce
@@ -35,6 +35,7 @@ from musicar.training.fp8 import convert_fp8, fp8_supported, refresh_fp8_weights
 from musicar.training.memory import spill_to_cpu
 from musicar.model.gpt import MusicConfig, GPT, STREAM_ORDER
 from musicar.training.optim import build_optimizer, cooldown_start, freeze_params, lr_at, set_lr
+from musicar.training.profile import Phases, kernel_report
 
 # -----------------------------------------------------------------------------
 # I/O
@@ -55,6 +56,8 @@ fake_quant = ''           # eval only: musicar.model.quant spec (e.g. 'w4g32-a8-
 always_save_checkpoint = False
 save_iters = ''            # e.g. '25,50,100': also keep bf16 weights at these iterations (out_dir/model_bf16_it<N>.pt),
                            # for judging fine-tune checkpoints by generation, not only by val CE
+save_every = 0             # > 0: also keep those bf16 weights every this many iterations (stable-phase snapshots to
+                           # average, one per pass over the captioned tier; max_iters comes from the budget)
 checkpoint_format = 'full'  # 'full' = fp32 weights + optimizer (resumable), 'bf16' = bf16 weights only (~6x smaller,
                             # not resumable; fine for generation and for init_from='finetune')
 init_from = 'scratch'     # 'scratch' | 'resume' | 'finetune'
@@ -62,6 +65,11 @@ ckpt_interval_min = 0.0    # >0: also write a full resumable out_dir/ckpt.pt eve
 max_minutes = 0.0          # >0: after this many minutes of the loop, save the resumable out_dir/ckpt.pt and exit 0
                            # (a run in chunks: the same command with --init_from=resume continues it)
 gpu_duty = 1.0             # < 1: after each step, idle so the GPU works this share of the time (quieter, slower)
+profile_steps = 0          # > 0: profile run (no evals, no saves, exits after): after profile_wait steps (compile),
+profile_wait = 3           # profile_steps steps timed as they run, profile_steps more timed per phase (synchronized:
+profile_trace = False      # forward, data + captions, backward, clip, optimizer), then one step under torch.profiler
+                           # inside an nsys capture range (nsys profile --capture-range=cudaProfilerApi, NVTX ranges
+                           # per phase); report in out_dir/profile.txt; profile_trace: + out_dir/profile_trace.json
 save_pre_cooldown = True   # wsd: full resumable state to out_dir/pre_cooldown.pt just before the cooldown starts, so a
                            # later stage can continue the constant-LR phase on more data and do its own cooldown
 init_ckpt = 'checkpoints/ckpt.pt'  # used by 'finetune'
@@ -305,7 +313,7 @@ if init_from in ('resume', 'finetune'):
     print(f"{init_from}: loading {ckpt_path}")
     # to CPU: the weights are copied into the model below, and a GPU copy would stay alive through `state_dict`
     # (~0.9 GB for the 450M bf16 base, the margin between fitting and OOM at micro 1 on the 8 GB laptop)
-    checkpoint = torch.load(ckpt_path, map_location='cpu')
+    checkpoint = torch_load(ckpt_path)
     model_args = merge_model_args(checkpoint['model_args'], model_args, init_from == 'finetune', block_size)
 else:
     print("Initializing a new model from scratch")
@@ -612,6 +620,7 @@ if teacher_state is not None and gqa_init == 'pca':
 train_sums, train_n = {}, 0  # running train metrics since the last eval (with dropout + augmentation)
 oom_events = 0  # CUDA OOMs survived by retrying the step
 stop_signal = []  # SIGTERM / SIGINT: finish the current step, save a resumable checkpoint, exit 143
+phases = Phases()  # profile run: NVTX ranges / timers per phase of the step (off otherwise)
 
 
 def request_stop(signum, frame):
@@ -624,14 +633,16 @@ def accumulate(X, Y, net):
     """Forward + backward over gradient_accumulation_steps micro-batches; returns the next batch and the metrics."""
     sums = {}
     for micro_step in range(gradient_accumulation_steps):
-        with ctx:
+        with phases('forward'), ctx:
             parts, loss = net(*X[0], **X[1], targets=Y)
         # kept as GPU tensors to avoid a CPU sync per micro step
         sums['loss'] = sums.get('loss', 0.0) + loss.detach() / gradient_accumulation_steps
         for name, v in parts.items():
             sums[f'ce/{name}'] = sums.get(f'ce/{name}', 0.0) + v / gradient_accumulation_steps
-        X, Y = next(batches)
-        scaler.scale(loss / gradient_accumulation_steps).backward()
+        with phases('data'):
+            X, Y = next(batches)
+        with phases('backward'):
+            scaler.scale(loss / gradient_accumulation_steps).backward()
     return X, Y, sums
 
 
@@ -642,16 +653,62 @@ if ckpt_interval_min > 0:
 t0 = time.time()
 t_start = last_resumable = t0
 
+
+
+def profile_window(k):
+    """Profile run, before step k after the start: timed steps, then phase timers, then the profiler step; writes
+    out_dir/profile.txt and exits after it."""
+    global prof, t_prof
+    n, report = profile_steps, profile_window.report
+    if k in (profile_wait, profile_wait + n):
+        torch.cuda.synchronize()
+        if k == profile_wait + n:
+            ms = 1000 * (time.time() - t_prof) / n
+            report.append(f"profile: {n} steps of {tokens_per_iter:,} notes as they run: {ms:,.0f} ms per step, "
+                          f"{tokens_per_iter / ms * 1000:,.0f} notes/s, peak {torch.cuda.max_memory_allocated() / 2**30:.2f} GB")
+            phases.mode = 'time'
+        torch.cuda.reset_peak_memory_stats()
+        t_prof = time.time()
+    elif k == profile_wait + 2 * n:
+        ms = 1000 * (time.time() - t_prof) / n
+        report += [f"  per phase ({n} steps, synchronized: {ms:,.0f} ms per step):", phases.table(n)]
+        tqdm.write('\n'.join(report))
+        from torch.profiler import ProfilerActivity, profile
+        phases.mode = 'trace'
+        prof = profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA])
+        torch.cuda.profiler.start()  # capture range for nsys --capture-range=cudaProfilerApi
+        prof.__enter__()
+    elif k == profile_wait + 2 * n + 1:
+        torch.cuda.synchronize()
+        prof.__exit__(None, None, None)
+        torch.cuda.profiler.stop()
+        events = prof.key_averages()
+        report += [kernel_report(events, top=30), '  top ops by self CPU time (one step):',
+                   events.table(sort_by='self_cpu_time_total', row_limit=25)]
+        os.makedirs(out_dir, exist_ok=True)
+        with open(os.path.join(out_dir, 'profile.txt'), 'w') as f:
+            f.write('\n'.join(report) + '\n')
+        if profile_trace:
+            prof.export_chrome_trace(os.path.join(out_dir, 'profile_trace.json'))
+        tqdm.write(report[-3] + f"\nprofile written to {out_dir}/profile.txt")
+        sys.exit(0)
+
+
+profile_window.report = []
+profile_start = iter_num
+assert not profile_steps or device_type == 'cuda', 'profile_steps: CUDA only'
 pbar = tqdm(range(iter_num, max_iters), desc="Training", initial=iter_num, total=max_iters)
 for iter_num in pbar:
     lr = lr_at(iter_num, lr_schedule, learning_rate, min_lr, warmup_iters, lr_decay_iters, cooldown_frac)
     set_lr(optimizer, lr)
+    if profile_steps:
+        profile_window(iter_num - profile_start)
 
     style_res = run_style_eval(iter_num)  # on its own interval, independent of the val evaluation
     if wandb_log and style_res:
         wandb.log({"iter": iter_num,
                    **{f"styles/{mode}/{k}": v for mode, m in style_res.items() for k, v in m.items()}})
-    if iter_num % eval_interval == 0 or iter_num == max_iters - 1:
+    if not profile_steps and (iter_num % eval_interval == 0 or iter_num == max_iters - 1):
         val = val_loss(val_loader_main)
         val2 = val_loss(val2_loader) if val2_loader else {}
         extra = {name: val_loss(loader) for name, loader in extra_loaders.items()}
@@ -707,7 +764,7 @@ for iter_num in pbar:
             best_val_loss = val['loss']
             if iter_num > 0:
                 save_best(iter_num)
-    if iter_num in save_iter_set:
+    if iter_num in save_iter_set or (save_every > 0 and iter_num > 0 and iter_num % save_every == 0):
         os.makedirs(out_dir, exist_ok=True)
         torch.save({'model_args': model_args, 'iter_num': iter_num, 'config': config,
                     'model': bf16_cpu_state(raw_model)},
@@ -744,14 +801,16 @@ for iter_num in pbar:
     for k, v in sums.items():
         train_sums[k] = train_sums.get(k, 0.0) + v
     train_n += 1
-    if grad_clip != 0.0:
-        scaler.unscale_(optimizer)
-        torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
-    scaler.step(optimizer)
-    scaler.update()
-    optimizer.zero_grad(set_to_none=True)
-    if fp8 and fp8_cache_weights:
-        refresh_fp8_weights(raw_model)  # the cached fp8 weights must follow every update
+    with phases('clip'):
+        if grad_clip != 0.0:
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+    with phases('optimizer'):
+        scaler.step(optimizer)
+        scaler.update()
+        optimizer.zero_grad(set_to_none=True)
+        if fp8 and fp8_cache_weights:
+            refresh_fp8_weights(raw_model)  # the cached fp8 weights must follow every update
 
     out_of_time = max_minutes > 0 and time.time() - t_start > 60 * max_minutes and iter_num < max_iters - 1
     if ckpt_interval_min > 0 and (time.time() - last_resumable > 60 * ckpt_interval_min or iter_num == max_iters - 1

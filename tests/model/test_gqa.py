@@ -89,10 +89,21 @@ def test_pca_merge_beats_mean_pooling():
     assert e_pca < 0.8 * e_mean, (e_pca, e_mean)
 
 
-def gqa_pair():
+def qk_gains(module, seed=4):
+    """Non-trivial QK-norm gains (a trained model's are not all ones)."""
+    g = torch.Generator().manual_seed(seed)
+    with torch.no_grad():
+        for m in module.modules():
+            if isinstance(m, CausalSelfAttention) and m.q_norm is not None:
+                m.q_norm.weight.copy_(0.5 + torch.rand(HS, generator=g))
+                m.k_norm.weight.copy_(0.5 + torch.rand(HS, generator=g))
+    return module
+
+
+def gqa_pair(**kw):
     """A full-attention tiny model and its GQA version loaded the way train.py's finetune does (mean-pool)."""
-    base = tiny(n_head=H, n_embd=C, pos_emb='rope', n_layer=2)
-    conv = tiny(n_head=H, n_embd=C, pos_emb='rope', n_layer=2, n_kv_head=KV)
+    base = qk_gains(tiny(n_head=H, n_embd=C, pos_emb='rope', n_layer=2, **kw))
+    conv = tiny(n_head=H, n_embd=C, pos_emb='rope', n_layer=2, n_kv_head=KV, **kw)
     state = {k: v.clone() for k, v in base.state_dict().items()}
     teachers = teacher_weights(state)
     load_expanded(conv, state)
@@ -132,10 +143,55 @@ def test_teacher_stream_and_transfer_loss():
         assert torch.allclose(conv.encode(*streams), h_own, atol=1e-5)
 
 
+def test_pca_merge_with_qk_norm_beats_mean_pooling():
+    """QK-norm attention (non-trivial gains): the merge in the normalized space, back through the gains, leaves a
+    smaller output error than the mean-pool."""
+    config = tiny(n_head=H, n_embd=C, pos_emb='rope', qk_norm=True).config
+    teacher, student = attn_pair(config, KV)
+    qk_gains(teacher)
+    mix = torch.randn(C, C, generator=torch.Generator().manual_seed(5)) * torch.linspace(1.5, 0.05, C)[:, None]
+    x = inputs(n=16, mix=mix)
+    cov = (x.reshape(-1, C).T @ x.reshape(-1, C)).double() / (16 * 24)
+    rope = rope_tables(torch.arange(24), HS, 10000.0)
+    from musicar.model.checkpoint import pool_kv_heads
+    sd = {k: v.clone() for k, v in teacher.state_dict().items()}
+    sd['c_attn.weight'] = pool_kv_heads(sd['c_attn.weight'], C, HS, KV)
+    mean = CausalSelfAttention(dataclasses.replace(config, n_kv_head=KV)).eval()
+    mean.load_state_dict(sd)
+    w_attn, w_proj = pca_merge(teacher.c_attn.weight, teacher.c_proj.weight, cov, H, KV,
+                               q_gain=teacher.q_norm.weight, k_gain=teacher.k_norm.weight)
+    with torch.no_grad():
+        student.load_state_dict(sd)
+        student.c_attn.weight.copy_(w_attn)
+        student.c_proj.weight.copy_(w_proj)
+    test_x = inputs(n=8, seed=9, mix=mix)
+    e_mean, e_pca = rel_err(mean, teacher, test_x, rope), rel_err(student, teacher, test_x, rope)
+    assert e_pca < 0.8 * e_mean, (e_pca, e_mean)
+
+
+def test_qk_norm_teacher_stream_is_the_full_model():
+    """QK-norm model: the teachers carry the checkpoint's q_norm / k_norm, so in training the converted model
+    computes the full-attention model's states exactly."""
+    base, conv, teachers = gqa_pair(qk_norm=True)
+    assert all(set(norms) == {'q_norm.weight', 'k_norm.weight'} for _, _, norms in teachers.values())
+    streams, _, _ = batch(T=24)
+    with torch.no_grad():
+        h_base = base.encode(*streams)
+    conv.attach_attn_teachers(teachers)
+    conv.train()
+    with torch.no_grad():
+        assert torch.allclose(conv.encode(*streams), h_base, atol=1e-5)
+
+
 def test_pca_init_from_moments_lowers_the_transfer_loss():
     """train.py's gqa_init='pca': moments through the teacher stream, then apply_pca_init; the transfer loss of the
-    merged layers is below the mean-pool's."""
-    _, conv, teachers = gqa_pair()
+    merged layers is below the mean-pool's (with and without QK-norm)."""
+    for kw in ({}, dict(qk_norm=True)):
+        pca_init_vs_mean(**kw)
+
+
+def pca_init_vs_mean(**kw):
+    _, conv, teachers = gqa_pair(**kw)
     conv.attach_attn_teachers(teachers)
     conv.train()
     streams, _, targets = batch(T=24, seed=7)

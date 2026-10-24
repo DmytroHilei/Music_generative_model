@@ -12,11 +12,11 @@ from pathlib import Path
 
 import torch
 
-from musicar.model.checkpoint import strip_compile_prefix
+from musicar.model.checkpoint import strip_compile_prefix, torch_load
 
 src = Path(sys.argv[1])
 dst = Path(sys.argv[2]) if len(sys.argv) > 2 else src.with_name('model_bf16.pt')
-ckpt = torch.load(src, map_location='cpu')
+ckpt = torch_load(src)
 state = {k: v.to(torch.bfloat16) if v.is_floating_point() else v
          for k, v in strip_compile_prefix(ckpt['model']).items()}
 torch.save({'model': state, 'model_args': ckpt['model_args'], 'config': ckpt.get('config', {}),

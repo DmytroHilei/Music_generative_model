@@ -78,7 +78,7 @@ def test_length_tables_group():
     other group; 1 = the old grouping (decayed with the other matrices)."""
     m = tiny(pos_emb='rope', n_remain=33, n_progress=17)
     tables = {id(m.transformer['cond_remain'].weight), id(m.transformer['cond_progress'].weight)}
-    for name in ('muon', 'adamw'):
+    for name in ('muon', 'adamw', 'adamw8bit'):
         opt = build_optimizer(name, m, 0.1, 1e-3, (0.9, 0.95), 'cpu', remain_lr_mult=10.0)
         groups = [g for g in opt.param_groups if any(id(p) in tables for p in g['params'])]
         assert len(groups) == 1 and {id(p) for p in groups[0]['params']} == tables, name

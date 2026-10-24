@@ -270,15 +270,16 @@ def build_muon_optimizer(model, weight_decay, learning_rate, betas, device_type,
     return CombinedOptimizer(muon, adamw)
 
 
-def build_adamw8bit(model, weight_decay, learning_rate, betas, style_lr_mult=1.0, text_lr_mult=1.0):
+def build_adamw8bit(model, weight_decay, learning_rate, betas, style_lr_mult=1.0, text_lr_mult=1.0,
+                    remain_lr_mult=1.0):
     """torchao AdamW with 8-bit (block-quantized) moments for every trainable parameter: ~2 bytes of state per
     parameter instead of 8, so a full fine-tune of the 450M fits in 8 GB. Groups as in build_adamw (no
     weight decay on 1D tensors and the cascade's cond_emb), plus the style table in its own group (lr x
-    style_lr_mult, no weight decay) as in build_muon_optimizer."""
+    style_lr_mult, no weight decay) as in build_muon_optimizer, and the length tables' group (length_group)."""
     from torchao.optim import AdamW8bit
     decay, nodecay, style = [], [], []
     for n, p in model.named_parameters():
-        if not p.requires_grad or n.startswith(TEXT_PREFIX):
+        if not p.requires_grad or _own_group(n, remain_lr_mult):
             continue
         if n.startswith('transformer.style.'):
             style.append(p)
@@ -289,7 +290,7 @@ def build_adamw8bit(model, weight_decay, learning_rate, betas, style_lr_mult=1.0
     groups = [{'params': decay, 'weight_decay': weight_decay}, {'params': nodecay, 'weight_decay': 0.0}]
     if style:
         groups.append({'params': style, 'weight_decay': 0.0, 'lr_mult': style_lr_mult})
-    groups = [g for g in groups if g['params']] + text_group(model, text_lr_mult)
+    groups = [g for g in groups if g['params']] + text_group(model, text_lr_mult) + length_group(model, remain_lr_mult)
     print(f"AdamW8bit: {sum(p.numel() for g in groups for p in g['params']):,} params"
           + (f" | style table lr x{style_lr_mult:g}" if style else ""))
     return AdamW8bit(groups, lr=learning_rate, betas=betas)
@@ -300,11 +301,10 @@ def build_optimizer(name, model, weight_decay, learning_rate, betas, device_type
                     muon_ns='quintic', muon_normuon=False, muon_cautious=False, muon_rms=False, remain_lr_mult=1.0):
     """name: 'adamw' | 'adamw8bit' | 'muon' (Muon for the transformer-block matrices, AdamW for the rest).
     linear_lr_mult: AdamW only (build_adamw); muon_ns / muon_normuon / muon_cautious / muon_rms: Muon only (Muon
-    variants); remain_lr_mult: the length tables' group (length_group; not adamw8bit)."""
+    variants); remain_lr_mult: the length tables' group (length_group)."""
     assert name == 'muon' or (muon_ns, muon_normuon, muon_cautious, muon_rms) == ('quintic', False, False, False), \
         'muon_ns / muon_normuon / muon_cautious / muon_rms: Muon only'
     assert linear_lr_mult == 1.0 or name == 'adamw', 'linear_lr_mult: AdamW only'
-    assert remain_lr_mult == 1.0 or name != 'adamw8bit', 'remain_lr_mult: muon / adamw'
     if name == 'muon':
         return build_muon_optimizer(model, weight_decay, learning_rate, betas, device_type, momentum=muon_momentum,
                                     style_lr_mult=style_lr_mult, compile_ns=compile_ns,
@@ -313,7 +313,7 @@ def build_optimizer(name, model, weight_decay, learning_rate, betas, device_type
                                     remain_lr_mult=remain_lr_mult)
     if name == 'adamw8bit':
         return build_adamw8bit(model, weight_decay, learning_rate, betas, style_lr_mult=style_lr_mult,
-                               text_lr_mult=text_lr_mult)
+                               text_lr_mult=text_lr_mult, remain_lr_mult=remain_lr_mult)
     assert name == 'adamw', f"unknown optimizer {name!r}"
     return build_adamw(model, weight_decay, learning_rate, betas, device_type, text_lr_mult=text_lr_mult,
                        linear_lr_mult=linear_lr_mult, remain_lr_mult=remain_lr_mult)
