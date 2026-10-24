@@ -568,6 +568,31 @@ def generate_cpu(s):
     s.generate('cpu', s.work / 'train-cpu', '--device', 'cpu')
 
 
+@test('generate-retrieve-cpu', needs=('train-cpu',))
+def generate_retrieve_cpu(s):
+    """generate.py --retrieve (LaBSE caption index of the synthetic multi_train store, built and cached in labels/)
+    with --best-of 2 and the repetition penalty (pitch-class chords) on the CPU from train-cpu: 4 candidates on
+    32-note openings of the best-matching files, the best 2 by caption match saved; then a second run from the
+    cached index."""
+    flags = ('--device', 'cpu', '--retrieve', s.work / 'multi_train', '--labels-dir', s.work / 'labels',
+             '--text', 'a loud song with piano, bass and drums', '--best-of', 2, '--prompt-notes', 32,
+             '--retrieve-min-notes', 256, '--dry-multiplier', 3, '--dry-key', 'pitch_class')
+    d = s.work / 'gen' / 'retrieve'
+    out = s.run([PY, 'generate.py', '--checkpoint', s.work / 'train-cpu', '--output', d / 'g.mid', '--num-samples', 2,
+                 '--max-new-tokens', 64, '--no-mp3', '--seed', 1, *flags])
+    for want in ('Caption checks: piano, bass; drums; dynamics high', 'Retrieval from multi_train', 'Best 2 of 4',
+                 'Prompt for g_1.mid: notes 0-32 of multi_train file #', 'g_2.mid: score'):
+        if want not in out:
+            raise Fail(f'not in the output: {want!r}')
+    if len(sorted(d.glob('g_*.mid'))) != 2 or not (s.work / 'labels' / 'multi_train.retrieval.npz').exists():
+        raise Fail('no 2 MIDI files or no cached index')
+    again = s.run([PY, 'generate.py', '--checkpoint', s.work / 'train-cpu', '--output', d / 'h.mid',
+                   '--max-new-tokens', 16, '--no-mp3', *flags])
+    if 'retrieval index' in again:
+        raise Fail('the index was rebuilt instead of loaded from labels/multi_train.retrieval.npz')
+    return 'best 2 of 4 saved, index cached'
+
+
 @test('finetune-cpu-f1', needs=('train-cpu',))
 def finetune_cpu_f1(s):
     """init_from=finetune from train-cpu on the CPU into the planned F1 additions: GQA (2 heads mean-pooled into 1 KV

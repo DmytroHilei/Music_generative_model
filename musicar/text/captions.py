@@ -182,6 +182,31 @@ class StoreCaptions:
             bits = np.unpackbits(self.features['programs'], axis=1, bitorder='little')[:, :129].astype(bool)
             self.instruments = bits
 
+    def genre_mood(self, i):
+        """(genre ids, mood / use ids) of file i from all its labels (MidiCaps, GigaMIDI styles, Aria genre, XMIDI, the
+        pseudo-labels when it has none of those), without the caption draws: what retrieval matches a query against."""
+        i = int(i)
+        row = self.labels.get(i, {})
+        genres, moods = set(), set()
+        mc = row.get('midicaps') or {}
+        genres |= {g for g in mc.get('genre') or [] if g in V.GENRE}
+        moods |= {m for m in mc.get('mood') or [] if m in V.MOOD}
+        gm = self.gm_ids.get(i) or {}
+        genres |= set(gm.get('genre', []))
+        moods |= set(gm.get('mood', [])) | set(gm.get('use', []))
+        if (row.get('aria') or {}).get('genre') in V.GENRE:
+            genres.add(row['aria']['genre'])
+        for emotion, genre in row.get('xmidi') or []:
+            moods |= {f'x_{emotion}'} & set(V.MOOD)
+            genres |= {genre} & set(V.GENRE)
+        if not (genres or moods) and self.pseudo is not None and i < len(self.pseudo['xmidi_mood_keep']):
+            if self.pseudo['xmidi_mood_keep'][i]:
+                moods |= {'p_' + self.pseudo_classes['xmidi_mood'][int(self.pseudo['xmidi_mood_pred'][i])]} & set(V.MOOD)
+            if self.pseudo['midicaps_genre_keep'][i]:
+                genres |= {self.pseudo_classes['midicaps_genre'][int(self.pseudo['midicaps_genre_pred'][i])]} & \
+                    set(V.GENRE)
+        return genres, moods
+
     def labeled(self, i):
         i = int(i)
         row = self.labels.get(i)

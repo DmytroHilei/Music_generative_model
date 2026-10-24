@@ -18,6 +18,9 @@ conditioning 'band' (the prompt's instrument set) or 'none'; --set overrides the
 --min-new: no end-of-piece before that many new notes. --density prompt: density condition = the prompt's level
 (default none). --target-nps prompt: the density controller tracks the prompt's notes/s.
 
+Text models: --captions JSON {'<part of artist - title>': {'en': ..., 'uk': ...}} gives each song a caption in
+--caption-lang (songs without one get none), with classifier-free guidance --cfg-scale.
+
 Score per sample = style_eval's row distance to its own song's real next --new-notes notes (instruments, out-of-band
 share, notes/s, top-instrument share, takeover, runaway; spreads from the real continuations of the same group),
 lower = closer; the mean per group is printed and written to <out-dir>/scores.json.
@@ -63,6 +66,19 @@ def store_arrays(store):
             np.memmap(f'{store}/programs.u8', dtype=np.uint8, mode='r', shape=(n,)))
 
 
+def song_captions(args, songs):
+    """--captions: each song's caption in --caption-lang (the first key found in its lower-case name), '' without."""
+    if not args.captions:
+        return [''] * len(songs)
+    table = {k.lower(): v for k, v in json.loads(Path(args.captions).read_text()).items()}
+    out = []
+    for song in songs:
+        name = song['name'].lower().replace('_', ' ')
+        hit = next((v for k, v in table.items() if k.replace('_', ' ') in name), None)
+        out.append(hit[args.caption_lang] if hit else '')
+    return out
+
+
 def main():
     ap = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     ap.add_argument('--checkpoint', default='checkpoints/long_450m_final')
@@ -89,6 +105,10 @@ def main():
     ap.add_argument('--out-dir', default='samples/multi_450m')
     ap.add_argument('--no-mp3', action='store_true', help='write MIDI only (scoring runs)')
     ap.add_argument('--device', default='cuda')
+    ap.add_argument('--captions', default='', help="text models: JSON {'<part of artist - title>': {'en': ..., 'uk': "
+                    "...}}, a caption per song")
+    ap.add_argument('--caption-lang', default='en', choices=['en', 'uk'])
+    ap.add_argument('--cfg-scale', type=float, default=1.0, help='guidance scale with --captions')
     ap.add_argument('--quant', default=None, help="fake quantization spec (musicar/model/quant.py, e.g. 'w4g32-a8-kv8'): "
                     "weights rounded in float32, then the usual bf16 run")
     args = ap.parse_args()
@@ -129,13 +149,22 @@ def main():
         if args.target_nps == 'prompt':  # same notes/s as window_conditions (BOS rows ignored, 0.02 s per bin)
             real = streams[0] < BOS_PITCH
             target = (real.sum(1) / ((streams[3] * real).sum(1) * 0.02).clamp(min=0.5)).tolist()
+        texts, text = song_captions(args, songs), None
+        if any(texts):
+            assert cfg.text_dim, f'{args.checkpoint} has no text input'
+            from musicar.text.encoder import TextEncoder
+            encoder = TextEncoder(device=dev)
+            text = encoder.encode(texts, tokens=bool(cfg.text_prefix))
+            del encoder
+            for song, t in zip(songs, texts):
+                print(f"  caption {song['name']}: {t or '-'}")
         torch.manual_seed(args.seed)
         with torch.no_grad():
             res = generate(model, *streams, max_new_tokens=args.new_notes, temperature=st['temperature'],
                            top_p=st['top_p'], dt_bias=st['dt_bias'], program=None, programs=prog,
                            return_programs=True, cond=cond, cuda_graph=False,
                            program_temperature=st.get('instrument_temperature'), min_new=min_new,
-                           target_nps=target)
+                           target_nps=target, text=text, cfg_scale=args.cfg_scale if text is not None else 1.0)
         print(f"\n{group}: settings of {style}: T {st['temperature']}, top-p {st['top_p']}, instrument T "
               f"{st.get('instrument_temperature')}, dt bias {st['dt_bias']}, cond {st['cond']}, min new "
               f"{min_new}, density {args.density}, target nps {args.target_nps}", flush=True)
@@ -160,7 +189,7 @@ def main():
                   f"{song['real']['instruments']}), out-of-band {m['out_of_band'] if m else 0:.0%} | prompt "
                   f"[{names(song['prompt_prog'])}] -> sample [{names(progs[p0:])}]", flush=True)
             rows_out.append(dict(song=song['name'], file=song['file'], dist=d, metrics=m, real=song['real'], cons=dc,
-                                 cons_metrics=c, cons_real=song.get('real_c')))
+                                 cons_metrics=c, cons_real=song.get('real_c'), caption=texts[r]))
             # the real song, as long as the sample
             off, tokens, programs = store_arrays(song['store'])
             a = off[song['file']]
@@ -171,7 +200,8 @@ def main():
         mean_c = float(np.mean(cs)) if cs else float('nan')
         print(f"  {group} mean distance {mean:.3f} over {len(rows_out)} songs, consistency C {mean_c:.3f} over "
               f"{len(cs)}", flush=True)
-        scores['groups'][group] = dict(settings=st, mean_dist=mean, mean_cons=mean_c, songs=rows_out)
+        scores['groups'][group] = dict(settings=st, mean_dist=mean, mean_cons=mean_c, songs=rows_out,
+                                       cfg_scale=args.cfg_scale if text is not None else 1.0)
     if len(scores['groups']) > 1:
         scores['mean_dist'] = float(np.mean([g['mean_dist'] for g in scores['groups'].values()]))
         print(f"\nmean over groups {scores['mean_dist']:.3f}")

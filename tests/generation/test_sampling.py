@@ -137,6 +137,12 @@ def test_programs():
     out = generate(m, *streams, max_new_tokens=40, program=None, programs=program, allowed_programs=allowed,
                    return_programs=True, temperature=1.0, **KW)
     assert set(out[4][:, 4:].unique().tolist()) <= set(allowed)
+    # with guidance the mask goes on after the mix (masked logits in both halves would give NaN)
+    m = tiny(n_programs=129, n_styles=4)
+    torch.nn.init.normal_(m.transformer['style'].weight)
+    out = generate(m, *streams, max_new_tokens=40, program=None, programs=program, allowed_programs=allowed,
+                   return_programs=True, temperature=1.0, style=2, cfg_scale=3.0, **KW)
+    assert set(out[4][:, 4:].unique().tolist()) <= set(allowed)
 
 
 def test_drum_durations_zero():

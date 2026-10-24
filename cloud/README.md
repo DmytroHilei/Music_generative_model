@@ -26,7 +26,7 @@ cloud/sync/ckpt.py pull    ◄──────────    <you>/long_450m-
    It ends with `upload verified: all N files on <you>/music-stores`. Without that line, run it again.
    Stores: `gigamidi_train, aria_train, discover_train` (27% subset), `gigamidi_clean_validation, aria_validation,
    discover_validation`, `gigamidi_heldout_validation` (captioned val set; see `cloud/sync/hub.py`), plus their label
-   tables from `data/labels_next` (`labels/`, `gigamidi_train.jsonl` built with
+   tables from `data/labels` (`labels/`, `gigamidi_train.jsonl` built with
    `data_prep/labels/build_labels.py --index-split train` from offsets.npy only) and Ukrainian captions from
    `data/captions` (`captions/`); on the instance `data/labels` and `data/captions` link to them. A store no longer on
    the laptop keeps its entries from the Hub manifest, so the tables can be re-uploaded alone. Free HF accounts get

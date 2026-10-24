@@ -4,6 +4,7 @@ import torch
 from torch.nn import functional as F
 
 from musicar.data.loader import BOS_PITCH, DRUM_PROGRAM, EOS_PITCH, progress_level, remain_level, window_conditions
+from musicar.generation.repetition import RepeatPenalty
 from musicar.model.gpt import KVCache, STREAM_ORDER
 
 # one side stream per device for the CUDA-graph warm-up and capture: cuBLAS keeps a workspace for every
@@ -42,7 +43,8 @@ def generate(model, pitch, velocity, duration, delta_time, max_new_tokens, tempe
              cuda_graph=True, style=None, min_new=0, program=0, top_p=None, cfg_scale=1.0,
              eos_t1=False, programs=None, allowed_programs=None, return_programs=False, program_temperature=None,
              cond=None, text=None, sections=None, text_neg=None, sections_neg=None, cfg_section=None,
-             cfg_boost=0.0, cfg_boost_notes=32, length_seconds=None, eos_ramp=0.0, length_stop=0.0):
+             cfg_boost=0.0, cfg_boost_notes=32, length_seconds=None, eos_ramp=0.0, length_stop=0.0,
+             dry_multiplier=0.0, dry_base=1.15, dry_allowed=16, dry_key='notes'):
     """
     Batched sampling (B rows, same prompt length) with a preallocated KV cache: each new note costs one position
     through the model, not a full re-run. On CUDA the one-note transformer step is captured once as a CUDA graph
@@ -98,6 +100,11 @@ def generate(model, pitch, velocity, duration, delta_time, max_new_tokens, tempe
       generate.py fades such rows out).
     eos_t1: EOS keeps its probability at temperature 1 (and outside top-k/top-p); the other pitches use the
       tempered distribution, rescaled to the remaining mass. Lower temperatures otherwise starve the rare EOS.
+    dry_multiplier > 0: repetition penalty on verbatim copies of pitched passages (musicar/generation/repetition.py,
+      the DRY sampler on chords = the pitched notes of one onset as a set, dry_key 'notes' (instrument + pitch) or
+      'pitch_class'): when the last m >= dry_allowed chords repeat an earlier passage, the pitches that would continue
+      it lose dry_multiplier * dry_base^(m - dry_allowed) logits (after guidance, before temperature). Prompt notes
+      count as earlier passages.
     Special tokens (pitch vocab 130): BOS is never sampled; EOS (end of piece) not before min_new notes. Rows keep
     running after their EOS (batch shapes stay fixed); cut them at the first EOS when writing MIDI.
     Nothing here syncs the GPU with the CPU inside the loop.
@@ -210,6 +217,13 @@ def generate(model, pitch, velocity, duration, delta_time, max_new_tokens, tempe
             prog_out[:, :n0] = programs.repeat(n_br, 1)
         elif fixed_program is not None:
             prog_out[:, :n0] = fixed_program
+    rep = None
+    if dry_multiplier > 0:
+        rep = RepeatPenalty(Bo, total, dry_multiplier, dry_base, dry_allowed, device, key=dry_key)
+        rep.prime(out[0][:Bo, :n0], out[3][:Bo, :n0],
+                  prog_out[:Bo, :n0] if prog_out is not None else torch.zeros_like(out[0][:Bo, :n0]))
+        if fixed_program is not None:
+            rep.prog.fill_(int(program))
     prog_mask = None
     if sample_programs and allowed_programs is not None:
         prog_mask = torch.full((n_prog,), -float('Inf'), device=device)
@@ -231,13 +245,15 @@ def generate(model, pitch, velocity, duration, delta_time, max_new_tokens, tempe
             note_program[0] = fixed_program
             return fixed_program
         logits = logits[:, -1, :].float()
-        if name == 'program' and prog_mask is not None:
-            logits = logits + prog_mask
         if double:
             c, f, u = logits.split(Bo)
             logits = u + cfg_scale * (f - u) + scale[0] * (c - f)
         elif guided:
             logits = logits[Bo:] + scale[0] * (logits[:Bo] - logits[Bo:])
+        if name == 'program' and prog_mask is not None:  # after the guidance mix: -inf - -inf there would be NaN
+            logits = logits + prog_mask
+        if name == 'pitch' and rep is not None:
+            logits = rep.penalize(logits)
         if name == 'pitch' and specials and eos_ramp and length is not None:  # running over: EOS ever more likely
             over = (step_onset[:Bo] - length[:Bo]).clamp(min=0)  # (Bo, 1) seconds past the length
             logits = logits + eos_ramp * over * F.one_hot(torch.tensor(EOS_PITCH, device=device), logits.size(-1))
@@ -268,6 +284,8 @@ def generate(model, pitch, velocity, duration, delta_time, max_new_tokens, tempe
             probs = torch.where(stop, F.one_hot(torch.tensor(EOS_PITCH, device=device), probs.size(-1)).to(probs.dtype),
                                 probs)
         nxt = torch.multinomial(probs, num_samples=1)
+        if rep is not None and name in ('delta_time', 'program'):  # what the pitch penalty compares with
+            (rep.dt if name == 'delta_time' else rep.prog).copy_(nxt[:, 0])
         nxt = nxt.repeat(n_br, 1)
         if name == 'program':
             note_program[0] = nxt
@@ -378,6 +396,8 @@ def generate(model, pitch, velocity, duration, delta_time, max_new_tokens, tempe
             o[:, n:n + 1] = t
         if prog_out is not None:
             prog_out[:, n:n + 1] = nxt['program'] if 'program' in nxt else fixed_program
+        if rep is not None:
+            rep.push(new[0][:Bo, 0], new[3][:Bo, 0], prog_out[:Bo, n] if prog_out is not None else rep.prog)
         n += 1
         if target is not None:
             # per-row integral controller on log density, bias kept in [-2, 6]; stays on the GPU

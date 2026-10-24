@@ -138,7 +138,7 @@ def main():
     p.add_argument('--cache-dir', default=str(hub.ROOT / 'data' / 'cache'))
     p.add_argument('--repo', default=None, help='dataset repo (default <hf user>/music-stores or $MUSIC_DATA_REPO)')
     p.add_argument('--stores', default=','.join(hub.STORES))
-    p.add_argument('--labels-dir', default=str(hub.ROOT / 'data' / 'labels_next'), help='upload: label tables')
+    p.add_argument('--labels-dir', default=str(hub.ROOT / 'data' / 'labels'), help='upload: label tables')
     p.add_argument('--captions-dir', default=str(hub.ROOT / 'data' / 'captions'), help='upload: Ukrainian caption tables')
     p.add_argument('--staging', default=str(hub.ROOT / 'data' / 'hf_upload'))
     p.add_argument('--workers', type=int, default=8)
