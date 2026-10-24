@@ -43,6 +43,14 @@ ARMS = {
     # group of 3), the length input (seconds to the piece's end; ends: eval/compare/length_follow.py)
     'gqa4': ['--n_kv_head=4'],
     'len': ['--n_remain=33'],
+    # length control v2 (2026-10-24; text_control.md C3): the length tables at 10x LR without weight decay (len's
+    # table rows stayed at norm ~0.1), + progress levels, the target jittered +-10% ('about L'); len2_slack: the
+    # upper-bound variant ('at most L'); len2_words: + the five-bucket length words in the file captions (its CE vs
+    # len2 also shows the caption change)
+    'len2': ['--n_remain=33', '--n_progress=17', '--remain_jitter=0.1', '--remain_lr_mult=10'],
+    'len2_slack': ['--n_remain=33', '--n_progress=17', '--remain_slack=0.15', '--remain_lr_mult=10'],
+    'len2_words': ['--n_remain=33', '--n_progress=17', '--remain_jitter=0.1', '--remain_lr_mult=10',
+                   '--length_words=v2'],
 }
 FOLLOW_PROMPTS = {'all_v2': 'section_v2', 's50_v2': 'section_v2'}  # section_follow --prompts (default 'section')
 ITERS = {'nocf': 2700, 'nocf_s50': 2700, 'cfcool': 2350, 'cf1': 2200, 's50_v2': 2700}  # others MAX_ITERS
@@ -120,6 +128,7 @@ def switched(arm):
 
 
 def write_table(arms):
+    arms = [a for a in ARMS if a in arms or (ROOT / 'logs/sections' / f'forget_{a}.log').exists()]  # keep every row
     lines = ['# Section-caption forgetting: arms from v2_A0 (1,500 it; iso-time arms nocf / nocf_s50 / cfcool / cf1: '
              'the wall time of all)', '',
              f'Updated {time.strftime("%Y-%m-%d %H:%M")}. Val gains: the last evaluation (200 held-out windows, all '

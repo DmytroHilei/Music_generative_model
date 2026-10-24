@@ -11,7 +11,9 @@ Variants (off by default; the 42M A/B of todo c7cb78dd): ns='polar' = Polar Expr
 a different quintic per Newton-Schulz step, closer to U V^T in the same 5 steps), normuon=True = NorMuon (Li et al.
 2025: the orthogonalized update divided per output neuron by the root of an EMA of its mean square, then scaled back to
 RMS 0.2), cautious=True = Cautious mask (Liang et al. 2024: update entries whose sign disagrees with the current
-gradient zeroed, the rest scaled up by 1 / the kept share).
+gradient zeroed, the rest scaled up by 1 / the kept share), rms_match=True = the orthogonalized update rescaled to RMS
+0.2 exactly (NorMuon's last step without its per-neuron division: the step-size control for NorMuon). With normuon or
+rms_match, moonlight_rms() reports the mean RMS the Moonlight scale would have given those updates.
 """
 
 import math
@@ -56,20 +58,21 @@ def zeropower_via_newtonschulz5(G, steps=5, kind='quintic'):
 class Muon(torch.optim.Optimizer):
     def __init__(self, params, lr=6e-4, momentum=0.95, nesterov=True, weight_decay=0.1, ns_steps=5,
                  momentum_dtype=None, compile_ns=False, ns_chunk=8, ns='quintic', normuon=False, normuon_beta2=0.95,
-                 cautious=False):
+                 cautious=False, rms_match=False):
         # momentum_dtype: torch.bfloat16 halves the optimizer state (2 instead of 4 bytes per param). The buffer is a
         # smoothed direction that Newton-Schulz orthogonalizes in bf16 anyway; the fp32 weights still take the update.
         # Same-shaped matrices (qkv, attn proj, fc, mlp proj of every layer) run Newton-Schulz together as one batched
         # matmul, ns_chunk matrices at a time (caps the temporary memory: all 56 MLP matrices of a 450M model at once
         # ran out of memory on 8 GB); compile_ns=True also compiles it (one graph per shape).
-        # ns / normuon / cautious: the variants in the module docstring
+        # ns / normuon / cautious / rms_match: the variants in the module docstring
         assert ns in NS_KINDS, ns
         defaults = dict(lr=lr, momentum=momentum, nesterov=nesterov, weight_decay=weight_decay, ns_steps=ns_steps)
         super().__init__(params, defaults)
         self.momentum_dtype = momentum_dtype
         self.ns_chunk = ns_chunk
         self.ns_kind = ns
-        self.normuon, self.normuon_beta2, self.cautious = normuon, normuon_beta2, cautious
+        self.normuon, self.normuon_beta2, self.cautious, self.rms_match = normuon, normuon_beta2, cautious, rms_match
+        self._rms_sum, self._rms_n = None, 0  # Moonlight-scaled update RMS summed over matrices (normuon / rms_match)
         self.ns = torch.compile(zeropower_via_newtonschulz5) if compile_ns else zeropower_via_newtonschulz5
 
     @torch.no_grad()
@@ -99,6 +102,14 @@ class Muon(torch.optim.Optimizer):
                                  for gr, buf in zip(grads, bufs)])
                 update = self.ns(g, steps=group['ns_steps'], kind=self.ns_kind)
                 scale = 0.2 * max(shape[0], shape[1]) ** 0.5  # Moonlight: match AdamW update RMS
+                if self.normuon or self.rms_match:  # both replace the Moonlight scale: record what it would give
+                    r = (update.float().norm(dim=(-2, -1)) * (scale / (shape[0] * shape[1]) ** 0.5)).sum()
+                    self._rms_sum = r if self._rms_sum is None else self._rms_sum + r
+                    self._rms_n += len(params)
+                if self.rms_match:  # RMS 0.2 exactly, like NorMuon after its per-neuron division
+                    u = update.float()
+                    update = u * (0.2 * (shape[0] * shape[1]) ** 0.5 / u.norm(dim=(-2, -1), keepdim=True).clamp_min(1e-12))
+                    scale = 1.0
                 if self.normuon:  # per output neuron (row): / sqrt(EMA of the row's mean square), then RMS 0.2
                     u = update.float()
                     for p in params:
@@ -114,6 +125,16 @@ class Muon(torch.optim.Optimizer):
                     update = update * mask / mask.mean(dim=(-2, -1), keepdim=True).clamp_min(1e-3)
                 torch._foreach_mul_(params, 1 - group['lr'] * group['weight_decay'])
                 torch._foreach_add_(params, list(update.unbind(0)), alpha=-group['lr'] * scale)
+
+
+    def moonlight_rms(self):
+        """Mean RMS the Moonlight scale would have given the updates since the last call (None without normuon /
+        rms_match or with no step since)."""
+        if not self._rms_n:
+            return None
+        out = self._rms_sum.item() / self._rms_n
+        self._rms_sum, self._rms_n = None, 0
+        return out
 
 
 class CombinedOptimizer:
@@ -147,6 +168,26 @@ TEXT_PREFIX = ('transformer.text_proj.', 'transformer.text_prefix.', 'transforme
                'transformer.section_xattn.')
 
 
+# the length input's zero-init tables (MusicConfig.n_remain / n_progress)
+LENGTH_TABLES = ('transformer.cond_remain.', 'transformer.cond_progress.')
+
+
+def length_group(model, remain_lr_mult):
+    """remain_lr_mult != 1: the length tables in their own AdamW group, lr x remain_lr_mult, no weight decay (a
+    zero-init table at the trunk's fine-tune LR barely moves: 107M pilot 2026-10-23, row norms ~0.1 vs ~1 for the
+    note embedding); [] otherwise (they stay in the decayed group)."""
+    params = [p for n, p in model.named_parameters() if n.startswith(LENGTH_TABLES) and p.requires_grad] \
+        if remain_lr_mult != 1.0 else []
+    if params:
+        print(f"length tables: {sum(p.numel() for p in params):,} params, lr x{remain_lr_mult:g}, no weight decay")
+    return [{'params': params, 'weight_decay': 0.0, 'lr_mult': remain_lr_mult}] if params else []
+
+
+def _own_group(n, remain_lr_mult):
+    """Parameters that text_group / length_group collect (left out of the generic groups)."""
+    return n.startswith(TEXT_PREFIX) or (remain_lr_mult != 1.0 and n.startswith(LENGTH_TABLES))
+
+
 def text_group(model, text_lr_mult):
     """The text adapter (text_proj or text_prefix) in its own AdamW group: lr x text_lr_mult, no weight decay (like the style table);
     [] when the model has none or it is frozen."""
@@ -156,7 +197,8 @@ def text_group(model, text_lr_mult):
     return [{'params': params, 'weight_decay': 0.0, 'lr_mult': text_lr_mult}] if params else []
 
 
-def build_adamw(model, weight_decay, learning_rate, betas, device_type, text_lr_mult=1.0, linear_lr_mult=1.0):
+def build_adamw(model, weight_decay, learning_rate, betas, device_type, text_lr_mult=1.0, linear_lr_mult=1.0,
+                remain_lr_mult=1.0):
     """AdamW (fused on CUDA). Weight decay on the 2D tensors (matmul weights, embeddings); none on biases, norms and
     the cascade's condition embeddings (they must stay at the scale of h). linear_lr_mult != 1: the parameters of the
     linear attention layers (musicar.model.linear_attn.GatedDeltaNet, e.g. fresh from a conversion) in their own
@@ -167,7 +209,7 @@ def build_adamw(model, weight_decay, learning_rate, betas, device_type, text_lr_
         if linear_lr_mult != 1.0 else set()
     decay, nodecay, lin_decay, lin_nodecay = [], [], [], []
     for n, p in model.named_parameters():
-        if not p.requires_grad or n.startswith(TEXT_PREFIX):
+        if not p.requires_grad or _own_group(n, remain_lr_mult):
             continue
         d = p.dim() >= 2 and 'cond_emb' not in n
         if id(p) in linear:
@@ -184,13 +226,14 @@ def build_adamw(model, weight_decay, learning_rate, betas, device_type, text_lr_
     groups = [{'params': decay, 'weight_decay': weight_decay}, {'params': nodecay, 'weight_decay': 0.0},
               {'params': lin_decay, 'weight_decay': weight_decay, 'lr_mult': linear_lr_mult},
               {'params': lin_nodecay, 'weight_decay': 0.0, 'lr_mult': linear_lr_mult}]
-    return torch.optim.AdamW([g for g in groups if g['params']] + text_group(model, text_lr_mult),
+    return torch.optim.AdamW([g for g in groups if g['params']] + text_group(model, text_lr_mult)
+                             + length_group(model, remain_lr_mult),
                              lr=learning_rate, betas=betas, **(dict(fused=True) if fused else {}))
 
 
 def build_muon_optimizer(model, weight_decay, learning_rate, betas, device_type, momentum=0.95, style_lr_mult=1.0,
                          momentum_dtype=None, compile_ns=False, text_lr_mult=1.0, ns='quintic', normuon=False,
-                         cautious=False):
+                         cautious=False, rms_match=False, remain_lr_mult=1.0):
     """Muon for the 2D matrices inside the transformer blocks, AdamW for embeddings, heads, norms.
     The style table (if any) gets its own AdamW group: lr x style_lr_mult (the train loop applies each group's
     'lr_mult'), no weight decay, so a zero-initialized conditioning vector can move far in a short fine-tune."""
@@ -198,7 +241,7 @@ def build_muon_optimizer(model, weight_decay, learning_rate, betas, device_type,
     muon_params, adam_decay, adam_nodecay, style_params = [], [], [], []
     muon_ids = {id(p) for p in model.transformer.h.parameters() if p.dim() == 2}
     for n, p in model.named_parameters():
-        if not p.requires_grad or n.startswith(TEXT_PREFIX):
+        if not p.requires_grad or _own_group(n, remain_lr_mult):
             continue
         if id(p) in muon_ids:
             muon_params.append(p)
@@ -213,11 +256,13 @@ def build_muon_optimizer(model, weight_decay, learning_rate, betas, device_type,
               {'params': adam_nodecay, 'weight_decay': 0.0}]
     if style_params:
         groups.append({'params': style_params, 'weight_decay': 0.0, 'lr_mult': style_lr_mult})
-    adamw = torch.optim.AdamW(groups + text_group(model, text_lr_mult),
+    adamw = torch.optim.AdamW(groups + text_group(model, text_lr_mult) + length_group(model, remain_lr_mult),
                               lr=learning_rate, betas=betas, **(dict(fused=True) if fused else {}))
     muon = Muon(muon_params, lr=learning_rate, momentum=momentum, weight_decay=weight_decay,
-                momentum_dtype=momentum_dtype, compile_ns=compile_ns, ns=ns, normuon=normuon, cautious=cautious)
-    variant = ', '.join(x for x, on in ((f"ns {ns}", ns != 'quintic'), ('NorMuon', normuon), ('cautious', cautious)) if on)
+                momentum_dtype=momentum_dtype, compile_ns=compile_ns, ns=ns, normuon=normuon, cautious=cautious,
+                rms_match=rms_match)
+    variant = ', '.join(x for x, on in ((f"ns {ns}", ns != 'quintic'), ('NorMuon', normuon), ('cautious', cautious),
+                                        ('RMS 0.2', rms_match)) if on)
     print(f"Muon{f' ({variant})' if variant else ''}: {len(muon_params)} matrices, "
           f"{sum(p.numel() for p in muon_params):,} params | "
           f"AdamW: {sum(p.numel() for p in adam_decay + adam_nodecay):,} params"
@@ -252,23 +297,26 @@ def build_adamw8bit(model, weight_decay, learning_rate, betas, style_lr_mult=1.0
 
 def build_optimizer(name, model, weight_decay, learning_rate, betas, device_type, style_lr_mult=1.0,
                     muon_momentum=0.95, muon_bf16=False, compile_ns=False, text_lr_mult=1.0, linear_lr_mult=1.0,
-                    muon_ns='quintic', muon_normuon=False, muon_cautious=False):
+                    muon_ns='quintic', muon_normuon=False, muon_cautious=False, muon_rms=False, remain_lr_mult=1.0):
     """name: 'adamw' | 'adamw8bit' | 'muon' (Muon for the transformer-block matrices, AdamW for the rest).
-    linear_lr_mult: AdamW only (build_adamw); muon_ns / muon_normuon / muon_cautious: Muon only (Muon variants)."""
-    assert name == 'muon' or (muon_ns, muon_normuon, muon_cautious) == ('quintic', False, False), \
-        'muon_ns / muon_normuon / muon_cautious: Muon only'
+    linear_lr_mult: AdamW only (build_adamw); muon_ns / muon_normuon / muon_cautious / muon_rms: Muon only (Muon
+    variants); remain_lr_mult: the length tables' group (length_group; not adamw8bit)."""
+    assert name == 'muon' or (muon_ns, muon_normuon, muon_cautious, muon_rms) == ('quintic', False, False, False), \
+        'muon_ns / muon_normuon / muon_cautious / muon_rms: Muon only'
     assert linear_lr_mult == 1.0 or name == 'adamw', 'linear_lr_mult: AdamW only'
+    assert remain_lr_mult == 1.0 or name != 'adamw8bit', 'remain_lr_mult: muon / adamw'
     if name == 'muon':
         return build_muon_optimizer(model, weight_decay, learning_rate, betas, device_type, momentum=muon_momentum,
                                     style_lr_mult=style_lr_mult, compile_ns=compile_ns,
                                     momentum_dtype=torch.bfloat16 if muon_bf16 else None, text_lr_mult=text_lr_mult,
-                                    ns=muon_ns, normuon=muon_normuon, cautious=muon_cautious)
+                                    ns=muon_ns, normuon=muon_normuon, cautious=muon_cautious, rms_match=muon_rms,
+                                    remain_lr_mult=remain_lr_mult)
     if name == 'adamw8bit':
         return build_adamw8bit(model, weight_decay, learning_rate, betas, style_lr_mult=style_lr_mult,
                                text_lr_mult=text_lr_mult)
     assert name == 'adamw', f"unknown optimizer {name!r}"
     return build_adamw(model, weight_decay, learning_rate, betas, device_type, text_lr_mult=text_lr_mult,
-                       linear_lr_mult=linear_lr_mult)
+                       linear_lr_mult=linear_lr_mult, remain_lr_mult=remain_lr_mult)
 
 
 def freeze_params(model, prefixes, except_prefixes=''):

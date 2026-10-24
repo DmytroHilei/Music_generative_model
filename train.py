@@ -28,8 +28,8 @@ from tqdm import tqdm
 
 from musicar.model.checkpoint import (ARCH_KEYS, bf16_cpu_state, load_expanded, merge_model_args, save_atomic,
                                 strip_compile_prefix)
-from musicar.data.loader import (NoteWindowDataset, collate_windows, load_styles, remain_level, source_name,
-                                 val_loader, window_conditions)
+from musicar.data.loader import (NoteWindowDataset, collate_windows, load_styles, progress_level, remain_level,
+                                 source_name, val_loader, window_conditions)
 from musicar.eval.val_loss import estimate_val_loss, summed_ce
 from musicar.training.fp8 import convert_fp8, fp8_supported, refresh_fp8_weights
 from musicar.training.memory import spill_to_cpu
@@ -112,6 +112,12 @@ cond_inst = False         # condition on the set of instruments in the window (m
 n_density = 0             # condition on the window's notes/s level (16 = 15 levels + none; 0 = off)
 cond_dropout = 0.15       # training: share of windows whose conditions are replaced by 'none'
 n_remain = 0              # length control: seconds-to-the-end levels per note (33 = 32 levels + none; 0 = off)
+n_progress = 0            # with n_remain: share-of-the-piece levels per note (17 = 16 equal steps + none; 0 = off)
+remain_jitter = 0.0       # training: each window's piece lengths x exp(N(0, this)) before the length levels (the
+                          # countdown then ends up to ~this share before / after the real end: 'about L')
+remain_slack = 0.0        # training: piece lengths x (1 + |N(0, this)|) (the real end at or before the countdown's
+                          # zero: 'at most L', the Max New Tokens++ variant of LDPE, arXiv 2412.11937)
+remain_lr_mult = 1.0      # LR multiplier of the length tables (cond_remain / cond_progress; own group, no weight decay)
 remain_dropout = 0.15     # training: share of windows whose length input is 'none'
 pad_short = False         # keep files shorter than block_size as one padded whole-file window (masked targets)
 act_ckpt = 0              # activation checkpointing: first N transformer blocks recompute in backward (-1 = all)
@@ -144,6 +150,7 @@ section_dropout = 0.2     # training: share of section captions replaced by the 
 section_max_length = 48   # encoder tokens per section caption
 section_style = 'plain'   # 'change': section captions always name what changed vs the previous section
 section_attrs = 'v1'      # 'v2': section-level thresholds, rhythm + texture words (musicar.text.captions SECTION_Q_V2)
+length_words = 'v1'       # file captions' length words: 'v2' = five buckets for every file (captions.LENGTH_V2_Q)
 section_change_frac = 0.0  # training: share of windows around a section change (NoteWindowDataset change_frac)
 section_change_min = 2    # points of change (dynamics / pace / register / drums / instruments)
 section_repeat = 0        # > 0: a section's caption arrives again every this many notes inside it (MusicConfig)
@@ -151,7 +158,12 @@ linear_attn = ''          # MusicConfig.linear_attn: on a finetune, these blocks
 linear_lr_mult = 1.0      # AdamW: LR multiplier of the linear attention layers' parameters (fresh from a conversion)
                           # ('hybrid4' = 3 linear : 1 full; musicar/model/linear_attn.py)
 attn_transfer = False     # stage 1 of that conversion: only the linear layers train, on the relative MSE to the
-                          # output of the attention they replace (forward's loss); needs compile=False
+                          # output of the attention they replace (forward's loss); needs compile=False. Also for a
+                          # GQA conversion (finetune lowering n_kv_head): each GQA layer learns the checkpoint's own
+                          # full attention (musicar/model/gqa.py)
+gqa_init = 'mean'         # GQA conversion start: 'mean' = K / V heads mean-pooled per group (load_expanded); 'pca' =
+                          # data-aware merge from each layer's input moments on gqa_calib_batches (musicar.model.gqa)
+gqa_calib_batches = 16
 # section-caption forgetting (context/claude/roadmap.md P0): counterfactual loss with the previous section caption
 # (GPT.forward cf) on change / splice windows, a recognition head, spliced windows (NoteWindowDataset splice_frac)
 section_cf_weight = 0.0   # > 0: loss += weight * max(0, eta - (NLL with the previous caption - NLL with the true one))
@@ -176,6 +188,7 @@ muon_momentum = 0.95
 muon_ns = 'quintic'        # Muon Newton-Schulz coefficients: 'quintic' | 'polar' (Polar Express)
 muon_normuon = False       # NorMuon: per-neuron normalization of the orthogonalized update
 muon_cautious = False      # Cautious mask: update entries against the gradient's sign zeroed
+muon_rms = False           # orthogonalized update rescaled to RMS 0.2 exactly (NorMuon's step size, no per-neuron division)
 learning_rate = 6e-4
 max_iters = 30000
 weight_decay = 1e-1
@@ -243,10 +256,12 @@ extra_names = (['program'] if n_programs else []) + (['style'] if styles else []
 data_kw = dict(root_dir=root_dir, cache_dir=cache_dir, special_tokens=special_tokens, styles=styles,
                programs=n_programs > 0, pad_short=pad_short, min_notes=min_notes, captions=captions or None,
                caption_uk=caption_uk, section_len=section_len, section_lead=section_lead, section_style=section_style,
-               section_attrs=section_attrs, section_repeat=section_repeat, remain=n_remain > 0)
+               section_attrs=section_attrs, section_repeat=section_repeat, remain=n_remain > 0,
+               elapsed=n_remain > 0 and (n_progress > 0 or remain_jitter > 0 or remain_slack > 0),
+               length_words=length_words)
 assert not section_cf_weight or section_len, 'section_cf_weight needs section captions'
 cf_names = ['cf_text', 'cf_event', 'cf_start'] if section_cf_weight else []
-remain_names = ['remain'] if n_remain else []  # last in a dataset item
+remain_names = (['remain'] + (['elapsed'] if data_kw['elapsed'] else [])) if n_remain else []  # last in an item
 cf_from_iter = int(section_cf_from * lr_decay_iters)
 # train: random windows (uniform over all note positions of all files), with augmentation
 train_dataset = NoteWindowDataset(csv_path, split='train', block_size=block_size, augment=True, **data_kw,
@@ -296,16 +311,22 @@ else:
     print("Initializing a new model from scratch")
 
 model = GPT(MusicConfig(**model_args, dropout=dropout, label_smoothing=label_smoothing))
-assert model.config.n_remain == n_remain, \
-    f"the data returns remain for n_remain={n_remain}, the model has {model.config.n_remain}: set n_remain"
+assert model.config.n_remain == n_remain and model.config.n_progress == n_progress, \
+    f"the data returns remain for n_remain={n_remain} / n_progress={n_progress}, the model has " \
+    f"{model.config.n_remain} / {model.config.n_progress}: set them"
 assert model.config.section_repeat == section_repeat, \
     f"the data lays out section_repeat={section_repeat}, the model has {model.config.section_repeat}"
 if section_cls_weight:
     assert section_cf_weight, 'the recognition head trains on the counterfactual rows: set section_cf_weight'
     model.add_section_cls()  # before loading, so a resume finds its weights (a finetune starts it fresh)
 
+teacher_state = None  # GQA conversion: the checkpoint's full-attention weights, before load_expanded pools them
 if checkpoint is not None:
     state_dict = strip_compile_prefix(checkpoint['model'])
+    saved_kv = checkpoint['model_args'].get('n_kv_head') or checkpoint['model_args']['n_head']
+    if init_from == 'finetune' and saved_kv > model.config.kv_heads and (attn_transfer or gqa_init == 'pca'):
+        from musicar.model.gqa import teacher_weights
+        teacher_state = teacher_weights(state_dict)
     if init_from == 'finetune':
         grown = load_expanded(model, state_dict)
         if grown:
@@ -340,11 +361,14 @@ if block_size < model.config.block_size:
 model.to(device)
 model.act_ckpt = act_ckpt
 model.act_ckpt_save = act_ckpt_save
+assert gqa_init in ('mean', 'pca'), gqa_init
 if attn_transfer:
-    assert not compile, 'attn_transfer: the linear layers hand their loss over as an attribute (set compile=False)'
-    transfer_keep = model.attach_attn_teachers()
-    assert transfer_keep, 'attn_transfer needs linear_attn layers'
+    assert not compile, 'attn_transfer: the converted layers hand their loss over as an attribute (set compile=False)'
+    transfer_keep = model.attach_attn_teachers(teacher_state)
+    assert transfer_keep, 'attn_transfer needs linear_attn layers or a GQA conversion (finetune lowering n_kv_head)'
     freeze_params(model, '*', except_prefixes=','.join(transfer_keep))
+elif teacher_state is not None:  # gqa_init 'pca' without the transfer: teachers only for the calibration stream
+    model.attach_attn_teachers(teacher_state)
 
 # before the optimizer is built: fp8 conversion swaps the Linear modules
 if fp8 and not fp8_supported(device_type):
@@ -375,7 +399,8 @@ if freeze_trunk:
 optimizer = build_optimizer(optimizer_name, model, weight_decay, learning_rate, (beta1, beta2), device_type,
                             style_lr_mult=style_lr_mult, muon_momentum=muon_momentum, muon_bf16=muon_bf16,
                             compile_ns=compile, text_lr_mult=text_lr_mult, linear_lr_mult=linear_lr_mult,
-                            muon_ns=muon_ns, muon_normuon=muon_normuon, muon_cautious=muon_cautious)
+                            muon_ns=muon_ns, muon_normuon=muon_normuon, muon_cautious=muon_cautious,
+                            muon_rms=muon_rms, remain_lr_mult=remain_lr_mult)
 encoder = None
 if text_encoder:
     from musicar.text.encoder import TextEncoder
@@ -399,10 +424,11 @@ def to_device(batch):
     return tuple(t.to(device, non_blocking=True) for t in batch)
 
 
-def prepare(X, Y, cond_drop_p, remain_drop_p=None):
+def prepare(X, Y, cond_drop_p, remain_drop_p=None, length_noise=False):
     """A batch on the device; cond_inst / n_density models also get the window conditions of its own notes,
     replaced by 'none' with probability cond_drop_p per window; n_remain models the levels of the seconds to each
-    piece's end, 'none' with probability remain_drop_p per window (default cond_drop_p)."""
+    piece's end (n_progress: and of the share played), 'none' with probability remain_drop_p per window (default
+    cond_drop_p); length_noise (training): each window's piece lengths scaled by remain_jitter / remain_slack first."""
     streams = to_device(X[0])
     extra = {k: encoder.encode(v, tokens=raw_model.config.text_prefix > 0) if k == 'text'
              else v.to(device, non_blocking=True) for k, v in X[1].items()
@@ -424,10 +450,23 @@ def prepare(X, Y, cond_drop_p, remain_drop_p=None):
         extra['cond'] = window_conditions(streams[0], streams[3], extra.get('program'), n_programs, n_density,
                                           drop_p=cond_drop_p)
     if 'remain' in extra:
-        level = remain_level(extra['remain'], n_remain)
+        remain, elapsed = extra['remain'], extra.pop('elapsed', None)
+        total = None if elapsed is None else elapsed + remain  # the length of each row's piece
+        if total is not None and length_noise and (remain_jitter or remain_slack):
+            f = torch.ones(remain.size(0), 1, device=remain.device)
+            if remain_jitter:
+                f = f * torch.exp(remain_jitter * torch.randn_like(f))
+            if remain_slack:
+                f = f * (1 + remain_slack * torch.randn_like(f).abs())
+            total = total * f
+            remain = (total - elapsed).clamp(min=0)  # past the scaled length: the 'at the end' level
+        level = remain_level(remain, n_remain)
+        if n_progress:
+            level = torch.stack([level, progress_level(elapsed, total, n_progress)], -1)
         p = cond_drop_p if remain_drop_p is None else remain_drop_p
         if p > 0:
-            level = level * (torch.rand(level.size(0), 1, device=level.device) >= p)
+            keep = torch.rand(level.size(0), 1, device=level.device) >= p
+            level = level * (keep[..., None] if level.dim() == 3 else keep)
         extra['remain'] = level
     return (streams, extra), to_device(Y)
 
@@ -435,7 +474,7 @@ def prepare(X, Y, cond_drop_p, remain_drop_p=None):
 def infinite_batches(loader):
     while True:
         for X, Y in loader:
-            yield prepare(X, Y, cond_dropout, remain_dropout)
+            yield prepare(X, Y, cond_dropout, remain_dropout, length_noise=True)
 
 
 def val_loss(loader, conditioned=True):
@@ -553,6 +592,23 @@ def run_sample_eval(it):
 # training loop
 batches = infinite_batches(train_loader)
 X, Y = next(batches)
+if teacher_state is not None and gqa_init == 'pca':
+    # each GQA layer's input moments through the teacher stream (training mode: the layers pass the teachers' output
+    # on), then the data-aware merge replaces the mean-pool (musicar.model.gqa)
+    from musicar.model.gqa import InputMoments, apply_pca_init, gqa_layers
+    moments = InputMoments(gqa_layers(raw_model), bias=raw_model.config.bias)
+    raw_model.train()
+    with torch.no_grad():
+        for _ in range(gqa_calib_batches):
+            with ctx:
+                raw_model(*X[0], **X[1], targets=Y)
+            X, Y = next(batches)
+    moments.remove()
+    merged = apply_pca_init(raw_model, moments.moments())
+    print(f"gqa_init pca: {len(merged)} layers merged from {moments.n:,} positions ({gqa_calib_batches} batches)")
+    if not attn_transfer:
+        raw_model.detach_attn_teachers()
+    refresh_fp8_weights(raw_model)  # no-op without fp8_cache_weights
 train_sums, train_n = {}, 0  # running train metrics since the last eval (with dropout + augmentation)
 oom_events = 0  # CUDA OOMs survived by retrying the step
 stop_signal = []  # SIGTERM / SIGINT: finish the current step, save a resumable checkpoint, exit 143
@@ -615,6 +671,9 @@ for iter_num in pbar:
         train = {k: (v / train_n).item() for k, v in train_sums.items()} if train_n else {}
         if train:
             summed_ce(train)
+        moon = getattr(getattr(optimizer, 'optimizers', [None])[0], 'moonlight_rms', lambda: None)()
+        if moon is not None:  # normuon / muon_rms: the update RMS the default scale would have given (theirs: 0.2)
+            train['muon_moonlight_rms'] = moon
         heads = " ".join(f"{name[:3]} {val[f'ce/{name}']:.3f}" for name in STREAM_ORDER)
         tqdm.write(f"step {iter_num}: train loss {train.get('loss', float('nan')):.4f}, "
                    f"val loss {val['loss']:.4f} | {val_name} CE {val['ce/total']:.3f} ({heads})"
@@ -632,7 +691,9 @@ for iter_num in pbar:
                    + "".join(f" | {name} CE {e['ce/total']:.3f}" for name, e in extra.items())
                    + (f" | cf margin {train['ce/cf_margin']:+.4f} hinge {train['ce/cf_hinge']:.4f} used "
                       f"{train['ce/cf_used']:.2f}" if 'ce/cf_margin' in train else "")
-                   + (f" | cls acc {train['ce/cls_acc']:.3f}" if 'ce/cls_acc' in train else ""))
+                   + (f" | cls acc {train['ce/cls_acc']:.3f}" if 'ce/cls_acc' in train else "")
+                   + (f" | Muon default-scale RMS {train['muon_moonlight_rms']:.3f}" if 'muon_moonlight_rms' in train
+                      else ""))
         if wandb_log:
             wandb.log({"iter": iter_num, "lr": lr,
                        **{f"val/{k}": v for k, v in val.items()},

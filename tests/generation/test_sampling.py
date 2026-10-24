@@ -8,7 +8,7 @@ import torch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from helpers import batch, run, tiny  # noqa: E402
-from musicar.data.loader import BOS_PITCH, DRUM_PROGRAM, EOS_PITCH, remain_level  # noqa: E402
+from musicar.data.loader import BOS_PITCH, DRUM_PROGRAM, EOS_PITCH, progress_level, remain_level  # noqa: E402
 from musicar.generation.sampling import generate, prompt_inputs, with_bos  # noqa: E402
 from musicar.model.gpt import STREAM_ORDER  # noqa: E402
 
@@ -57,6 +57,54 @@ def test_length_seconds_matches_full_forward():
     small = tiny(pos_emb='rope', n_remain=33, block_size=32)
     out = generate(small, *streams, max_new_tokens=80, slide=8, length_seconds=10.0, **KW)
     assert all(o.shape == (2, 85) for o in out)
+
+
+def test_progress_levels_match_full_forward():
+    """n_progress models: every note also gets the level of its onset / length_seconds; cached greedy decoding = a
+    full forward with the (remain, progress) levels."""
+    m = tiny(pos_emb='rope', n_remain=33, n_progress=17)
+    torch.nn.init.normal_(m.transformer['cond_remain'].weight)
+    torch.nn.init.normal_(m.transformer['cond_progress'].weight)
+    streams, _, _ = batch(B=2, T=5)
+    got = generate(m, *streams, max_new_tokens=30, top_k=1, length_seconds=[3.0, 40.0], **KW)
+    length = torch.tensor([[3.0], [40.0]])
+    out = [s.clone() for s in streams]
+    for _ in range(30):
+        onset = out[3].cumsum(1).float() * 0.02
+        level = torch.stack([remain_level((length - onset).clamp(min=0), 33),
+                             progress_level(onset, length.expand_as(onset), 17)], -1)
+        with torch.no_grad():
+            h = m.encode(*out, remain=level)[:, [-1]]
+            nxt = m.cascade.sample(h, lambda logits, name: logits[:, -1].argmax(-1, keepdim=True))
+        out = [torch.cat([o, nxt[name]], 1) for o, name in zip(out, STREAM_ORDER)]
+    assert all(torch.equal(a, b) for a, b in zip(got, out))
+
+
+def first_eos_onsets(out):
+    """Per row: (the onset in seconds of the note before the first EOS, of the one before that) or None."""
+    res = []
+    for r in range(out[0].size(0)):
+        eos = (out[0][r] == EOS_PITCH).nonzero()
+        if len(eos) == 0:
+            res.append(None)
+            continue
+        e = int(eos[0])
+        onset = out[3][r, :e].cumsum(0).float() * 0.02
+        res.append((float(onset[-1]), float(onset[-2]) if e >= 2 else 0.0))
+    return res
+
+
+def test_eos_ramp_and_length_stop():
+    """Greedy decoding of an untrained model never picks EOS; with a large eos_ramp or length_stop 1 every row ends
+    right after its latest note passes length_seconds (models without the length input too: a time limit)."""
+    m = tiny(pitch_size=130, pos_emb='rope')
+    streams, _ = with_bos([torch.zeros(3, 0, dtype=torch.long)] * 4)
+    plain = generate(m, *streams, max_new_tokens=60, top_k=1, **KW)
+    assert all(e is None for e in first_eos_onsets(plain)), 'the untrained model ends by itself'
+    for kw in (dict(eos_ramp=1e4), dict(length_stop=1.0)):
+        out = generate(m, *streams, max_new_tokens=60, top_k=1, length_seconds=[0.5, 1.0, 2.0], **KW, **kw)
+        for (last, before), length in zip(first_eos_onsets(out), (0.5, 1.0, 2.0)):
+            assert last >= length > before, (kw, last, before)
 
 
 def test_past_block_size_refills():

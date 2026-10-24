@@ -48,6 +48,10 @@ OPS_Q = (3.24, 7.75)
 PITCH_Q = (49.0, 68.1)
 VEL_Q = (19.3, 23.8)
 SECONDS_Q = (20.0, 180.0)
+# length words 'v2': every file gets one of five buckets (short < 30 s, about a minute < 90 s, a few minutes < 4 min,
+# long < 8 min, very long) instead of 'short' / 'long' only at the extremes (SECONDS_Q)
+LENGTH_V2_Q = (30.0, 90.0, 240.0, 480.0)
+LENGTH_WORDS = ('v1', 'v2')
 KEY_CONF_MEDIAN = 0.072
 UK_VOWELS = set('аеєиіїоуюя')
 # section captions: what can change inside a piece, read from the section's own notes (the file caption keeps mood,
@@ -81,6 +85,12 @@ def _level(x, q):
     return 'low' if x < q[0] else 'high' if x > q[1] else None
 
 
+def length_v2(seconds):
+    """(bucket of vocab.LENGTH_V2, whole minutes) of a file length in seconds (length words 'v2')."""
+    names = ('short', 'minute', 'few', 'long', 'very_long')
+    return names[sum(seconds >= q for q in LENGTH_V2_Q)], max(1, round(seconds / 60))
+
+
 def _join(items, last=' and '):
     items = list(items)
     return items[0] if len(items) == 1 else ', '.join(items[:-1]) + last + items[-1]
@@ -88,7 +98,7 @@ def _join(items, last=' and '):
 
 def _article(word):
     w = word.lstrip("'").lower()
-    vowel = w[:1] in 'aeiou' and not w.startswith(('eu', 'uni', 'use')) or w.startswith(('8', '11', '18'))
+    vowel = w[:1] in 'aeiou' and not w.startswith(('eu', 'uni', 'use', 'one')) or w.startswith(('8', '11', '18'))
     return 'an' if vowel else 'a'
 
 
@@ -132,10 +142,13 @@ class StoreCaptions:
     """Captions of the files of one token store (file index = position in the store). Missing label files -> every
     caption is ''. labeled(i): the file has MidiCaps or XMIDI labels or a mapped GigaMIDI style (tier 1)."""
 
-    def __init__(self, store_name, labels_dir='data/labels', uk_share=UK_SHARE, captions_dir='data/captions'):
+    def __init__(self, store_name, labels_dir='data/labels', uk_share=UK_SHARE, captions_dir='data/captions',
+                 length_words='v1'):
         d = Path(labels_dir)
         self.name = store_name
         self.uk_share = uk_share
+        assert length_words in LENGTH_WORDS, length_words
+        self.length_words = length_words
         self.labels = {}
         if (d / f'{store_name}.jsonl').exists():
             for line in (d / f'{store_name}.jsonl').read_text().splitlines():
@@ -278,11 +291,15 @@ class StoreCaptions:
                 g = self.pseudo_classes['midicaps_genre'][int(self.pseudo['midicaps_genre_pred'][i])]
                 if g in V.GENRE:
                     a['genre'] = [g]
-        for name, value, q in (('pace', f['ops'][i], OPS_Q), ('dynamics', f['vel_mean'][i], VEL_Q),
-                               ('length', f['seconds'][i], SECONDS_Q)):
+        levels = [('pace', f['ops'][i], OPS_Q), ('dynamics', f['vel_mean'][i], VEL_Q)]
+        if self.length_words == 'v1':
+            levels.append(('length', f['seconds'][i], SECONDS_Q))
+        for name, value, q in levels:
             level = _level(value, q)
             if level and not (name == 'pace' and 'tempo' in a):  # MidiCaps' own tempo word already says it
                 a[name] = level
+        if self.length_words == 'v2':
+            a['length'] = length_v2(float(f['seconds'][i]))
         if not drum_only:
             level = _level(f['pitch_mean'][i], PITCH_Q)
             if level:
@@ -446,7 +463,14 @@ def render_en(a, rng, tags_all=False):
     adjs, post = [], []
     feel = []  # mood words that may move into 'that feels ...'
     if 'length' in a:
-        adjs.append(rng.choice(V.LENGTH[a['length']]['en']))
+        if isinstance(a['length'], tuple):  # length words v2: (bucket, minutes)
+            e = V.LENGTH_V2[a['length'][0]]
+            if e['en'] and rng.random() < 0.5:
+                adjs.append(rng.choice(e['en']))
+            else:
+                post.append(rng.choice(e['en_post']).format(m=a['length'][1]))
+        else:
+            adjs.append(rng.choice(V.LENGTH[a['length']]['en']))
     for m in a.get('mood', []) + a.get('use', []):
         e = V.MOOD[m]
         if e.get('en') and not (e.get('en_post') and rng.random() < 0.4):
@@ -505,6 +529,8 @@ def render_en(a, rng, tags_all=False):
         tags.append(a['tempo'][1])
     if 'texture' in a and not any(w in tags for w in V.TEXTURE[a['texture']]['en']):
         tags.append(V.TEXTURE[a['texture']]['tag'][0])
+    if isinstance(a.get('length'), tuple) and not any(w in tags for w in V.LENGTH_V2[a['length'][0]]['en']):
+        tags.append(V.LENGTH_V2[a['length'][0]]['tag'][0])
     if tags_all:  # no draws here: the plain captions keep their random sequence
         tags = ([noun] if a.get('drums') else []) + tags
         if 'register' in a and not any(w in tags for w in V.REGISTER[a['register']]['en']):
@@ -559,7 +585,14 @@ def render_uk(a, rng, tags_all=False):
     adjs, post, tags = [], [], []  # adjs: (m, f) pairs
 
     if 'length' in a:
-        adjs.append(rng.choice(V.LENGTH[a['length']]['uk']))
+        if isinstance(a['length'], tuple):  # length words v2: (bucket, minutes)
+            e = V.LENGTH_V2[a['length'][0]]
+            if e['uk'] and rng.random() < 0.5:
+                adjs.append(rng.choice(e['uk']))
+            else:
+                post.append(rng.choice(e['uk_post']).format(m=a['length'][1]))
+        else:
+            adjs.append(rng.choice(V.LENGTH[a['length']]['uk']))
     for m in a.get('mood', []) + a.get('use', []):
         e = V.MOOD[m]
         if e.get('uk') and not (e.get('uk_post') and rng.random() < 0.4):
@@ -590,6 +623,8 @@ def render_uk(a, rng, tags_all=False):
     seen = set()
     adjs = [p for p in adjs if not (p[0] in seen or seen.add(p[0]))][:MAX_ADJ]
     tags = [p[0] for p in adjs] + tags
+    if isinstance(a.get('length'), tuple) and not any(p in adjs for p in V.LENGTH_V2[a['length'][0]]['uk']):
+        tags.append(V.LENGTH_V2[a['length'][0]]['tag'][1])
 
     prefix = ''
     if a.get('genre'):

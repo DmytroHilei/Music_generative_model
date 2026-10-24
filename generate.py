@@ -90,6 +90,14 @@ def parse_args():
                              "'a sad slow piano ballad' (default: none = unconditional)")
     parser.add_argument("--cfg-scale", type=float, default=1.0,
                         help="classifier-free guidance strength over --text / --style (1 = off; e.g. 1.5-3)")
+    parser.add_argument("--eos-ramp", type=float, default=0.0,
+                        help="with --length-seconds: + this x (seconds past the length) on the EOS logit, so a row "
+                             "that runs over ends soon after (any model with BOS/EOS)")
+    parser.add_argument("--length-stop", type=float, default=0.0,
+                        help="with --length-seconds: rows still going at this x the length end there (hard limit, "
+                             "e.g. 1.2; any model with BOS/EOS)")
+    parser.add_argument("--fade-seconds", type=float, default=3.0,
+                        help="rows ended by --length-stop: velocities faded out over their last this many seconds")
     parser.add_argument("--length-seconds", type=float, default=None,
                         help="models with the length input (n_remain): the piece's length in seconds from the prompt's "
                              "first note, so it ends there with EOS (default: none)")
@@ -263,8 +271,9 @@ def generate_batch(model, config, args, pieces, seed, outs, device, progress=Non
     has_prompt = bool(pieces or args.prompt)
     style = style_id(config, args.style)
     text = text_vector(config, args.text, device)
-    if args.length_seconds is not None and not config.n_remain:
-        raise SystemExit("this checkpoint was trained without the length input (n_remain)")
+    if args.length_seconds is not None and not config.n_remain and not (args.eos_ramp or args.length_stop):
+        raise SystemExit("this checkpoint was trained without the length input (n_remain): --length-seconds only "
+                         "works as a time limit here (--eos-ramp / --length-stop)")
     target_nps = None
     if args.density == "prompt":
         if not has_prompt or pitch.size(1) < 2:
@@ -302,6 +311,8 @@ def generate_batch(model, config, args, pieces, seed, outs, device, progress=Non
             text=text,
             cfg_scale=args.cfg_scale,
             length_seconds=args.length_seconds,
+            eos_ramp=args.eos_ramp,
+            length_stop=args.length_stop,
         )
     print(f"  {len(outs) * args.max_new_tokens / (time.time() - t0):.0f} notes/s")
     save_samples(outs, [t.cpu() for t in (pitch, velocity, duration, delta_time, programs)], n_prompt, args, config)
@@ -356,6 +367,18 @@ def window_cond(config, args, pitch, delta_time, prompt_programs, has_prompt):
     return inst, density
 
 
+def fade_out(velocity, delta_time, seconds, floor=0.3, dt_seconds=0.02):
+    """Velocity bins of a row scaled down linearly over its last `seconds` (to floor x at the last onset), for rows
+    cut by --length-stop."""
+    onsets, t = [], 0.0
+    for d in delta_time:
+        t += d * dt_seconds
+        onsets.append(t)
+    end = onsets[-1] if onsets else 0.0
+    return [max(1, round(v * (floor + (1 - floor) * min(1.0, (end - o) / seconds)))) if v else v
+            for v, o in zip(velocity, onsets)]
+
+
 def save_samples(outs, streams, n_prompt, args, config):
     """One MIDI (and MP3) per row: the prompt dropped unless --keep-prompt, cut at the first EOS, BOS/EOS removed."""
     for r, out in enumerate(outs):
@@ -366,9 +389,16 @@ def save_samples(outs, streams, n_prompt, args, config):
             rows = [x[:cut] for x in rows]
             end = streams[0].size(1) - args.max_new_tokens + new.index(EOS_PITCH)
             secs = sum(streams[3][r, :end].tolist()) * 0.02  # from the first prompt note, as --length-seconds
-            print(f"  {out.name}: ended with EOS after {new.index(EOS_PITCH)} new notes, at {secs:.1f} s")
+            stopped = bool(args.length_stop and args.length_seconds) and secs >= args.length_stop * args.length_seconds
+            print(f"  {out.name}: ended with EOS after {new.index(EOS_PITCH)} new notes, at {secs:.1f} s"
+                  + (" (--length-stop" + (f", faded over {args.fade_seconds:g} s)" if args.fade_seconds else ")")
+                     if stopped else ""))
+        else:
+            stopped = False
         keep = [i for i, p in enumerate(rows[0]) if p < BOS_PITCH]
         rows = [[x[i] for i in keep] for x in rows]
+        if stopped and args.fade_seconds:
+            rows[1] = fade_out(rows[1], rows[3], args.fade_seconds)
         midi = tokens_to_midi(*rows[:4], programs=rows[4], max_polyphony=args.max_polyphony, max_delta=args.max_delta)
         out.parent.mkdir(parents=True, exist_ok=True)
         midi.write(str(out))

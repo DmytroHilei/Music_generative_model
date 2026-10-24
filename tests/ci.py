@@ -366,10 +366,14 @@ def train_gpu_eager(s):
 @test('train-gpu-f1', gpu=True, needs=('data',))
 def train_gpu_f1(s):
     """6 steps with the GPU defaults (bf16, torch.compile, fp8) and the planned F1 additions: GQA (1 KV head for 2
-    query heads, SDPA enable_gqa), the length input (n_remain 33), RoPE, BOS/EOS; then generate.py --length-seconds
-    from it (CUDA graph with the per-note length level)."""
-    out = s.train('train-gpu-f1', n_kv_head=1, n_remain=33, pos_emb='rope', special_tokens=True)
-    s.generate('gpu-f1', s.work / 'train-gpu-f1', '--length-seconds', 5)
+    query heads, SDPA enable_gqa), the length input (n_remain 33 + progress levels n_progress 17, length jitter /
+    slack, the length tables at 10x LR), RoPE, BOS/EOS; then generate.py --length-seconds from it with the EOS ramp
+    and the hard stop (CUDA graph with the per-note (remain, progress) levels)."""
+    out = s.train('train-gpu-f1', n_kv_head=1, n_remain=33, n_progress=17, remain_jitter=0.1, remain_slack=0.05,
+                  remain_lr_mult=10, pos_emb='rope', special_tokens=True)
+    if 'length tables:' not in out:
+        raise Fail('no own optimizer group for the length tables')
+    s.generate('gpu-f1', s.work / 'train-gpu-f1', '--length-seconds', 5, '--eos-ramp', 1, '--length-stop', 1.5)
     losses = val_losses(out)
     return f'val {losses[0][1]:.3f} -> {losses[-1][1]:.3f}'
 
@@ -492,20 +496,49 @@ def generate_cpu(s):
 @test('finetune-cpu-f1', needs=('train-cpu',))
 def finetune_cpu_f1(s):
     """init_from=finetune from train-cpu on the CPU into the planned F1 additions: GQA (2 heads mean-pooled into 1 KV
-    head) and the length input (n_remain 33, zero-init, seconds to the piece's end from the loader), with BOS/EOS."""
+    head) and the length input (n_remain 33 + n_progress 17, zero-init, seconds to the piece's end and from its start
+    from the loader), with BOS/EOS."""
     from musicar.model.checkpoint import resolve_checkpoint
     out = s.train('finetune-cpu-f1', init_from='finetune', init_ckpt=resolve_checkpoint(s.work / 'train-cpu'),
-                  special_tokens=True, n_kv_head=1, n_remain=33, **CPU)
-    if 'K / V mean-pooled to 1 heads' not in out or 'transformer.cond_remain.weight' not in out:
-        raise Fail('no K / V pooling or no new cond_remain in the finetune output')
+                  special_tokens=True, n_kv_head=1, n_remain=33, n_progress=17, **CPU)
+    if 'K / V mean-pooled to 1 heads' not in out or 'transformer.cond_remain.weight' not in out \
+            or 'transformer.cond_progress.weight' not in out:
+        raise Fail('no K / V pooling or no new cond_remain / cond_progress in the finetune output')
     losses = val_losses(out)
     return f'val {losses[0][1]:.3f} -> {losses[-1][1]:.3f}'
 
 
+@test('gqa-transfer-cpu', needs=('train-cpu',))
+def gqa_transfer_cpu(s):
+    """MHA -> GQA conversion layer by layer (musicar/model/gqa.py) from train-cpu on the CPU: gqa_init='pca' (merge
+    from the input moments of 2 calibration batches through the teacher stream) + attn_transfer (each layer learns its
+    own full attention; the loss is their summed relative MSE), then the normal finetune from its ckpt.pt (already 1
+    KV head: no pooling again)."""
+    from musicar.model.checkpoint import resolve_checkpoint
+    over = {**TINY, **CPU, 'out_dir': s.work / 'gqa-transfer-cpu', 'csv_path': f'store:{s.work}/syn',
+            'cache_dir': s.work, 'init_from': 'finetune', 'init_ckpt': resolve_checkpoint(s.work / 'train-cpu'),
+            'n_kv_head': 1, 'gqa_init': 'pca', 'gqa_calib_batches': 2, 'attn_transfer': True, 'learning_rate': 1e-3,
+            'ckpt_interval_min': 0.01}
+    out = s.run([PY, 'train.py', *(f'--{k}={v}' for k, v in over.items())])
+    if 'gqa_init pca: 2 layers merged' not in out or 'K / V mean-pooled to 1 heads' not in out:
+        raise Fail('no mean-pool + pca merge in the stage-1 output')
+    transfer = [float(x) for x in re.findall(r'step [1-9]\d*: train loss ([\d.]+)', out)]
+    if not transfer or not all(math.isfinite(x) for x in transfer):
+        raise Fail(f'stage-1 train (transfer) losses {transfer}')
+    out2 = s.train('gqa-stage2-cpu', init_from='finetune', init_ckpt=s.work / 'gqa-transfer-cpu' / 'ckpt.pt',
+                   n_kv_head=1, **CPU)
+    if 'mean-pooled' in out2:
+        raise Fail('stage 2 pooled the converted checkpoint again')
+    losses = val_losses(out2)
+    return f'transfer {transfer[0]:.3f} -> {transfer[-1]:.3f}; stage 2 val {losses[0][1]:.3f} -> {losses[-1][1]:.3f}'
+
+
 @test('generate-cpu-length', needs=('finetune-cpu-f1',))
 def generate_cpu_length(s):
-    """generate.py --length-seconds on the CPU from finetune-cpu-f1 (GQA cache, per-note length levels)."""
-    s.generate('cpu-length', s.work / 'finetune-cpu-f1', '--device', 'cpu', '--length-seconds', 5)
+    """generate.py --length-seconds on the CPU from finetune-cpu-f1 (GQA cache, per-note remain + progress levels),
+    with the EOS ramp and the hard stop (fade-out)."""
+    s.generate('cpu-length', s.work / 'finetune-cpu-f1', '--device', 'cpu', '--length-seconds', 5, '--eos-ramp', 1,
+               '--length-stop', 1.2)
 
 
 @test('length-follow-cpu', needs=('finetune-cpu-f1',))

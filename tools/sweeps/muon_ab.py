@@ -2,8 +2,10 @@
 Muon variants at 42M (todo c7cb78dd; optimizations.md "Paper search before F1"): the abl_2048 recipe (12L x 512, new
 block, Muon 1e-3 WSD, 1,500 it x 65,536 notes) on the local stores (config/pretrain/abl_2048_local.py), one arm per
 variant of musicar/training/optim.py Muon, seeds 1337 / 2 / 3 run round-robin (every arm at a seed before the next
-seed, so a stopped sweep still compares all arms). Final held-out GigaMIDI CE and Aria CE per run in logs/muon_ab.md;
-a run whose log has its last eval is skipped. ckpt.pt (optimizer state) deleted after each run, model_bf16.pt kept.
+seed, so a stopped sweep still compares all arms). Arm rms = the step-size control for normuon (both update at RMS
+0.2 exactly; base Muon's Moonlight scale gives RMS 0.2 only when every orthogonalized singular value is 1). Final held-out GigaMIDI CE and Aria CE per run in logs/muon_ab.md;
+a run whose log has its last eval is skipped. ckpt.pt and pre_cooldown.pt (optimizer state) deleted after each
+run, model_bf16.pt kept.
 
     .venv/bin/python tools/sweeps/muon_ab.py --dry-run
     .venv/bin/python tools/sweeps/muon_ab.py                       # 12 runs, ~25 min each
@@ -30,6 +32,7 @@ ARMS = {
     'polar': ['--muon_ns=polar'],
     'normuon': ['--muon_normuon=True'],
     'cautious': ['--muon_cautious=True'],
+    'rms': ['--muon_rms=True'],  # NorMuon's step size (RMS 0.2 exactly) without its per-neuron division
 }
 SEEDS = (1337, 2, 3)
 LAST = 'step 1499:'
@@ -116,7 +119,8 @@ def main():
         with open(log_path(arm, seed), 'w') as f:
             code = subprocess.run(cmd, cwd=ROOT, stdout=f, stderr=subprocess.STDOUT).returncode
         print(f'{time.strftime("%H:%M")}   {n}: exit {code}', flush=True)
-        (ROOT / f'checkpoints/{n}/ckpt.pt').unlink(missing_ok=True)
+        for f in ('ckpt.pt', 'pre_cooldown.pt'):
+            (ROOT / f'checkpoints/{n}/{f}').unlink(missing_ok=True)
         table(arms, seeds)
     if job:
         job.finish(str(TABLE))

@@ -257,6 +257,21 @@ REGISTER = {'low': dict(en=['low-pitched', 'deep'], en_post=['in a low register'
                          uk_post=['у високому регістрі'])}
 LENGTH = {'low': dict(en=['short'], uk=[('короткий', 'коротка')]),
           'high': dict(en=['long', 'lengthy'], uk=[('довгий', 'довга')])}
+# length words 'v2' (StoreCaptions length_words; text_control.md C3): five buckets of the file length (captions.LENGTH_V2_Q),
+# an adjective or a phrase after the noun; {m} = the length in whole minutes
+LENGTH_V2 = {
+    'short': dict(en=['short', 'brief'], uk=[('короткий', 'коротка')], en_post=['under half a minute long'],
+                  uk_post=['до пів хвилини'], tag=('short', 'короткий')),
+    'minute': dict(en=['one-minute'], uk=[('хвилинний', 'хвилинна')],
+                   en_post=['about a minute long', 'around a minute long'],
+                   uk_post=['приблизно на хвилину', 'тривалістю близько хвилини'], tag=('about a minute', 'близько хвилини')),
+    'few': dict(en=[], uk=[], en_post=['a few minutes long', 'about {m} minutes long'],
+                uk_post=['на кілька хвилин', 'тривалістю близько {m} хвилин'], tag=('a few minutes', 'кілька хвилин')),
+    'long': dict(en=['long', 'lengthy'], uk=[('довгий', 'довга')], en_post=['about {m} minutes long'],
+                 uk_post=['тривалістю близько {m} хвилин'], tag=('long', 'довгий')),
+    'very_long': dict(en=['very long', 'extended'], uk=[('дуже довгий', 'дуже довга')],
+                      en_post=['over eight minutes long'], uk_post=['понад вісім хвилин'], tag=('very long', 'дуже довгий')),
+}
 
 # ---------------------------------------------------------------- key
 KEY_UK = {'C': 'до', 'C#': 'до-дієз', 'Db': 'ре-бемоль', 'D': 'ре', 'D#': 'ре-дієз', 'Eb': 'мі-бемоль', 'E': 'мі',

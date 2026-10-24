@@ -81,6 +81,8 @@ class CausalSelfAttention(nn.Module):
         self.q_norm = RMSNorm(config.n_embd // config.n_head) if config.qk_norm else None
         self.k_norm = RMSNorm(config.n_embd // config.n_head) if config.qk_norm else None
         self.kv_bits = 0  # > 0: keys / values rounded as an int8 KV cache would hold them (musicar.model.quant)
+        self.teacher = None  # GQA conversion stage 1 (musicar.model.gqa): [frozen full attention] (not a submodule)
+        self.transfer_loss = None
 
     def forward(self, x, cache=None, layer=0, rope=None):
         """cache (inference only): a KVCache with preallocated k/v buffers. x is either a prefill from position 0
@@ -122,12 +124,27 @@ class CausalSelfAttention(nn.Module):
                 k, v, causal, mask = ck, cv, False, cache.mask  # attend to every filled position
 
         # causal self-attention (fused SDPA kernels: flash / cuDNN / memory-efficient)
-        y = F.scaled_dot_product_attention(q, k, v, attn_mask=mask, dropout_p=self.dropout if self.training else 0,
-                                           is_causal=causal, enable_gqa=nkv != self.n_head)
+        if T == 1 and nkv != self.n_head:
+            # GQA one-note step: each group's query heads attend as query rows of their KV head, so the cache is read
+            # once (with a mask, SDPA's enable_gqa path expands K / V to n_head heads: 107M at B = 64, 4 KV heads,
+            # 4.7k -> 10.6k notes/s on the laptop)
+            y = F.scaled_dot_product_attention(q.reshape(B, nkv, self.n_head // nkv, hs), k, v, attn_mask=mask,
+                                               dropout_p=self.dropout if self.training else 0,
+                                               is_causal=False).reshape(B, self.n_head, 1, hs)
+        else:
+            y = F.scaled_dot_product_attention(q, k, v, attn_mask=mask, dropout_p=self.dropout if self.training else 0,
+                                               is_causal=causal, enable_gqa=nkv != self.n_head)
         y = y.transpose(1, 2).contiguous().view(B, T, C) # re-assemble all head outputs side by side
 
         # output projection
         y = self.resid_dropout(self.c_proj(y))
+        if self.teacher is not None:  # stage 1: learn the teacher's output, pass the teacher's on (training only)
+            self.transfer_loss = None
+            if self.training and cache is None:
+                with torch.no_grad():
+                    y_t = self.teacher[0](x, None, layer, rope)
+                self.transfer_loss = (y.float() - y_t.float()).pow(2).mean() / y_t.float().pow(2).mean().clamp(min=1e-8)
+                return y_t
         return y
 
 
@@ -215,6 +232,10 @@ class MusicConfig:
     # level per position (musicar.data.loader.remain_level: 0 = none, 1 = at the end, then log steps up to ~20 min),
     # added at that position from a zero-init table; 0 = off. Generation feeds the requested length minus the time so far
     n_remain: int = 0
+    # with n_remain: the share of the piece played at each note's onset (elapsed / length; musicar.data.loader.
+    # progress_level: 0 = none, then equal steps, the last one also past the end) from a second zero-init table; the
+    # length input is then (B, T, 2) levels (remain, progress). 0 = off
+    n_progress: int = 0
     # multi-instrument: a 5th note attribute, the instrument (GM program 0-127, DRUM_PROGRAM = drums); 0 = off.
     # Added to the input embedding (zero init, like the style table) and predicted by a cascade head after dt.
     n_programs: int = 0
@@ -495,6 +516,9 @@ class GPT(nn.Module):
             self.transformer['cond_density'] = nn.Embedding(config.n_density, config.n_embd)
         if config.n_remain:
             self.transformer['cond_remain'] = nn.Embedding(config.n_remain, config.n_embd)
+        if config.n_progress:
+            assert config.n_remain, 'n_progress needs n_remain (one length input)'
+            self.transformer['cond_progress'] = nn.Embedding(config.n_progress, config.n_embd)
         if config.n_programs:
             self.transformer['program'] = nn.Embedding(config.n_programs, config.n_embd)
         if config.text_prefix:
@@ -534,7 +558,7 @@ class GPT(nn.Module):
         if config.n_programs:
             # zero: a piano model grown to programs starts with exactly its old input embedding
             torch.nn.init.zeros_(self.transformer['program'].weight)
-        for name in ('cond_inst', 'cond_density', 'cond_remain', 'text_proj'):
+        for name in ('cond_inst', 'cond_density', 'cond_remain', 'cond_progress', 'text_proj'):
             if name in self.transformer:
                 torch.nn.init.zeros_(self.transformer[name].weight)  # starts as the unconditioned model
         if config.text_prefix:  # _init_weights re-drew its Linears; small gate, embedding-like null prefix
@@ -551,14 +575,25 @@ class GPT(nn.Module):
     def linear_attn_layers(self):
         return [b.attn for b in self.transformer.h if isinstance(b.attn, GatedDeltaNet)]
 
-    def attach_attn_teachers(self):
-        """Stage 1 of a linear-attention conversion (linear_attn.py): each linear layer keeps a frozen copy of the
-        attention layer it starts from (its current c_attn / c_proj) and learns that layer's output; forward's loss is
-        then their summed relative MSE instead of the CE. Returns the parameter-name prefixes that should train."""
+    def attach_attn_teachers(self, teacher_state=None):
+        """Stage 1 of an attention conversion: each converted layer keeps a frozen copy of the attention layer it
+        starts from and learns that layer's output; forward's loss is then their summed relative MSE instead of the CE.
+        Linear-attention layers (linear_attn.py) copy their own c_attn / c_proj; GQA layers (fewer key / value heads
+        than query heads, musicar.model.gqa) get the checkpoint's full-attention weights from teacher_state
+        ({layer: (c_attn, c_proj) state dicts}, gqa.teacher_weights). Returns the parameter-name prefixes that should
+        train."""
+        from musicar.model.gqa import gqa_layers, teacher_attention
         prefixes = []
         cfg = self.config
+        gqa = gqa_layers(self)
         for i, block in enumerate(self.transformer.h):
-            if isinstance(block.attn, GatedDeltaNet):
+            if i in gqa:
+                assert teacher_state and i in teacher_state, \
+                    f"GQA layer {i}: the teacher needs the checkpoint's full-attention weights (a finetune that lowers " \
+                    "n_kv_head; a resume has only the converted ones)"
+                block.attn.teacher = [teacher_attention(cfg, *teacher_state[i], block.attn.c_attn.weight.device)]
+                prefixes.append(f'transformer.h.{i}.attn.')
+            elif isinstance(block.attn, GatedDeltaNet):
                 attn = CausalSelfAttention(cfg).to(block.attn.c_attn.weight.device)
                 attn.c_attn.load_state_dict(block.attn.c_attn.state_dict())
                 attn.c_proj.load_state_dict(block.attn.c_proj.state_dict())
@@ -567,6 +602,10 @@ class GPT(nn.Module):
                 block.attn.attach_teacher(attn.eval())
                 prefixes.append(f'transformer.h.{i}.attn.')
         return prefixes
+
+    def detach_attn_teachers(self):
+        for block in self.transformer.h:
+            block.attn.teacher, block.attn.transfer_loss = None, None
 
     @property
     def head_names(self):
@@ -602,7 +641,7 @@ class GPT(nn.Module):
         the notes from K; only the notes' states are returned) in every call but a one-note step.
         step: whether a T == 1 call with a cache is a one-note step (default) or a prefill (text_prefix models).
         remain (n_remain models): (B, T) remain_level of each input note (0 = none; None = none everywhere, the
-        trained 'none' row, not nothing).
+        trained 'none' row, not nothing); n_progress models: (B, T, 2) = (remain_level, progress_level).
         sections (section_len models): (vectors (B, E, section_slots, C) from section_vectors, pos (B, E)): the
         window's section captions and the note index each one comes before (ascending, pos[:, 0] = 0, pos > T =
         unused); None = every caption is the null one. 'prefix': the vectors are inserted into the sequence (a cache
@@ -640,7 +679,12 @@ class GPT(nn.Module):
         if self.config.n_remain:
             if remain is None:
                 remain = torch.zeros(b, t, dtype=torch.long, device=device)
-            x = x + self.transformer['cond_remain'](remain)
+            if self.config.n_progress:
+                if remain.dim() == 2:  # remain levels only: progress 'none'
+                    remain = torch.stack([remain, torch.zeros_like(remain)], -1)
+                x = x + self.transformer['cond_remain'](remain[..., 0]) + self.transformer['cond_progress'](remain[..., 1])
+            else:
+                x = x + self.transformer['cond_remain'](remain)
         if text is not None and self.config.text_dim and not self.config.text_prefix:
             if self.config.text_center:
                 has = text.abs().sum(-1, keepdim=True) > 0
@@ -771,8 +815,8 @@ class GPT(nn.Module):
                     parts[f'late_{name}'] = F.cross_entropy(
                         logits[name][:, late_from:].reshape(-1, lg.size(-1)).float(), lt.reshape(-1),
                         ignore_index=-1, reduction='sum') / (lt != -1).sum().clamp(min=1)
-        transfer = [m.transfer_loss for m in self.linear_attn_layers() if m.transfer_loss is not None]
-        if transfer:  # stage 1 of a linear-attention conversion: only the layers' match to their attention
+        transfer = [b.attn.transfer_loss for b in self.transformer.h if getattr(b.attn, 'transfer_loss', None) is not None]
+        if transfer:  # stage 1 of an attention conversion: only the layers' match to their attention
             loss = sum(transfer)
             parts['transfer'] = loss.detach()
         if cf is not None:

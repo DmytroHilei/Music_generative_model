@@ -3,6 +3,8 @@ Do pieces end at the requested length? (length control, roadmap item 11; MusicCo
 with --length-seconds L for every L in --lengths, plus a 'none' run (no length: where the model ends on its own), rows
 in a batch, instruments sampled. Per row: the first EOS, its time (seconds from BOS, the sum of the delta_times up to
 it) and end / L. Models without the length input get the same runs, all of them unconditional (the control arm).
+Time budget for every model: rows still going at --stop-at x L (default 2) end there (generate's length_stop) and
+count as 'stopped'; --eos-ramp tests the decode-time EOS bias past L.
 
     python eval/compare/length_follow.py --checkpoints checkpoints/len_pilot,checkpoints/len_ctrl \\
         --out results/length_follow/pilot --midi 2 --mp3
@@ -38,9 +40,13 @@ def parse_args():
     p = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     p.add_argument('--checkpoints', required=True, help='comma-separated checkpoint files / run dirs')
     p.add_argument('--lengths', default='30,60,120,240', help='requested lengths in seconds')
-    p.add_argument('--rows', type=int, default=8, help='rows per length (one batch)')
-    p.add_argument('--max-nps', type=float, default=12.0,
-                   help='notes per second the note budget allows: max_new = 1.5 x L x this')
+    p.add_argument('--rows', type=int, default=32, help='rows per length (one batch)')
+    p.add_argument('--stop-at', type=float, default=2.0,
+                   help='time budget: rows still going at this x L end there (generate length_stop; every model); '
+                        "they count as 'stopped', not as ended")
+    p.add_argument('--max-nps', type=float, default=30.0,
+                   help='note cap: max_new = stop-at x L x this (the time budget ends a row first unless it is denser)')
+    p.add_argument('--eos-ramp', type=float, default=0.0, help="generate's eos_ramp (EOS logit + this per second past L)")
     p.add_argument('--temperature', type=float, default=0.85)
     p.add_argument('--top-p', type=float, default=None)
     p.add_argument('--eos-t1', action='store_true', help="generate's eos_t1 (EOS at temperature 1)")
@@ -64,15 +70,17 @@ def end_of(pitch, dt):
 
 
 def summarize(rows):
-    lines = ['| checkpoint | length (s) | rows | ended | median end (s) | median end / L | within 10% | within 20% '
-             '| median abs log2(end / L) |', '|---|---|---|---|---|---|---|---|---|']
+    lines = ['| checkpoint | length (s) | rows | ended | stopped | median end (s) | median end / L | within 10% | '
+             'within 20% | median abs log2(end / L) |', '|---|---|---|---|---|---|---|---|---|---|']
     keys = sorted({(r['checkpoint'], r['length']) for r in rows},
                   key=lambda k: (k[0], k[1] != 'none', 0.0 if k[1] == 'none' else float(k[1])))
     for ck, length in keys:
         rs = [r for r in rows if (r['checkpoint'], r['length']) == (ck, length)]
-        ended = [r for r in rs if r['end_s'] != '']
+        stopped = [r for r in rs if r.get('stopped') == '1' or r.get('stopped') == 1]
+        ended = [r for r in rs if r['end_s'] != '' and r not in stopped]  # the model's own EOS
         ends = [float(r['end_s']) for r in ended]
-        cells = [ck, length, str(len(rs)), f'{len(ended) / len(rs):.0%}', f'{statistics.median(ends):.1f}' if ends else '']
+        cells = [ck, length, str(len(rs)), f'{len(ended) / len(rs):.0%}', f'{len(stopped) / len(rs):.0%}',
+                 f'{statistics.median(ends):.1f}' if ends else '']
         if length == 'none' or not ends:
             cells += [''] * 4
         else:
@@ -82,7 +90,9 @@ def summarize(rows):
                       f'{sum(abs(x - 1) <= 0.2 for x in ratio) / len(rs):.0%}',
                       f'{statistics.median(abs(math.log2(max(x, 1e-3))) for x in ratio):.2f}']
         lines.append('| ' + ' | '.join(cells) + ' |')
-    lines += ['', 'within 10% / 20%: share of all rows (rows without an EOS count as misses).']
+    lines += ['', 'ended: rows with their own EOS; stopped: rows cut by the time budget (--stop-at x L). Median end '
+              'and within 10% / 20% over the own EOS; within: share of all rows (stopped rows and rows without an EOS '
+              'count as misses).']
     return '\n'.join(lines) + '\n'
 
 
@@ -106,22 +116,26 @@ def main():
         assert model.config.pitch_size > BOS_PITCH, f'{ck}: needs BOS / EOS'
         name = Path(ck).name if Path(ck).is_dir() else Path(ck).parent.name
         if not model.config.n_remain:
-            print(f'{name}: no length input (n_remain 0): every run is unconditional')
+            print(f'{name}: no length input (n_remain 0): every run is unconditional (the length is only the time '
+                  'budget)')
         for length in runs:
             t0 = time.time()
-            n_new = int(1.5 * (length or max(lengths)) * args.max_nps)
+            n_new = int(args.stop_at * (length or max(lengths)) * args.max_nps)
             torch.manual_seed(args.seed)
             bos = [torch.full((args.rows, 1), BOS_PITCH, device=args.device)] + \
                 [torch.zeros(args.rows, 1, dtype=torch.long, device=args.device)] * 4
             res = generate(model, *bos[:4], max_new_tokens=n_new, temperature=args.temperature, top_p=args.top_p,
                            program=None if model.config.n_programs else 0, programs=bos[4] if model.config.n_programs
-                           else None, return_programs=True, eos_t1=args.eos_t1, length_seconds=length)
+                           else None, return_programs=True, eos_t1=args.eos_t1, length_seconds=length,
+                           length_stop=args.stop_at if length else 0.0, eos_ramp=args.eos_ramp)
             arrays = [t.cpu() for t in res]
             label = 'none' if length is None else f'{length:g}'
             for r in range(args.rows):
                 notes, end_s = end_of(arrays[0][r], arrays[3][r])
+                stopped = bool(length) and end_s is not None and end_s >= args.stop_at * length - 1e-6
                 rows.append(dict(checkpoint=name, iter=it, length=label, row=r, seed=args.seed,
-                                 notes='' if notes is None else notes, end_s='' if end_s is None else f'{end_s:.2f}'))
+                                 notes='' if notes is None else notes, end_s='' if end_s is None else f'{end_s:.2f}',
+                                 stopped=int(stopped)))
                 if r < args.midi:
                     cut = [a[r:r + 1, :notes + 1] if notes is not None else a[r:r + 1] for a in arrays]
                     write_midi([c.numpy() for c in cut], 0, out / name / f'len{label}_{r}.mid', args.mp3,

@@ -47,6 +47,26 @@ def remain_level(seconds, n_remain=33):
     return torch.where(s < REMAIN_END, 1, 2 + (step * n).floor().clamp(0, n - 1)).long()
 
 
+def progress_level(elapsed, total, n_progress=17):
+    """Share of the piece played at each note's onset (elapsed / total seconds) -> level 1..n_progress-1 in equal steps
+    (MusicConfig.n_progress; at or past the end = the last level); 0 = none."""
+    n = n_progress - 1
+    r = torch.as_tensor(elapsed, dtype=torch.float32) / torch.as_tensor(total, dtype=torch.float32).clamp(min=REMAIN_END)
+    return 1 + (r * n).floor().clamp(0, n - 1).long()
+
+
+def elapsed_seconds(pitch, delta_time, head, dt_seconds=0.02):
+    """Seconds from the start of each row's piece to its onset, for the rows (R,) of a window: `head` (the onset of
+    the window's first row in its piece) plus the delta_times since, restarting at 0 on a BOS (packed windows). On
+    every row of a piece elapsed + remaining_seconds = the piece's length."""
+    steps = delta_time.double() * dt_seconds
+    steps[0] = head
+    cum = steps.cumsum(0)
+    bos = pitch == BOS_PITCH
+    latest = torch.where(bos, torch.arange(len(pitch)), -1).cummax(0).values  # the last BOS at or before each row
+    return (cum - torch.where(latest >= 0, cum[latest.clamp(min=0)], 0.0)).float()
+
+
 def remaining_seconds(pitch, delta_time, tail, dt_seconds=0.02):
     """Seconds from each row's onset to the end of its piece, for the rows (R,) of a window: the delta_times of the
     rows after it up to the next EOS (0 at an EOS, and in the padding after it), plus `tail` (the seconds of the piece
@@ -179,6 +199,8 @@ class NoteWindowDataset(Dataset):
         counterfactual=False,
         splice_frac=0.0,
         remain=False,
+        elapsed=False,
+        length_words='v1',
     ):
         """
         csv_path:    one or more sources separated by ',': a CSV (paths inside relative to root_dir or absolute),
@@ -252,6 +274,10 @@ class NoteWindowDataset(Dataset):
         remain:      length control (MusicConfig.n_remain): each window also returns, last in x, the seconds from each
                      input row's onset to the end of its piece (remaining_seconds; float (block_size,), after the tempo
                      stretch); bucketed and dropped in train.py (remain_level)
+        elapsed:     with remain: also, after it, the seconds from the start of each row's piece to its onset
+                     (elapsed_seconds), for the progress input (MusicConfig.n_progress) and the length jitter in train.py
+        length_words: file captions' length attribute ('v1' short / long at the extremes, 'v2' five buckets for every
+                     file; musicar.text.captions.LENGTH_V2_Q)
         splice_frac: training only, with section_len: this share of windows (drawn before change_frac) is spliced:
                      notes of one file up to a section boundary (at window index lead + margin .. block_size - margin,
                      as change windows), then a section of another long file of the same store from its own section
@@ -306,8 +332,8 @@ class NoteWindowDataset(Dataset):
         self.captioners = None
         if captions or any(store_tiers):
             from musicar.text.captions import StoreCaptions
-            self.captioners = [StoreCaptions(store.name, captions or 'data/labels', uk_share=caption_uk)
-                               for store in self.store_dirs]
+            self.captioners = [StoreCaptions(store.name, captions or 'data/labels', uk_share=caption_uk,
+                                             length_words=length_words) for store in self.store_dirs]
         self.with_captions = bool(captions)
         self.caption_uk = caption_uk
         self.section_len, self.section_lead = section_len, section_lead
@@ -328,6 +354,7 @@ class NoteWindowDataset(Dataset):
         self.counterfactual = bool(counterfactual and section_len and not eval_stride)
         self.splice_frac = splice_frac if section_len and not eval_stride else 0.0
         self.remain = remain
+        self.elapsed = elapsed and remain
 
         store_ids, starts, lengths, styles_kept, file_ids = [], [], [], [], []
         for i, store in enumerate(self.store_dirs):
@@ -622,6 +649,7 @@ class NoteWindowDataset(Dataset):
 
         splice = change if not self.eval_stride and change is not None and len(change) == 5 else None
         tail = 0.0  # seconds of the (last) piece after the window, for remain
+        head = 0.0  # onset of the window's first row in its piece, for elapsed
         if splice is not None:
             rows, program = self._read(file_idx, v)
             rows2, program2 = self._read(splice[3], splice[4])
@@ -629,11 +657,13 @@ class NoteWindowDataset(Dataset):
             rows = torch.cat([rows[:b], rows2[b:]])
             program = None if program is None else torch.cat([program[:b], program2[b:]])
             tail = self._tail_seconds(splice[3], splice[4] + self.block_size) if self.remain else 0.0
+            head = self._head_seconds(file_idx, v) if self.elapsed else 0.0
         elif self.pack_short and self.short[file_idx]:
-            rows, program, tail = self._read_packed(file_idx)
+            rows, program, tail = self._read_packed(file_idx)  # starts at the file's BOS: head 0
         else:
             rows, program = self._read(file_idx, v)
             tail = self._tail_seconds(file_idx, v + self.block_size) if self.remain else 0.0
+            head = self._head_seconds(file_idx, v) if self.elapsed else 0.0
         pitch, velocity, duration, delta_time = rows.unbind(1)
         drums = program == DRUM_PROGRAM if program is not None else None
         if drums is not None:
@@ -654,7 +684,9 @@ class NoteWindowDataset(Dataset):
                 duration = self._stretch(duration, s, self.max_duration_bin)
                 delta_time = self._stretch(delta_time, s, self.max_delta_bin)
                 tail *= s
+                head *= s
         remain = remaining_seconds(pitch, delta_time, tail, self.time_resolution) if self.remain else None
+        elapsed = elapsed_seconds(pitch, delta_time, head, self.time_resolution) if self.elapsed else None
 
         streams = (pitch, velocity, duration, delta_time) + ((program,) if program is not None else ())
         n_rows = len(pitch)
@@ -683,7 +715,22 @@ class NoteWindowDataset(Dataset):
             if len(remain) < self.block_size + 1:
                 remain = F.pad(remain, (0, self.block_size + 1 - len(remain)))
             x = x + (remain[:-1],)
+        if elapsed is not None:
+            if len(elapsed) < self.block_size + 1:
+                elapsed = F.pad(elapsed, (0, self.block_size + 1 - len(elapsed)))
+            x = x + (elapsed[:-1],)
         return x, y
+
+    def _head_seconds(self, file_idx, first_row):
+        """Onset of file_idx's virtual row first_row from the piece's start (the sum of the delta_times up to and
+        including it; 0 at BOS)."""
+        a = first_row - self.pad
+        if a < 0:
+            return 0.0
+        store_id, start = int(self.store_ids[file_idx]), int(self.starts[file_idx])
+        a = min(a, int(self.lengths[file_idx]) - 2 * self.pad - 1)
+        dt = np.asarray(self.tokens[store_id][start:start + a + 1, 3], dtype=np.int64)
+        return float(dt.sum()) * self.time_resolution
 
     def _tail_seconds(self, file_idx, last_row):
         """Seconds of file_idx's notes after virtual row last_row (the sum of their delta_times; 0 from the last note

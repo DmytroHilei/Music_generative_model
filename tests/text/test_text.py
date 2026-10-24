@@ -270,6 +270,35 @@ def test_caption_vocab_and_uk_rendering():
                 assert re.search('(сумний|меланхолійний) джазовий', text), text
 
 
+def test_length_words_v2():
+    """length_words 'v2': five buckets for every file length; each renders in EN and UK as an adjective, a phrase
+    after the noun (minutes filled in) or a tag, the UK ones without Latin letters; StoreCaptions keeps 'v1' by
+    default."""
+    from musicar.text import vocab as V
+    from musicar.text.captions import length_v2, render_en, render_uk
+    assert [length_v2(s)[0] for s in (5, 29.9, 30, 89, 90, 239, 240, 479, 480, 900)] == \
+        ['short', 'short', 'minute', 'minute', 'few', 'few', 'long', 'long', 'very_long', 'very_long']
+    assert length_v2(150) == ('few', 2) and length_v2(300) == ('long', 5)
+    rng = random.Random(0)
+    for secs in (12, 55, 150, 300, 700):
+        a = {'length': length_v2(secs), 'genre': ['jazz']}
+        bucket, m = a['length']
+        e = V.LENGTH_V2[bucket]
+        en_words = e['en'] + [x.format(m=m) for x in e['en_post']] + [e['tag'][0]]
+        uk_words = [w[:-2] for pair in e['uk'] for w in pair] + [x.format(m=m) for x in e['uk_post']] + [e['tag'][1]]
+        en = [render_en(dict(a), rng).lower() for _ in range(60)]
+        uk = [render_uk(dict(a), rng).lower() for _ in range(60)]
+        assert all(any(w in t for w in en_words) for t in en), (secs, en)
+        assert all(any(w in t for w in uk_words) for t in uk), (secs, uk)
+        assert not any('{m}' in t for t in en + uk) and not any(re.search('[A-Za-z]', t) for t in uk), uk
+    assert 'an one' not in ' '.join(render_en({'length': ('minute', 1)}, rng) for _ in range(40))
+    with tempfile.TemporaryDirectory() as d:
+        root = make_store(Path(d))
+        assert StoreCaptions('toy_train', root / 'labels').length_words == 'v1'
+        c = StoreCaptions('toy_train', root / 'labels', length_words='v2')
+        assert all('length' in c._attributes(i, c.labels.get(i, {}), random.Random(0)) for i in range(6))
+
+
 def test_fix_uk_captions():
     sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'data_prep' / 'labels'))
     from fix_uk_captions import fix

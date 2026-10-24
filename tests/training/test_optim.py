@@ -73,11 +73,27 @@ def test_polar_express_orthogonalizes_closer():
         assert s.min() > q.min() and (s - 1).abs().mean() < 0.7 * (q - 1).abs().mean(), (shape, s, q)
 
 
+def test_length_tables_group():
+    """remain_lr_mult != 1: cond_remain / cond_progress in their own AdamW group (lr x mult, no weight decay), in no
+    other group; 1 = the old grouping (decayed with the other matrices)."""
+    m = tiny(pos_emb='rope', n_remain=33, n_progress=17)
+    tables = {id(m.transformer['cond_remain'].weight), id(m.transformer['cond_progress'].weight)}
+    for name in ('muon', 'adamw'):
+        opt = build_optimizer(name, m, 0.1, 1e-3, (0.9, 0.95), 'cpu', remain_lr_mult=10.0)
+        groups = [g for g in opt.param_groups if any(id(p) in tables for p in g['params'])]
+        assert len(groups) == 1 and {id(p) for p in groups[0]['params']} == tables, name
+        assert groups[0]['lr_mult'] == 10.0 and groups[0]['weight_decay'] == 0.0
+        old = build_optimizer(name, m, 0.1, 1e-3, (0.9, 0.95), 'cpu')
+        g = [g for g in old.param_groups if any(id(p) in tables for p in g['params'])]
+        assert len(g) == 1 and g[0]['weight_decay'] == 0.1 and g[0].get('lr_mult', 1.0) == 1.0, name
+
+
 def test_muon_variants_step():
-    """Polar Express / NorMuon / cautious each move every block matrix, keep the update RMS near Muon's 0.2 x lr, and
-    survive a state_dict round trip (NorMuon's neuron_v buffers)."""
+    """Polar Express / NorMuon / cautious / RMS 0.2 each move every block matrix, keep the update RMS near Muon's
+    0.2 x lr, and survive a state_dict round trip (NorMuon's neuron_v buffers); RMS 0.2 steps at exactly 0.2 x lr and
+    reports the default scale's RMS."""
     streams, _, targets = batch()
-    for kw in (dict(muon_ns='polar'), dict(muon_normuon=True), dict(muon_cautious=True)):
+    for kw in (dict(muon_ns='polar'), dict(muon_normuon=True), dict(muon_cautious=True), dict(muon_rms=True)):
         torch.manual_seed(0)
         m = tiny()
         opt = build_optimizer('muon', m, 0.0, 1e-3, (0.9, 0.95), 'cpu', **kw)
@@ -93,6 +109,11 @@ def test_muon_variants_step():
         muon = opt.optimizers[0]
         if kw.get('muon_normuon'):
             assert all(muon.state[p]['neuron_v'].shape == (p.shape[0],) for p in mats)
+        if kw.get('muon_rms'):
+            assert all(abs(r - 0.2) < 1e-3 for r in rms), rms
+        moon = muon.moonlight_rms()
+        assert (moon is not None and 0.05 < moon < 0.3) if kw.get('muon_normuon') or kw.get('muon_rms') else moon is None
+        assert muon.moonlight_rms() is None  # reset by the call
         opt.load_state_dict(opt.state_dict())
     try:
         build_optimizer('adamw', tiny(), 0.1, 1e-3, (0.9, 0.95), 'cpu', muon_normuon=True)
