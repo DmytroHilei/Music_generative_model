@@ -43,7 +43,8 @@ The sections are numbered in reading order:
 - **1–4: the model.** Captions go through the frozen LaBSE encoder and a small learned-query adapter, and become a
   few vectors inside the note sequence. The trunk is 28 pre-norm blocks over compound note tokens. The cascade heads
   pick Δt, instrument, pitch, duration and velocity one after another, each seeing the values already chosen.
-- **5: generation**, with classifier-free guidance over the captions.
+- **5: generation**, with classifier-free guidance over the captions, and how the instrument of each note is chosen
+  (band condition, captions, allowed set, its own temperature or one fixed instrument).
 - **6: the section-caption recipe.** Without it the model follows the first section's caption and ignores later ones.
 - **7: training curves** behind the design choices: trunk block, base pretraining, section-caption measures, and
   the conversion to grouped-query attention.
