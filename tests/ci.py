@@ -747,6 +747,7 @@ def main():
           + (f'  (GPU tests: {no_gpu})' if no_gpu else ''))
     results, t_start = {}, time.time()
     state = dict(commit=sha, started=run_dir.name, gpu=no_gpu or 'ok', minutes=0.0, finished=False, running=None,
+                 pid=os.getpid(), boot=ci_report.boot_id(),
                  plan=[dict(name=t['name'], gpu=t['gpu'], needs=list(t['needs']), doc=t['doc']) for t in tests],
                  results=results)
 

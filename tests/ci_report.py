@@ -4,6 +4,7 @@
   logs/ci/<run>/report.txt   every test: status, time, note; a failed one also its command and traceback / log tail
   logs/ci/<run>/report.html  the same as a page: failed rows red and expanded, passed collapsed, a failed-only
                              filter, links to the test logs; reloads itself every 5 s while the run is going
+                             (a run whose ci.py process is gone, e.g. killed or a reboot, shows as interrupted)
   logs/ci/index.html         every run with its counts, and a test x run grid of the last HISTORY runs
   logs/ci/latest             symlink to the newest run
 
@@ -45,6 +46,7 @@ h1 { font-size: 20px; margin: 0 0 4px; }
 .FAIL { color: var(--fail); background: var(--fail-bg); }
 .SKIP { color: var(--skip); background: var(--skip-bg); }
 .RUNNING, .PENDING { color: var(--run); background: var(--run-bg); }
+.INTERRUPTED { color: var(--muted); background: var(--card); outline: 1px dashed var(--muted); }
 .PENDING { opacity: .6; }
 label.filter { display: inline-flex; gap: 6px; align-items: center; margin: 4px 0 12px; cursor: pointer; }
 details { border: 1px solid var(--line); border-radius: 8px; margin: 6px 0; background: var(--card); }
@@ -84,9 +86,36 @@ def write_atomic(path, text):
     os.replace(tmp, path)
 
 
+def boot_id():
+    try:
+        return Path('/proc/sys/kernel/random/boot_id').read_text().strip()
+    except OSError:
+        return ''
+
+
+def boot_time():
+    try:
+        return next(int(ln.split()[1]) for ln in Path('/proc/stat').read_text().splitlines() if ln.startswith('btime'))
+    except (OSError, StopIteration):
+        return 0
+
+
+def session_alive(summary, path):
+    """Whether the ci.py process of an unfinished run still runs: same boot and its pid a ci.py process. Runs from
+    before the pid was recorded: alive if their summary.json was written in this boot."""
+    if 'pid' not in summary:
+        return path.stat().st_mtime >= boot_time()
+    if summary.get('boot') != boot_id():
+        return False
+    try:
+        return b'ci.py' in Path(f'/proc/{summary["pid"]}/cmdline').read_bytes()
+    except OSError:
+        return False
+
+
 def load(run_dir):
     """A run's summary.json (None if it has none). Runs from before the report module have no plan / finished keys:
-    their results are the plan and they are finished."""
+    their results are the plan and they are finished. interrupted: unfinished and its ci.py process gone."""
     p = Path(run_dir) / 'summary.json'
     if not p.exists():
         return None
@@ -94,7 +123,21 @@ def load(run_dir):
     s.setdefault('finished', True)
     s.setdefault('running', None)
     s.setdefault('plan', [dict(name=n, gpu=False, doc='') for n in s.get('results', {})])
+    s['interrupted'] = not s['finished'] and not session_alive(s, p)
     return s
+
+
+def run_state(summary):
+    """(label, chip class) of a whole run."""
+    if summary.get('interrupted'):
+        return 'interrupted', 'INTERRUPTED'
+    if not summary['finished']:
+        return 'running', 'RUNNING'
+    return ('failed', 'FAIL') if counts(summary)['FAIL'] else ('ok', 'PASS')
+
+
+def going(summary):
+    return not summary['finished'] and not summary.get('interrupted')
 
 
 def status_of(summary, name):
@@ -102,8 +145,8 @@ def status_of(summary, name):
     if r:
         return r['status']
     if summary['running'] == name:
-        return 'RUNNING'
-    return 'PENDING' if not summary['finished'] else 'NOT RUN'
+        return 'INTERRUPTED' if summary.get('interrupted') else 'RUNNING'
+    return 'PENDING' if going(summary) else 'NOT RUN'
 
 
 def counts(summary):
@@ -141,7 +184,8 @@ def failure_detail(run_dir, name, result):
 
 def headline(summary):
     c = counts(summary)
-    state = 'running' if not summary['finished'] else f'finished in {summary.get("minutes", 0):g} min'
+    state = (f'interrupted after {summary.get("minutes", 0):g} min (ci.py process gone)' if summary.get('interrupted')
+             else 'running' if not summary['finished'] else f'finished in {summary.get("minutes", 0):g} min')
     return (f'CI run {summary["started"]}  commit {summary.get("commit", "?")}  {state}  '
             f'{c["PASS"]} passed, {c["FAIL"]} failed, {c["SKIP"]} skipped')
 
@@ -175,8 +219,11 @@ def write_html(run_dir, summary):
     e = html.escape
     c = counts(summary)
     chips = ''.join(f'<span class="chip {k}">{c[k]} {k.lower()}</span>' for k in STATUSES if c[k])
-    if not summary['finished']:
-        n_left = sum(t['name'] not in summary['results'] for t in summary['plan'])
+    n_left = sum(t['name'] not in summary['results'] for t in summary['plan'])
+    if summary.get('interrupted'):
+        chips += (f'<span class="chip INTERRUPTED">interrupted in {e(summary["running"] or "-")} '
+                  f'({n_left} not run)</span>')
+    elif not summary['finished']:
         chips += f'<span class="chip RUNNING">running {e(summary["running"] or "")} ({n_left} left)</span>'
     rows = []
     for t in summary['plan']:
@@ -201,12 +248,13 @@ def write_html(run_dir, summary):
                     f'<span class="note">{e(r.get("note", ""))}</span></summary><div class="body">{body}</div></details>')
     body = (f'<h1>CI run {e(summary["started"])}</h1>'
             f'<div class="meta">commit {e(summary.get("commit", "?"))} · GPU: {e(str(summary.get("gpu", "?")))} · '
-            + ('running' if not summary['finished'] else f'{summary.get("minutes", 0):g} min')
+            + (f'{run_state(summary)[0]} after {summary.get("minutes", 0):g} min' if not summary['finished']
+               else f'{summary.get("minutes", 0):g} min')
             + f' · <a href="report.txt">report.txt</a> · <a href="../index.html">all runs</a></div>'
             f'<div class="counts">{chips}</div>'
             f'<label class="filter"><input type="checkbox" id="failed-only"> failed only</label>' + ''.join(rows))
     write_atomic(Path(run_dir) / 'report.html', page(f'CI {summary["started"]}', body,
-                                                     refresh=not summary['finished'], script=FILTER_JS))
+                                                     refresh=going(summary), script=FILTER_JS))
 
 
 def runs(ci_dir=CI_DIR):
@@ -224,8 +272,11 @@ def write_index(ci_dir=CI_DIR):
              '<th>min</th></tr>']
     for d, s in all_runs:
         c = counts(s)
-        state = 'running' if not s['finished'] else ('failed' if c['FAIL'] else 'ok')
-        cls = 'RUNNING' if not s['finished'] else ('FAIL' if c['FAIL'] else 'PASS')
+        state, cls = run_state(s)
+        report = d / 'report.html'
+        if s['interrupted'] and (not report.exists() or 'http-equiv="refresh"' in report.read_text()):
+            write_text(d, s)  # its last report still says running
+            write_html(d, s)
         lines.append(f'<tr><td><a href="{e(d.name)}/report.html">{e(d.name)}</a></td><td>{e(s.get("commit", "?"))}</td>'
                      f'<td><span class="chip {cls}">{state}</span></td><td>{c["PASS"]}</td><td>{c["FAIL"]}</td>'
                      f'<td>{c["SKIP"]}</td><td>{s.get("minutes", "")}</td></tr>')
@@ -243,13 +294,14 @@ def write_index(ci_dir=CI_DIR):
         cells = []
         for d, s in recent:
             st = status_of(s, name) if any(t['name'] == name for t in s['plan']) else ''
-            mark = {'PASS': '✓', 'FAIL': '✗', 'SKIP': '–', 'RUNNING': '…', 'PENDING': '·'}.get(st, '')
+            mark = {'PASS': '✓', 'FAIL': '✗', 'SKIP': '–', 'RUNNING': '…', 'PENDING': '·',
+                    'INTERRUPTED': '↯'}.get(st, '')
             note = s['results'].get(name, {}).get('note', '')
             cells.append(f'<td class="cell {st.replace(" ", "")}"><a href="{e(d.name)}/report.html" '
                          f'title="{e(d.name)}: {e(st)} {e(note)}">{mark}</a></td>' if st else '<td></td>')
         grid.append(f'<tr><th>{e(name)}</th>' + ''.join(cells) + '</tr>')
     grid.append('</table></div>')
-    running = any(not s['finished'] for _, s in all_runs[:1])
+    running = any(going(s) for _, s in all_runs[:1])
     body = (f'<h1>CI runs</h1><div class="meta">{len(all_runs)} runs in {e(str(ci_dir))} · updated '
             f'{time.strftime("%Y-%m-%d %H:%M:%S")}' + (' · <a href="latest/report.html">latest</a>' if all_runs else '')
             + '</div>' + ''.join(lines) + f'<h2>Last {len(recent)} runs by test</h2>' + ''.join(grid))
@@ -265,7 +317,8 @@ def link_latest(run_dir, ci_dir=CI_DIR):
 
 
 def write_run(run_dir, summary=None, ci_dir=CI_DIR):
-    """report.txt + report.html of a run, then the index (summary: the run's state, else its summary.json)."""
+    """report.txt + report.html of a run, then the index (summary: the run's state from its own ci.py process, else
+    its summary.json)."""
     summary = summary or load(run_dir)
     write_text(run_dir, summary)
     write_html(run_dir, summary)

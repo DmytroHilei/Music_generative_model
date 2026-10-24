@@ -1,6 +1,8 @@
 """tests/ci_report.py checks (no GPU): python tests/tools/test_ci_report.py  (or tests/run.py)."""
 
 import json
+import os
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -76,6 +78,35 @@ def test_old_summary_without_plan():
         assert s['finished'] and [t['name'] for t in s['plan']] == ['lint']
         ci_report.write_run(d, ci_dir=Path(tmp))
         assert 'PASS     lint' in (d / 'report.txt').read_text()
+
+
+def test_interrupted_run():
+    """An unfinished run whose ci.py process is gone (other boot, dead pid) shows as interrupted and stops reloading;
+    one whose pid is a live ci.py process stays running."""
+    with tempfile.TemporaryDirectory() as tmp:
+        ci = Path(tmp)
+        live = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)', 'ci.py'])
+        try:
+            for name, pid, boot in (('20261023_100000', os.getpid(), ci_report.boot_id()),  # not a ci.py process
+                                    ('20261023_110000', live.pid, 'another-boot'),
+                                    ('20261023_120000', live.pid, ci_report.boot_id())):
+                d, summary = make_run(ci, name, {'lint': dict(status='PASS', seconds=0.1, note='')},
+                                      plan=['lint', 'unit-cpu', 'docs'], finished=False, running='unit-cpu')
+                summary.update(pid=pid, boot=boot)
+                (d / 'summary.json').write_text(json.dumps(summary))
+            states = {d.name: ci_report.load(d)['interrupted'] for d in ci_report.runs(ci)}
+            assert states == {'20261023_100000': True, '20261023_110000': True, '20261023_120000': False}, states
+            ci_report.write_index(ci)
+        finally:
+            live.kill()
+        page = (ci / '20261023_100000' / 'report.html').read_text()
+        assert 'interrupted in unit-cpu (2 not run)' in page and 'http-equiv="refresh"' not in page
+        assert '>NOT RUN<' in page and '>PENDING<' not in page
+        assert 'interrupted after 0.5 min' in (ci / '20261023_100000' / 'report.txt').read_text()
+        index = (ci / 'index.html').read_text()
+        assert index.count('chip INTERRUPTED">interrupted<') == 2 and 'class="cell INTERRUPTED"' in index
+        assert 'http-equiv="refresh"' in index, 'the newest run is still going'
+        assert not (ci / '20261023_120000' / 'report.html').exists(), 'a live run keeps the reports of its ci.py'
 
 
 if __name__ == '__main__':

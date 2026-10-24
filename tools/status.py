@@ -5,7 +5,8 @@ Live dashboard of everything running in this project: training runs, song downlo
     .venv/bin/python tools/status.py --once     # print once
     .venv/bin/python tools/status.py --web 8765 # no terminal view: serve it as a web page (phone on the same network:
                                                 # http://<laptop ip>:8765/?t=<token>, the token is printed);
-                                                # the project to-do list at /todo?t=<token> (tools/todo_web.py)
+                                                # the project to-do list at /todo?t=<token> (tools/todo_web.py),
+                                                # the CI reports at /ci/?t=<token> (tools/ci_web.py)
     tools/dashboard_service.sh install          # the same, always on: systemd user service on 127.0.0.1, fixed token,
                                                 # https://<machine>.<tailnet>.ts.net through tailscale serve
 
@@ -37,6 +38,7 @@ from musicar.jobstatus import read_jobs
 
 ROOT = Path(__file__).resolve().parent.parent
 LOGS = ROOT / 'logs'
+COOKIE = 'musicar_t'  # web page: the access token as a cookie (set by any ?t=<token> request)
 
 # training runs in the order they execute: (label, log file, params)
 RUNS = [
@@ -990,32 +992,46 @@ def tailscale_urls(port):
 
 def serve(port, interval, show_all, token, host='0.0.0.0'):
     """The dashboard as a self-refreshing HTML page (rich's own HTML export of the same view) on host:port (0.0.0.0:
-    every address of this machine), and the to-do page (tools/todo_web.py); requests without ?t=<token> get 403."""
+    every address of this machine), the to-do page (tools/todo_web.py) and the CI reports (tools/ci_web.py); requests
+    without ?t=<token> or the cookie it sets get 403 (the cookie keeps the CI pages' relative links working)."""
     import io
     import threading
+    from http.cookies import SimpleCookie
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
     from urllib.parse import parse_qs, urlsplit
     from rich.console import Console
+    import ci_web
     import todo_web
     page = [b'starting']
 
     class Handler(BaseHTTPRequestHandler):
-        def reply(self, code, ctype, body):
+        def reply(self, code, ctype, body, headers=()):
             self.send_response(code)
             self.send_header('Content-Type', ctype)
             self.send_header('Content-Length', str(len(body)))
+            if parse_qs(urlsplit(self.path).query).get('t') == [token]:
+                self.send_header('Set-Cookie', f'{COOKIE}={token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=31536000')
+            for k, v in headers:
+                self.send_header(k, v)
             self.end_headers()
             self.wfile.write(body)
 
         def allowed(self):
-            if parse_qs(urlsplit(self.path).query).get('t') == [token]:
+            cookie = SimpleCookie(self.headers.get('Cookie') or '').get(COOKIE)
+            if parse_qs(urlsplit(self.path).query).get('t') == [token] or (cookie and cookie.value == token):
                 return True
             self.reply(403, 'text/plain', b'forbidden')
             return False
 
         def do_GET(self):
-            if self.allowed():
-                self.reply(*(todo_web.handle('GET', self.path) or (200, 'text/html; charset=utf-8', page[0])))
+            if not self.allowed():
+                return
+            if urlsplit(self.path).path == '/ci':
+                query = urlsplit(self.path).query
+                self.reply(301, 'text/plain', b'', [('Location', '/ci/' + (f'?{query}' if query else ''))])
+                return
+            self.reply(*(todo_web.handle('GET', self.path) or ci_web.handle('GET', self.path)
+                         or (200, 'text/html; charset=utf-8', page[0])))
 
         def do_POST(self):
             if self.allowed():
@@ -1033,7 +1049,8 @@ def serve(port, interval, show_all, token, host='0.0.0.0'):
     head = (f'<meta http-equiv="refresh" content="{max(5, int(interval))}">'
             '<meta name="viewport" content="width=device-width, initial-scale=1">')
     link = (f'<body><p style="font:15px system-ui,sans-serif;margin:8px"><a href="/todo?t={token}" '
-            'style="color:#60a5fa">Project to-do &rarr;</a></p>')
+            f'style="color:#60a5fa">Project to-do &rarr;</a> &nbsp; <a href="/ci/?t={token}" '
+            'style="color:#60a5fa">CI runs &rarr;</a></p>')
     while True:
         console = Console(record=True, width=140, file=io.StringIO(), color_system='truecolor')
         console.print(render(show_all))
