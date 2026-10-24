@@ -57,8 +57,18 @@ ARMS = {
     'f1mix': ['--section_splice_frac=0.5', '--section_repeat=64', '--section_attrs=v2', '--n_remain=33',
               '--n_progress=17', '--remain_jitter=0.1', '--remain_lr_mult=10', '--length_words=v2', '--n_kv_head=4',
               '--init_ckpt=checkpoints/f1mix_s1/ckpt.pt', '--optimizer_name=adamw8bit'],
+    # F1's optimizer vs NorMuon (2026-10-24; 42M scratch A/B: NorMuon -0.151 held-out vs Muon) on the s50_v2 sections,
+    # 1,500 it each: 8-bit AdamW 1e-4 (F1's), NorMuon at the same LR (Muon on the block matrices, AdamW for the rest)
+    # and at 2e-4
+    'opt_adamw8': ['--section_splice_frac=0.5', '--section_repeat=64', '--section_attrs=v2',
+                   '--optimizer_name=adamw8bit'],
+    'opt_normuon': ['--section_splice_frac=0.5', '--section_repeat=64', '--section_attrs=v2', '--optimizer_name=muon',
+                    '--muon_normuon=True'],
+    'opt_normuon2': ['--section_splice_frac=0.5', '--section_repeat=64', '--section_attrs=v2', '--optimizer_name=muon',
+                     '--muon_normuon=True', '--learning_rate=2e-4', '--min_lr=2e-5'],
 }
-FOLLOW_PROMPTS = {'all_v2': 'section_v2', 's50_v2': 'section_v2', 'f1mix': 'section_v2'}  # section_follow --prompts
+FOLLOW_PROMPTS = {a: 'section_v2' for a in ('all_v2', 's50_v2', 'f1mix', 'opt_adamw8', 'opt_normuon',
+                                        'opt_normuon2')}  # section_follow --prompts
 ITERS = {'nocf': 2700, 'nocf_s50': 2700, 'cfcool': 2350, 'cf1': 2200, 's50_v2': 2700}  # others MAX_ITERS
 TABLE = ROOT / 'logs/sections/forget.md'
 BASELINE = 'checkpoints/v2_A0'
