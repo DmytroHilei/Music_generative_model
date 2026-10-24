@@ -342,7 +342,7 @@ stem & one separated part of a recording (vocals, bass, drums, ...) & Demucs \rc
 
 % transformer block
 \node[box, minimum width=26mm] (ln1) at (0, 4.5) {RMSNorm 1};
-\node[box, minimum width=36mm, minimum height=8mm] (att) at (0, 5.55) {Causal self-attention\\[-2pt] {\scriptsize 18 query / 6 key-value heads (GQA)}\\[-3pt] {\scriptsize head size 64, RoPE, QK-norm}};
+\node[box, minimum width=36mm, minimum height=8mm] (att) at (0, 5.55) {Causal self-attention\\[-2pt] {\scriptsize 18 query / 6 key-value heads (GQA)}\\[-3pt] {\scriptsize Q $1152\to18\times64$, K / V $1152\to6\times64$}\\[-3pt] {\scriptsize RoPE, QK-norm}};
 \node[sum] (a1) at (0, 6.95) {$+$};
 \node[box, minimum width=26mm] (ln2) at (0, 8.1) {RMSNorm 2};
 \node[box, minimum width=36mm, minimum height=8mm] (ffn) at (0, 9.2) {SwiGLU feed-forward\\[-2pt] {\scriptsize $1152\to3072\to1152$}};
