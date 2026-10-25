@@ -649,6 +649,8 @@ class GPT(nn.Module):
         (B, L, text_dim) token states (None = no caption), whose prefix goes in front of the notes (positions 0..K-1,
         the notes from K; only the notes' states are returned) in every call but a one-note step.
         step: whether a T == 1 call with a cache is a one-note step (default) or a prefill (text_prefix models).
+        cond (cond_inst / n_density models): (instrument multi-hot (B, n_programs), density level (B,)); None = the
+        trained 'none' (empty set, density level 0), as window_conditions gives a dropped window.
         remain (n_remain models): (B, T) remain_level of each input note (0 = none; None = none everywhere, the
         trained 'none' row, not nothing); n_progress models: (B, T, 2) = (remain_level, progress_level).
         sections (section_len models): (vectors (B, E, section_slots, C) from section_vectors, pos (B, E)): the
@@ -685,6 +687,8 @@ class GPT(nn.Module):
                 x = x + self.transformer['cond_inst'](inst.to(x.dtype)).unsqueeze(1)
             if self.config.n_density:
                 x = x + self.transformer['cond_density'](density).unsqueeze(1)
+        elif self.config.n_density:  # None = 'none' as trained: the empty instrument set adds 0, density level 0 its row
+            x = x + self.transformer['cond_density'](torch.zeros(b, dtype=torch.long, device=device)).unsqueeze(1)
         if self.config.n_remain:
             if remain is None:
                 remain = torch.zeros(b, t, dtype=torch.long, device=device)
