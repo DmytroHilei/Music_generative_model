@@ -262,6 +262,9 @@ class MusicConfig:
     # padding, all zero = no caption) -> TextPrefix -> text_prefix vectors in front of the notes (no loss on them),
     # instead of the T1 vector
     text_prefix: int = 0
+    # with text_prefix: prefix position 0 is a learned caption-independent sink vector (init from a BOS note's
+    # embedding, the base's position 0), the caption takes the other text_prefix - 1 slots (attention-sink A/B)
+    text_sink: bool = False
     # section captions (text_control.md "Where the caption acts"): a caption per section_len notes of the piece, from
     # that section's own notes (0 = off; needs text_prefix). The caption of section k arrives section_lead notes
     # before the section starts (0 = with its first note, section_len = a whole section ahead). Its token states ->
@@ -390,8 +393,12 @@ class TextPrefix(nn.Module):
     tokens (all zero) get K learned null vectors instead (init like an embedding), the 'no caption' of dropout and
     guidance. Neither starts at exactly zero: all-zero prefix rows gave NaN gradients in the trunk (2026-10-18)."""
 
-    def __init__(self, text_dim, n_embd, k, n_head=12, hidden=2048):
+    def __init__(self, text_dim, n_embd, k, n_head=12, hidden=2048, sink=False):
         super().__init__()
+        # sink: the first of the k vectors is a learned constant (the same with and without a caption), a place for the
+        # trunk's attention sink in front of the caption vectors
+        self.sink = nn.Parameter(torch.randn(1, n_embd) * 0.02) if sink else None
+        k = k - 1 if sink else k
         self.queries = nn.Parameter(torch.randn(k, text_dim) * 0.02)
         self.kv_norm = nn.LayerNorm(text_dim)
         self.attn = nn.MultiheadAttention(text_dim, n_head, batch_first=True)
@@ -409,7 +416,10 @@ class TextPrefix(nn.Module):
         kv = self.kv_norm(states)
         z, _ = self.attn(q, kv, kv, key_padding_mask=~tok, need_weights=False)
         p = self.mlp(z + q) * self.gate
-        return torch.where(has[:, None, None], p, self.null.to(p.dtype).expand(b, -1, -1))
+        out = torch.where(has[:, None, None], p, self.null.to(p.dtype).expand(b, -1, -1))
+        if self.sink is not None:
+            out = torch.cat([self.sink.to(out.dtype).expand(b, -1, -1), out], 1)
+        return out
 
 
 class SectionCrossAttention(nn.Module):
@@ -531,8 +541,9 @@ class GPT(nn.Module):
             # the adapters attend over the text encoder's width: the trunk's head count if it divides it (12 at 107M),
             # else the largest one below that does (450M: 18 heads, LaBSE 768 -> 16); weight shapes don't depend on it
             text_heads = max(h for h in range(1, config.n_head + 1) if config.text_dim % h == 0)
+            assert not config.text_sink or config.text_prefix >= 2, 'text_sink needs a caption slot after the sink'
             self.transformer['text_prefix'] = TextPrefix(config.text_dim, config.n_embd, config.text_prefix,
-                                                         n_head=text_heads)
+                                                         n_head=text_heads, sink=config.text_sink)
             if config.section_len:
                 assert config.section_mode in ('prefix', 'xattn'), config.section_mode
                 assert 0 <= config.section_lead <= config.section_len
@@ -771,6 +782,18 @@ class GPT(nn.Module):
             cache.chunk_start = None
         return self.transformer.ln_f(x[:, -1:])
 
+    @torch.no_grad()
+    def init_text_sink(self):
+        """text_sink: the sink vector = the input embedding of a BOS note (pitch BOS_PITCH, the rest 0, instrument 0),
+        what the base model saw at position 0 of every piece start."""
+        from musicar.data.loader import BOS_PITCH
+        dev = self.transformer['text_prefix'].sink.device
+        z = torch.zeros(1, 1, dtype=torch.long, device=dev)
+        x = self.transformer.music_embeddings(z + BOS_PITCH, z, z, z)
+        if self.config.n_programs:
+            x = x + self.transformer['program'](z)
+        self.transformer['text_prefix'].sink.copy_(x[0].to(self.transformer['text_prefix'].sink.dtype))
+
     def add_section_cls(self):
         """Training-only section recognition head (forward cf): does a section's notes match its caption? A
         linear map of the mean hidden state over the section's first notes; its keys start with 'aux_' (load_model
@@ -778,7 +801,7 @@ class GPT(nn.Module):
         self.aux_section_cls = nn.Linear(self.config.n_embd, 1)
 
     def forward(self, pitch, velocity, duration, delta_time, style=None, program=None, targets=None, cond=None,
-                text=None, sections=None, late_from=0, cf=None, remain=None):
+                text=None, sections=None, late_from=0, cf=None, remain=None, early_notes=0):
         """
         Returns (parts, loss). loss = sum of the per-head CEs with label smoothing (what we optimize),
         parts = dict name -> CE without label smoothing (detached, for honest logging / comparing runs).
@@ -791,6 +814,9 @@ class GPT(nn.Module):
         text: (B, text_dim) caption vectors for models with text_dim.
         sections: (token states (B, E, L, text_dim), pos (B, E)) of the window's section captions (see encode).
         late_from > 0: parts also has 'late_<head>' = the CE over positions >= late_from only (validation).
+        early_notes > 0: parts also has 'early_sum_<head>' / 'early_n_<head>' = the CE summed over, and the count of,
+          the positions less than early_notes notes after the window's last BOS (validation: where captions act;
+          a sum and a count, since many windows have none - summed_ce divides the totals).
         cf (training, sections): counterfactual loss with the previous section caption, a dict of
           rows (R,) batch rows to compare (a fixed number, so the compiled shapes stay put), states (R, E, L,
           text_dim) their section captions with the changed section's replaced by the one before it, start (R,)
@@ -810,6 +836,12 @@ class GPT(nn.Module):
         ls = self.config.label_smoothing
         loss = 0.0
         parts = {}
+        early = None
+        if early_notes:
+            from musicar.data.loader import BOS_PITCH
+            pos = torch.arange(pitch.size(1), device=pitch.device)
+            bos = torch.where(pitch == BOS_PITCH, pos, -1).cummax(1).values      # (B, T) index of the last BOS
+            early = (bos >= 0) & (pos - bos < early_notes)
         for name in self.head_names:
             lg = logits[name].view(-1, logits[name].size(-1))
             t = tgt[name].reshape(-1)
@@ -824,6 +856,10 @@ class GPT(nn.Module):
                     parts[f'late_{name}'] = F.cross_entropy(
                         logits[name][:, late_from:].reshape(-1, lg.size(-1)).float(), lt.reshape(-1),
                         ignore_index=-1, reduction='sum') / (lt != -1).sum().clamp(min=1)
+                if early is not None:
+                    et = torch.where(early, tgt[name], -1).reshape(-1)
+                    parts[f'early_sum_{name}'] = F.cross_entropy(lg.float(), et, ignore_index=-1, reduction='sum')
+                    parts[f'early_n_{name}'] = (et != -1).sum().float()
         transfer = [b.attn.transfer_loss for b in self.transformer.h if getattr(b.attn, 'transfer_loss', None) is not None]
         if transfer:  # stage 1 of an attention conversion: only the layers' match to their attention
             loss = sum(transfer)

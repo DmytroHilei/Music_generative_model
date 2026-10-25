@@ -51,6 +51,32 @@ def test_head_variants():
         assert list(out) == list(m.cascade.order)
 
 
+def test_early_ce():
+    # early_notes: CE summed over / count of the positions < N notes after the last BOS (none in a window without one);
+    # summed_ce divides the totals, so windows without a BOS don't pull the mean
+    import torch.nn.functional as F
+    from musicar.data.loader import BOS_PITCH
+    from musicar.eval.val_loss import estimate_val_loss
+    m = tiny(pitch_size=BOS_PITCH + 2)
+    streams, _, targets = batch(B=3, T=16, pitch_size=BOS_PITCH + 2)
+    streams[0][0, 0] = BOS_PITCH    # row 0: a piece starts at 0
+    streams[0][1, 9] = BOS_PITCH    # row 1: at 9
+    streams[0][2] %= BOS_PITCH      # row 2: no BOS
+    with torch.no_grad():
+        parts, _ = m(*streams, targets=targets, early_notes=4)
+        logits = m.cascade(m.encode(*streams), dict(zip(m.head_names, targets)))
+    want = torch.zeros(3, 16, dtype=torch.bool)
+    want[0, :4] = want[1, 9:13] = True
+    assert parts['early_n_pitch'].item() == 8
+    ref = F.cross_entropy(logits['pitch'][want].float(), targets[0][want], reduction='sum')
+    assert torch.allclose(parts['early_sum_pitch'], ref, atol=1e-4)
+    batches = [((streams, {'early_notes': 4}), targets), (([t[2:] for t in streams], {'early_notes': 4}),
+                                                         [t[2:] for t in targets])]
+    out = estimate_val_loss(m, batches, torch.no_grad())
+    assert abs(out['ce/early_pitch'] - ref.item() / 8) < 1e-4 and out['early_notes_seen'] == 8
+    assert 'ce/early_total' in out
+
+
 def test_masked_targets_give_zero_not_nan():
     m = tiny()
     streams, _, targets = batch()

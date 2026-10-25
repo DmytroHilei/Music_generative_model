@@ -12,6 +12,11 @@ def summed_ce(metrics):
         metrics['ce/total_all'] = metrics['ce/total'] + metrics['ce/program']
     if 'ce/late_pitch' in metrics:  # GPT.forward(late_from=...): the same over the late positions only
         metrics['ce/late_total'] = sum(metrics[f'ce/late_{name}'] for name in STREAM_ORDER)
+    if 'ce/early_n_pitch' in metrics:  # GPT.forward(early_notes=...): summed CE / count over the whole evaluation
+        for name in STREAM_ORDER:
+            metrics[f'ce/early_{name}'] = metrics[f'ce/early_sum_{name}'] / max(metrics[f'ce/early_n_{name}'], 1e-9)
+        metrics['ce/early_total'] = sum(metrics[f'ce/early_{name}'] for name in STREAM_ORDER)
+        metrics['early_notes_seen'] = metrics['ce/early_n_pitch'] * metrics.get('batches', 1)  # total, not per batch
 
 
 @torch.no_grad()
@@ -29,5 +34,6 @@ def estimate_val_loss(model, batches, ctx):
         n += 1
     model.train()
     out = {k: v / n for k, v in sums.items()}
+    out['batches'] = n
     summed_ce(out)
     return out

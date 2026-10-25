@@ -24,13 +24,14 @@ class TextEncoder:
     """LaBSE (multilingual BERT-base, frozen): list of strings -> (B, 768) unit vectors, the BERT pooler output
     (= sentence-transformers' CLS + Dense + tanh), L2-normalized. An empty string -> the zero vector = 'no caption'
     (what caption dropout trains), so the model's text_proj adds nothing for it. Weights in `dtype` on `device`;
-    the output is float32."""
+    the output is float32, on `out_device` (default `device`; e.g. LaBSE on the CPU next to a model on the GPU)."""
 
-    def __init__(self, name=LABSE, device='cpu', dtype=torch.float32, max_length=128):
+    def __init__(self, name=LABSE, device='cpu', dtype=torch.float32, max_length=128, out_device=None):
         from transformers import AutoModel, AutoTokenizer
         self.tokenizer = AutoTokenizer.from_pretrained(name)
         self.model = AutoModel.from_pretrained(name, dtype=dtype).to(device).eval().requires_grad_(False)
         self.device = torch.device(device)
+        self.out_device = torch.device(out_device) if out_device is not None else self.device
         self.max_length = max_length
         self.dim = self.model.config.hidden_size
 
@@ -49,14 +50,15 @@ class TextEncoder:
                                    max_length=self.max_length, return_tensors='pt').to(self.device)
             pooled = self.model(**batch).pooler_output.float()
             out[idx] = torch.nn.functional.normalize(pooled, dim=-1)
-        return out
+        return out.to(self.out_device)
 
     def _tokens(self, texts, max_length):
         out = torch.zeros(len(texts), max_length, self.dim, device=self.device)
         idx = [i for i, t in enumerate(texts) if t]
         if idx:
-            batch = self.tokenizer([texts[i] for i in idx], padding='max_length', truncation=True,
+            # padded to the longest text only (masked positions change nothing), then zero rows up to max_length
+            batch = self.tokenizer([texts[i] for i in idx], padding=True, truncation=True,
                                    max_length=max_length, return_tensors='pt').to(self.device)
             states = self.model(**batch).last_hidden_state.float()
-            out[idx] = states * batch['attention_mask'][..., None].float()
-        return out
+            out[idx, :states.shape[1]] = states * batch['attention_mask'][..., None].float()
+        return out.to(self.out_device)

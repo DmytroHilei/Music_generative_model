@@ -15,6 +15,7 @@ init_from:
 import os
 # fewer fragmentation OOMs: the caching allocator grows segments instead of carving fixed blocks (set before CUDA starts)
 os.environ.setdefault('PYTORCH_CUDA_ALLOC_CONF', 'expandable_segments:True')
+import gc
 import time
 import random
 import signal
@@ -119,6 +120,8 @@ qk_norm = False           # RMSNorm on each head's q and k
 cond_inst = False         # condition on the set of instruments in the window (multi-hot, zero-init, needs n_programs)
 n_density = 0             # condition on the window's notes/s level (16 = 15 levels + none; 0 = off)
 cond_dropout = 0.15       # training: share of windows whose conditions are replaced by 'none'
+eval_cond = True          # False: every evaluation (val CE, text / section gains) with the conditions set to 'none'
+text_encoder_device = ''  # '' = the model's device; 'cpu': the frozen text encoder off the GPU (~0.9 GB for LaBSE)
 n_remain = 0              # length control: seconds-to-the-end levels per note (33 = 32 levels + none; 0 = off)
 n_progress = 0            # with n_remain: share-of-the-piece levels per note (17 = 16 equal steps + none; 0 = off)
 remain_jitter = 0.0       # training: each window's piece lengths x exp(N(0, this)) before the length levels (the
@@ -134,6 +137,7 @@ muon_bf16 = False         # Muon momentum buffer in bf16 (half the Muon optimize
 pack_short = False        # train only: short files fill their window with more short files (BOS..EOS each), no padding
 min_notes = 64            # with pad_short / pack_short: shorter files are still dropped
 n_programs = 0            # multi-instrument: 129 = GM programs + drums (needs a programs.u8 store or reads piano as 0)
+text_sink = False         # text_prefix position 0 = a learned sink vector (init from a BOS note), caption in the rest
 heads = 'cascade'         # output heads: 'cascade' | 'independent' (no chain) | 'linear' (rejected.py); heads A/B only
 # text control (context/claude/text_control.md): a caption per window from the label tables in `captions`, encoded by
 # the frozen `text_encoder`, added at every position through the model's zero-init text_proj (text_dim = its width)
@@ -183,6 +187,7 @@ section_cls_weight = 0.0  # > 0 (with section_cf_weight): BCE of the recognition
 section_cf_from = 0.0     # cf loss and recognition head from this share of lr_decay_iters on (0.8 = WSD cooldown only)
 section_splice_frac = 0.0  # training: share of spliced windows (section of another file, its caption)
 late_from = 256           # validation with captions: also the CE over window positions >= late_from (val/*late*)
+early_notes = 128         # validation with captions: also the CE over the first early_notes notes after a BOS (val/*early*)
 
 # wandb logging
 wandb_log = True
@@ -340,6 +345,9 @@ if checkpoint is not None:
         grown = load_expanded(model, state_dict)
         if grown:
             print(f"finetune: grown / new parameters (fresh init): {', '.join(grown)}")
+        if 'transformer.text_prefix.sink' in grown:
+            model.init_text_sink()
+            print("text_sink: initialized from a BOS note's input embedding")
     else:
         model.load_state_dict(state_dict)
     state_dict = None
@@ -413,7 +421,9 @@ optimizer = build_optimizer(optimizer_name, model, weight_decay, learning_rate, 
 encoder = None
 if text_encoder:
     from musicar.text.encoder import TextEncoder
-    encoder = TextEncoder(text_encoder, device=device, dtype=ptdtype if device_type == 'cuda' else torch.float32)
+    enc_device = text_encoder_device or device
+    encoder = TextEncoder(text_encoder, device=enc_device, out_device=device,
+                          dtype=ptdtype if torch.device(enc_device).type == 'cuda' else torch.float32)
     print(f"text encoder: {text_encoder} (frozen), captions from {captions}")
     if model.config.text_center and not model.text_mean.any():
         from musicar.text.encoder import caption_mean
@@ -486,14 +496,18 @@ def infinite_batches(loader):
             yield prepare(X, Y, cond_dropout, remain_dropout, length_noise=True)
 
 
-def val_loss(loader, conditioned=True):
-    """conditioned=False (conditioning models): every window gets 'none', i.e. the unconditional model.
-    Text models also get the CE over positions >= late_from (ce/late_*)."""
+def val_loss(loader, conditioned=None):
+    """conditioned=False (conditioning models): every window gets 'none', i.e. the unconditional model; None =
+    eval_cond. Text models also get the CE over positions >= late_from (ce/late_*)."""
+    conditioned = eval_cond if conditioned is None else conditioned
+
     def batches():
         for X, Y in loader:
             (streams, extra), Yd = prepare(X, Y, 0.0 if conditioned else 1.0)
             if captions and late_from:
                 extra['late_from'] = late_from
+            if captions and early_notes:
+                extra['early_notes'] = early_notes
             yield (streams, extra), Yd
     return estimate_val_loss(model, batches(), ctx)
 
@@ -617,6 +631,12 @@ if teacher_state is not None and gqa_init == 'pca':
     print(f"gqa_init pca: {len(merged)} layers merged from {moments.n:,} positions ({gqa_calib_batches} batches)")
     if not attn_transfer:
         raw_model.detach_attn_teachers()
+        teacher_state = None
+    # the float64 input moments (~300 MB for the 450M) stay on the GPU otherwise: every step of the 8 GB laptop
+    # rehearsal then ran out of memory and fell back to the spill path (19 s instead of 7 s per step)
+    del moments, merged
+    gc.collect()
+    torch.cuda.empty_cache()
     refresh_fp8_weights(raw_model)  # no-op without fp8_cache_weights
 train_sums, train_n = {}, 0  # running train metrics since the last eval (with dropout + augmentation)
 oom_events = 0  # CUDA OOMs survived by retrying the step
@@ -725,6 +745,8 @@ for iter_num in pbar:
                     val[name] = extra[f'text_{mode}']['ce/total'] - val['ce/total']
                     if 'ce/late_total' in val:
                         val[f'{name}_late'] = extra[f'text_{mode}']['ce/late_total'] - val['ce/late_total']
+                    if 'ce/early_total' in val:
+                        val[f'{name}_early'] = extra[f'text_{mode}']['ce/early_total'] - val['ce/early_total']
         samples = run_sample_eval(iter_num)
         train = {k: (v / train_n).item() for k, v in train_sums.items()} if train_n else {}
         if train:
@@ -742,6 +764,8 @@ for iter_num in pbar:
                       if 'text_gain' in val else "")
                    + (f" | late {val['text_gain_late']:+.4f} / none {val['text_gain_none_late']:+.4f}"
                       if 'text_gain_late' in val else "")
+                   + (f" | early {val['text_gain_early']:+.4f} / none {val['text_gain_none_early']:+.4f}"
+                      f" ({val['early_notes_seen']:.0f} notes)" if 'text_gain_early' in val else "")
                    + (f" | section gain {val['sec_gain']:+.4f} / none {val['sec_gain_none']:+.4f} / prev "
                       f"{val['sec_gain_prev']:+.4f}, late "
                       f"{val['sec_gain_late']:+.4f} / {val['sec_gain_none_late']:+.4f} | all text late "

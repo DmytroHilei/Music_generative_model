@@ -133,6 +133,46 @@ def test_text_prefix_cache_matches_forward():
                 assert torch.allclose(h[:, 0], full[:, i], atol=1e-4), (n0, i)
 
 
+def test_text_sink():
+    """text_sink: prefix slot 0 is one learned vector for every row (caption or not), the caption fills the other
+    slots; KV-cache decoding matches the full forward; init_text_sink copies a BOS note's input embedding; a finetune
+    adds the sink only together with a new prefix."""
+    from musicar.data.loader import BOS_PITCH
+    from musicar.model.checkpoint import ARCH_KEYS, merge_model_args
+    from musicar.model.gpt import KVCache
+    m = tiny(text_dim=8, text_prefix=4, text_sink=True)
+    tp = m.transformer['text_prefix']
+    assert tp.queries.shape == (3, 8) and tp.null.shape == (3, 32) and tp.sink.shape == (1, 32)
+    torch.nn.init.normal_(tp.gate)
+    torch.nn.init.normal_(tp.null)
+    states = torch.randn(2, 5, 8)
+    states[1] = 0  # no caption
+    with torch.no_grad():
+        out = tp(states)
+    assert out.shape == (2, 4, 32) and torch.equal(out[0, 0], tp.sink[0]) and torch.equal(out[1, 0], tp.sink[0])
+    assert torch.allclose(out[1, 1:], tp.null) and not torch.allclose(out[0, 1:], tp.null)
+    streams, program, _ = batch(B=2, T=10)
+    with torch.no_grad():
+        full = m.encode(*streams, program=program, text=states)
+        cache = KVCache(2, 2, 2, 4 + 10, 16, 'cpu', torch.float32)
+        h = m.encode(*(t[:, :3] for t in streams), program=program[:, :3], cache=cache, text=states, step=False)
+        assert torch.allclose(h, full[:, :3], atol=1e-5)
+        for i in range(3, 10):
+            cache.pos.fill_(4 + i)
+            h = m.encode(*(t[:, i:i + 1] for t in streams), program=program[:, i:i + 1], cache=cache)
+            assert torch.allclose(h[:, 0], full[:, i], atol=1e-4), i
+    m.init_text_sink()
+    z = torch.zeros(1, 1, dtype=torch.long)
+    with torch.no_grad():
+        bos = m.transformer.music_embeddings(z + BOS_PITCH, z, z, z)[0]
+    assert torch.allclose(tp.sink, bos)
+    wanted = {k: getattr(m.config, k) for k in ARCH_KEYS}
+    plain = {**wanted, 'text_prefix': 0, 'text_sink': False}
+    assert merge_model_args(plain, wanted, True, 64)['text_sink'], 'a new prefix may come with its sink'
+    old = {**wanted, 'text_sink': False}
+    assert not merge_model_args(old, wanted, True, 64)['text_sink'], 'an existing prefix keeps its layout'
+
+
 def test_text_prefix_generate():
     m = prefix_model()
     start = [torch.full((2, 1), 128)] + [torch.zeros(2, 1, dtype=torch.long)] * 3
