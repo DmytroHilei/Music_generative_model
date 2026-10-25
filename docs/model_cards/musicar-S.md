@@ -10,20 +10,20 @@ tags:
 
 # musicar-S
 
-A 108M-parameter autoregressive transformer that writes multi-instrument MIDI one note at a time, grown from [musicar-S-piano](https://huggingface.co/Dimitri-206265/musicar/tree/main/S-piano).
+A 108M-parameter autoregressive transformer that writes multi-instrument MIDI one note at a time, grown from [musicar-S-piano](https://huggingface.co/Dimitri-206265/musicar-S-piano).
 
 | Parameters | Context | Instruments | Training notes | License |
 |---|---|---|---|---|
 | 107.93M | 2,048 notes | 129 (128 General MIDI programs + drums) | 197M (band stage), after the piano model's 2.33B | CC BY-NC-SA 4.0 |
 
-![Architecture of musicar-S](https://huggingface.co/Dimitri-206265/musicar/resolve/main/S/diagram.png)
+![Architecture of musicar-S](https://huggingface.co/Dimitri-206265/musicar-S/resolve/main/diagram.png)
 
 ## Model summary
 
 musicar-S is musicar-S-piano, the project's earlier piano base, grown to 129 instruments: each note gained
 an instrument attribute with its own embedding and output head, the learned positions were replaced by RoPE, and the
 context grew from 512 to 2,048 notes. It was then trained for 3,000 steps (197M notes) on GigaMIDI and Aria-MIDI. It is
-the base of the project's 107M caption pilots. For new work it is superseded by the [musicar-L](https://huggingface.co/Dimitri-206265/musicar/tree/main/L).
+the base of the project's 107M caption pilots. For new work it is superseded by the [musicar-L](https://huggingface.co/Dimitri-206265/musicar-L).
 
 ## Model details
 
@@ -48,8 +48,8 @@ the base of the project's 107M caption pilots. For new work it is superseded by 
 From a clone of the code repository, with its environment installed (README, "Setup"):
 
 ```bash
-hf download Dimitri-206265/musicar --include "S/*" --local-dir checkpoints/musicar
-.venv/bin/python generate.py --checkpoint checkpoints/musicar/S/model_bf16.pt --sample-instruments \
+hf download Dimitri-206265/musicar-S --local-dir checkpoints/musicar-S
+.venv/bin/python generate.py --checkpoint checkpoints/musicar-S/model_bf16.pt --sample-instruments \
     --max-new-tokens 1000 --output samples/musicar-S.mid
 ```
 
@@ -69,9 +69,9 @@ import json
 from safetensors.torch import load_file
 from musicar.model.gpt import GPT, MusicConfig
 
-cfg = json.load(open("checkpoints/musicar/S/config.json"))
+cfg = json.load(open("checkpoints/musicar-S/config.json"))
 model = GPT(MusicConfig(**cfg["model_args"]))
-model.load_state_dict(load_file("checkpoints/musicar/S/model.safetensors"))
+model.load_state_dict(load_file("checkpoints/musicar-S/model.safetensors"))
 model.eval()
 ```
 
@@ -172,8 +172,6 @@ fine-tune on about 5,400 Ukrainian songs transcribed from audio.
 | `model_bf16.pt` | Training checkpoint: bf16 weights + `model_args` + the training config. This is what the repository's scripts load (`generate.py --checkpoint`, `train.py` with `init_from='finetune'`) |
 | `model.safetensors` + `config.json` | The same weights without pickle; `config.json` holds `model_args` |
 | `diagram.png` | The architecture diagram above |
-
-All in the `S/` folder of the repository; the other two models are the sibling folders.
 
 ## License
 

@@ -64,27 +64,24 @@ it). [`docs/figures/curves_data.py`](docs/figures/curves_data.py) rebuilds the c
 
 ## Pretrained models
 
-The three pretrained models are in one Hugging Face repository, [Dimitri-206265/musicar](https://huggingface.co/Dimitri-206265/musicar), under CC BY-NC-SA
-4.0: one folder per model, each with its weights (`model_bf16.pt` for the scripts here; `model.safetensors` +
-`config.json` without pickle), an architecture diagram and a model card.
+The three pretrained models are on Hugging Face under CC BY-NC-SA 4.0, one repository each, with the weights
+(`model_bf16.pt` for the scripts here; `model.safetensors` + `config.json` without pickle), an architecture diagram
+and a model card:
 
-| Folder | Parameters | What it is | Validation (nats / note) |
-|---|---|---|---|
-| [`L/`](https://huggingface.co/Dimitri-206265/musicar/tree/main/L) | 464M | multi-instrument (129 instruments), 2,048-note context, window conditions; the base of the planned captioned model | clean GigaMIDI 1.679 |
-| [`S/`](https://huggingface.co/Dimitri-206265/musicar/tree/main/S) | 108M | the piano model grown to 129 instruments and RoPE; the base of the 107M caption pilots | GigaMIDI 2.232 (original split) |
-| [`S-piano/`](https://huggingface.co/Dimitri-206265/musicar/tree/main/S-piano) | 107M | solo piano, 512-note context; the earlier base | Aria-MIDI 5.706 |
-
-![The three pretrained models](docs/figures/base_models.png)
+| Model | Parameters | What it is | Validation (nats / note) | Diagram |
+|---|---|---|---|---|
+| [musicar-L](https://huggingface.co/Dimitri-206265/musicar-L) | 464M | multi-instrument (129 instruments), 2,048-note context, window conditions; the base of the planned captioned model | clean GigaMIDI 1.679 | [png](docs/figures/base_450m.png) |
+| [musicar-S](https://huggingface.co/Dimitri-206265/musicar-S) | 108M | the piano model grown to 129 instruments and RoPE; the base of the 107M caption pilots | GigaMIDI 2.232 (original split) | [png](docs/figures/base_107m_band.png) |
+| [musicar-S-piano](https://huggingface.co/Dimitri-206265/musicar-S-piano) | 107M | solo piano, 512-note context; the earlier model | Aria-MIDI 5.706 | [png](docs/figures/base_107m_piano.png) |
 
 ```bash
-hf download Dimitri-206265/musicar --include "L/*" --local-dir checkpoints/musicar
-.venv/bin/python generate.py --checkpoint checkpoints/musicar/L/model_bf16.pt --sample-instruments \
+hf download Dimitri-206265/musicar-L --local-dir checkpoints/musicar-L
+.venv/bin/python generate.py --checkpoint checkpoints/musicar-L/model_bf16.pt --sample-instruments \
     --max-new-tokens 1000 --output samples/out.mid
 ```
 
-The diagrams are [`docs/figures/base_*.tex`](docs/figures) (one per model, plus `base_models.tex` for the page above;
-`figstyle.tex` is the shared style), the cards are in [`docs/model_cards/`](docs/model_cards) (`musicar.md` is the
-repository's root card).
+The diagrams are [`docs/figures/base_*.tex`](docs/figures) (`figstyle.tex` is the shared style), the cards are in
+[`docs/model_cards/`](docs/model_cards).
 
 ## Layout
 

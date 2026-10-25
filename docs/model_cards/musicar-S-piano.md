@@ -16,14 +16,14 @@ A 107M-parameter autoregressive transformer that writes solo-piano MIDI one note
 |---|---|---|---|---|
 | 106.84M | 512 notes | piano only | 2.33B | CC BY-NC-SA 4.0 |
 
-![Architecture of musicar-S-piano](https://huggingface.co/Dimitri-206265/musicar/resolve/main/S-piano/diagram.png)
+![Architecture of musicar-S-piano](https://huggingface.co/Dimitri-206265/musicar-S-piano/resolve/main/diagram.png)
 
 ## Model summary
 
 musicar-S-piano is the project's earlier piano base. It is a 14-layer decoder-only transformer over compound note
 tokens (one sequence position = one whole note), pretrained on 2.33B notes of solo-piano MIDI (MAESTRO,
-GiantMIDI-Piano, Aria-MIDI) on one 8 GB laptop GPU in 12.5 hours. It was later grown into [musicar-S](https://huggingface.co/Dimitri-206265/musicar/tree/main/S) (129
-instruments, 2,048-note context). Both S models are superseded by the [musicar-L](https://huggingface.co/Dimitri-206265/musicar/tree/main/L) for new work.
+GiantMIDI-Piano, Aria-MIDI) on one 8 GB laptop GPU in 12.5 hours. It was later grown into [musicar-S](https://huggingface.co/Dimitri-206265/musicar-S) (129
+instruments, 2,048-note context). Both S models are superseded by the [musicar-L](https://huggingface.co/Dimitri-206265/musicar-L) for new work.
 
 ## Model details
 
@@ -48,8 +48,8 @@ instruments, 2,048-note context). Both S models are superseded by the [musicar-L
 From a clone of the code repository, with its environment installed (README, "Setup"):
 
 ```bash
-hf download Dimitri-206265/musicar --include "S-piano/*" --local-dir checkpoints/musicar
-.venv/bin/python generate.py --checkpoint checkpoints/musicar/S-piano/model_bf16.pt \
+hf download Dimitri-206265/musicar-S-piano --local-dir checkpoints/musicar-S-piano
+.venv/bin/python generate.py --checkpoint checkpoints/musicar-S-piano/model_bf16.pt \
     --max-new-tokens 1000 --output samples/musicar-S-piano.mid
 ```
 
@@ -65,9 +65,9 @@ import json
 from safetensors.torch import load_file
 from musicar.model.gpt import GPT, MusicConfig
 
-cfg = json.load(open("checkpoints/musicar/S-piano/config.json"))
+cfg = json.load(open("checkpoints/musicar-S-piano/config.json"))
 model = GPT(MusicConfig(**cfg["model_args"]))
-model.load_state_dict(load_file("checkpoints/musicar/S-piano/model.safetensors"))
+model.load_state_dict(load_file("checkpoints/musicar-S-piano/model.safetensors"))
 model.eval()
 ```
 
@@ -157,8 +157,6 @@ captioned fine-tune on about 5,400 Ukrainian songs transcribed from audio.
 | `model_bf16.pt` | Training checkpoint: bf16 weights + `model_args` + the training config. This is what the repository's scripts load (`generate.py --checkpoint`, `train.py` with `init_from='finetune'`) |
 | `model.safetensors` + `config.json` | The same weights without pickle; `config.json` holds `model_args` |
 | `diagram.png` | The architecture diagram above |
-
-All in the `S-piano/` folder of the repository; the other two models are the sibling folders.
 
 ## License
 
