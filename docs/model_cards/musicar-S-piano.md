@@ -8,7 +8,7 @@ tags:
 - pytorch
 ---
 
-# musicar 107M piano
+# musicar-S-piano
 
 A 107M-parameter autoregressive transformer that writes solo-piano MIDI one note at a time.
 
@@ -16,14 +16,14 @@ A 107M-parameter autoregressive transformer that writes solo-piano MIDI one note
 |---|---|---|---|---|
 | 106.84M | 512 notes | piano only | 2.33B | CC BY-NC-SA 4.0 |
 
-![Architecture of musicar 107M piano](https://huggingface.co/Dimitri-206265/musicar/resolve/main/107m-piano/diagram.png)
+![Architecture of musicar-S-piano](https://huggingface.co/Dimitri-206265/musicar/resolve/main/S-piano/diagram.png)
 
 ## Model summary
 
-musicar 107M piano is the project's earlier piano base. It is a 14-layer decoder-only transformer over compound note
+musicar-S-piano is the project's earlier piano base. It is a 14-layer decoder-only transformer over compound note
 tokens (one sequence position = one whole note), pretrained on 2.33B notes of solo-piano MIDI (MAESTRO,
-GiantMIDI-Piano, Aria-MIDI) on one 8 GB laptop GPU in 12.5 hours. It was later grown into [musicar 107M band](https://huggingface.co/Dimitri-206265/musicar/tree/main/107m-band) (129
-instruments, 2,048-note context). Both 107M models are superseded by the [musicar 450M base](https://huggingface.co/Dimitri-206265/musicar/tree/main/450m-base) for new work.
+GiantMIDI-Piano, Aria-MIDI) on one 8 GB laptop GPU in 12.5 hours. It was later grown into [musicar-S](https://huggingface.co/Dimitri-206265/musicar/tree/main/S) (129
+instruments, 2,048-note context). Both S models are superseded by the [musicar-L](https://huggingface.co/Dimitri-206265/musicar/tree/main/L) for new work.
 
 ## Model details
 
@@ -48,9 +48,9 @@ instruments, 2,048-note context). Both 107M models are superseded by the [musica
 From a clone of the code repository, with its environment installed (README, "Setup"):
 
 ```bash
-hf download Dimitri-206265/musicar --include "107m-piano/*" --local-dir checkpoints/musicar
-.venv/bin/python generate.py --checkpoint checkpoints/musicar/107m-piano/model_bf16.pt \
-    --max-new-tokens 1000 --output samples/musicar-107m-piano.mid
+hf download Dimitri-206265/musicar --include "S-piano/*" --local-dir checkpoints/musicar
+.venv/bin/python generate.py --checkpoint checkpoints/musicar/S-piano/model_bf16.pt \
+    --max-new-tokens 1000 --output samples/musicar-S-piano.mid
 ```
 
 One token is one note, so this writes 1,000 new notes. Without `--prompt` the generation starts from a single artificial
@@ -65,9 +65,9 @@ import json
 from safetensors.torch import load_file
 from musicar.model.gpt import GPT, MusicConfig
 
-cfg = json.load(open("checkpoints/musicar/107m-piano/config.json"))
+cfg = json.load(open("checkpoints/musicar/S-piano/config.json"))
 model = GPT(MusicConfig(**cfg["model_args"]))
-model.load_state_dict(load_file("checkpoints/musicar/107m-piano/model.safetensors"))
+model.load_state_dict(load_file("checkpoints/musicar/S-piano/model.safetensors"))
 model.eval()
 ```
 
@@ -127,8 +127,8 @@ real music, not how good its samples sound; it is not a listening test.
 
 The Aria-MIDI result is inside the 5.47–5.72 forecast that the project's scaling ladder (smaller runs) gave before
 this run. The final 20% of the schedule (the decay) lowered it from 5.979 to 5.706. This is the evaluation of that
-time (512-note windows, the validation sets of that time): it is not comparable with the numbers of musicar 107M band or
-the 450M base, which use 2,048-note windows and other validation sets.
+time (512-note windows, the validation sets of that time): it is not comparable with the numbers of musicar-S or
+musicar-L, which use 2,048-note windows and other validation sets.
 
 ## Limitations and biases
 
@@ -145,9 +145,8 @@ the 450M base, which use 2,048-note windows and other validation sets.
 
 ## Future work
 
-Planned, not done. The 107M models will not be trained further; they stay as small, cheap bases for pilots (musicar
-107M band is the base of the caption pilots that come before the 450M's captioned run). The project's next models build
-on the 450M base: first a captioned fine-tune (F1, planned: captions from a frozen multilingual LaBSE encoder, in
+Planned, not done. The S models will not be trained further; they stay as small, cheap bases for pilots (musicar-S is the base of the caption pilots that come before musicar-L's captioned run). The project's next models build
+on musicar-L: first a captioned fine-tune (F1, planned: captions from a frozen multilingual LaBSE encoder, in
 English and Ukrainian, section captions and length control; the recipe is being settled in laptop pilots), then a
 captioned fine-tune on about 5,400 Ukrainian songs transcribed from audio.
 
@@ -159,7 +158,7 @@ captioned fine-tune on about 5,400 Ukrainian songs transcribed from audio.
 | `model.safetensors` + `config.json` | The same weights without pickle; `config.json` holds `model_args` |
 | `diagram.png` | The architecture diagram above |
 
-All in the `107m-piano/` folder of the repository; the other two models are the sibling folders.
+All in the `S-piano/` folder of the repository; the other two models are the sibling folders.
 
 ## License
 
@@ -175,6 +174,6 @@ terms.
   title        = {musicar: autoregressive symbolic music models},
   year         = {2026},
   howpublished = {\url{https://github.com/DmytroHilei/Music_generative_model}},
-  note         = {musicar 107M piano}
+  note         = {musicar-S-piano}
 }
 ```

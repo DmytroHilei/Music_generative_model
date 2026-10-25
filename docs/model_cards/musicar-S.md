@@ -8,23 +8,22 @@ tags:
 - pytorch
 ---
 
-# musicar 107M band
+# musicar-S
 
-A 108M-parameter autoregressive transformer that writes multi-instrument MIDI one note at a time, grown from [musicar
-107M piano](https://huggingface.co/Dimitri-206265/musicar/tree/main/107m-piano).
+A 108M-parameter autoregressive transformer that writes multi-instrument MIDI one note at a time, grown from [musicar-S-piano](https://huggingface.co/Dimitri-206265/musicar/tree/main/S-piano).
 
 | Parameters | Context | Instruments | Training notes | License |
 |---|---|---|---|---|
 | 107.93M | 2,048 notes | 129 (128 General MIDI programs + drums) | 197M (band stage), after the piano model's 2.33B | CC BY-NC-SA 4.0 |
 
-![Architecture of musicar 107M band](https://huggingface.co/Dimitri-206265/musicar/resolve/main/107m-band/diagram.png)
+![Architecture of musicar-S](https://huggingface.co/Dimitri-206265/musicar/resolve/main/S/diagram.png)
 
 ## Model summary
 
-musicar 107M band is musicar 107M piano, the project's earlier piano base, grown to 129 instruments: each note gained
+musicar-S is musicar-S-piano, the project's earlier piano base, grown to 129 instruments: each note gained
 an instrument attribute with its own embedding and output head, the learned positions were replaced by RoPE, and the
 context grew from 512 to 2,048 notes. It was then trained for 3,000 steps (197M notes) on GigaMIDI and Aria-MIDI. It is
-the base of the project's 107M caption pilots. For new work it is superseded by the [musicar 450M base](https://huggingface.co/Dimitri-206265/musicar/tree/main/450m-base).
+the base of the project's 107M caption pilots. For new work it is superseded by the [musicar-L](https://huggingface.co/Dimitri-206265/musicar/tree/main/L).
 
 ## Model details
 
@@ -49,9 +48,9 @@ the base of the project's 107M caption pilots. For new work it is superseded by 
 From a clone of the code repository, with its environment installed (README, "Setup"):
 
 ```bash
-hf download Dimitri-206265/musicar --include "107m-band/*" --local-dir checkpoints/musicar
-.venv/bin/python generate.py --checkpoint checkpoints/musicar/107m-band/model_bf16.pt --sample-instruments \
-    --max-new-tokens 1000 --output samples/musicar-107m-band.mid
+hf download Dimitri-206265/musicar --include "S/*" --local-dir checkpoints/musicar
+.venv/bin/python generate.py --checkpoint checkpoints/musicar/S/model_bf16.pt --sample-instruments \
+    --max-new-tokens 1000 --output samples/musicar-S.mid
 ```
 
 One token is one note, so this writes 1,000 new notes, one MIDI track per instrument. `--sample-instruments` lets the
@@ -70,9 +69,9 @@ import json
 from safetensors.torch import load_file
 from musicar.model.gpt import GPT, MusicConfig
 
-cfg = json.load(open("checkpoints/musicar/107m-band/config.json"))
+cfg = json.load(open("checkpoints/musicar/S/config.json"))
 model = GPT(MusicConfig(**cfg["model_args"]))
-model.load_state_dict(load_file("checkpoints/musicar/107m-band/model.safetensors"))
+model.load_state_dict(load_file("checkpoints/musicar/S/model.safetensors"))
 model.eval()
 ```
 
@@ -98,7 +97,7 @@ Out of scope:
 |---|---|---|---|
 | GigaMIDI | 0.7 of the sampled windows | Multi-instrument MIDI (128 General MIDI programs + drums); the training split holds 1.96B notes in 1.68M files | Check GigaMIDI's own terms (Hugging Face `Metacreation/GigaMIDI`) |
 | Aria-MIDI (deduplicated) | 0.3 | Piano MIDI transcribed from recordings (551M notes in 367k files), kept in the mix against forgetting the piano | CC BY-NC-SA 4.0 (non-commercial) |
-| Inherited: MAESTRO v3, GiantMIDI-Piano, Aria-MIDI | the starting weights | The pretraining of musicar 107M piano (2.33B notes of solo piano) | Non-commercial |
+| Inherited: MAESTRO v3, GiantMIDI-Piano, Aria-MIDI | the starting weights | The pretraining of musicar-S-piano (2.33B notes of solo piano) | Non-commercial |
 
 Windows of 2,048 notes are sampled per dataset by these weights, then uniformly over the note positions of files longer
 than 2,048 notes (shorter files were not used in this run). Pitches are transposed by up to ±5 semitones (drums are not
@@ -108,7 +107,7 @@ transposed). None of the project's audio-derived transcriptions of Ukrainian son
 
 | | |
 |---|---|
-| Initialization | Grown from musicar 107M piano: the trunk, the note embedding, the four note heads and their condition embeddings copied; new: the instrument embedding (129 × 768), the instrument head and its condition embedding (129 × 768), with both tables and the head's output layer starting at zero, so the instrument changes no prediction at step 0; the learned position table dropped for RoPE, the one change that is not function-preserving (Aria-MIDI cross-entropy 11.8 at step 0, 6.35 after 250 steps) |
+| Initialization | Grown from musicar-S-piano: the trunk, the note embedding, the four note heads and their condition embeddings copied; new: the instrument embedding (129 × 768), the instrument head and its condition embedding (129 × 768), with both tables and the head's output layer starting at zero, so the instrument changes no prediction at step 0; the learned position table dropped for RoPE, the one change that is not function-preserving (Aria-MIDI cross-entropy 11.8 at step 0, 6.35 after 250 steps) |
 | Steps | 3,000 |
 | Batch | 65,536 notes per step (32 windows × 2,048 notes) |
 | Notes seen | 197M (≈ 0.1 pass over the training notes) |
@@ -118,7 +117,7 @@ transposed). None of the project's audio-derived transcriptions of Ukrainian son
 | Regularization | Dropout 0, label smoothing 0 |
 | Precision | bf16 autocast with fp8 (torchao float8) matmuls in the transformer blocks, torch.compile; released weights bf16 |
 | Hardware, time | One laptop RTX 5060 (8 GB), 83 min; finished 2026-10-02 |
-| Config | `config/pilots/pilot_mi.py` with `--init_from=finetune --init_ckpt=<musicar 107M piano>` |
+| Config | `config/pilots/pilot_mi.py` with `--init_from=finetune --init_ckpt=<musicar-S-piano>` |
 
 ## Evaluation
 
@@ -127,7 +126,7 @@ nats per note, summed over the four note attributes (Δt, pitch, duration, veloc
 cross-entropy is reported separately. Lower is better. It measures how well the model predicts real music, not how good
 its samples sound; it is not a listening test. One seed.
 
-| Validation set | musicar 107M band | Same recipe from scratch |
+| Validation set | musicar-S | Same recipe from scratch |
 |---|---|---|
 | GigaMIDI's validation split (not deduplicated) | **2.232** (pitch 0.526, velocity 0.616, duration 0.848, Δt 0.242) | 2.597 |
 | Aria-MIDI validation (2,048-note windows) | 5.819 | 6.931 |
@@ -138,13 +137,13 @@ where the grown run was at about step 1,150.
 
 Two caveats. GigaMIDI's validation split shares files with its training split (by a loose content hash, 54,209 of
 its 209,500 validation files also occur in training; found after this run), so 2.232 is optimistic and not comparable
-with the deduplicated ("clean") GigaMIDI validation that the 450M base reports (1.679). At 2,048 notes the Aria-MIDI
-validation holds only its 791 longest files, so 5.819 is not comparable with musicar 107M piano's 5.706 (512-note
+with the deduplicated ("clean") GigaMIDI validation that musicar-L reports (1.679). At 2,048 notes the Aria-MIDI
+validation holds only its 791 longest files, so 5.819 is not comparable with musicar-S-piano's 5.706 (512-note
 windows, all files).
 
 ## Limitations and biases
 
-- Short band training: only 3,000 steps (197M notes) on multi-instrument data, so it is weaker than the 450M base
+- Short band training: only 3,000 steps (197M notes) on multi-instrument data, so it is weaker than musicar-L
   (8.3B notes).
 - Only files longer than 2,048 notes were used in this stage, so short pieces and loops are under-represented.
 - Instrument choice can drift when sampled freely: in tests of a sibling pilot (the same recipe with stretched
@@ -160,9 +159,9 @@ windows, all files).
 
 ## Future work
 
-Planned, not done. The 107M models will not be trained further; they stay as small, cheap bases for pilots (this
-model is the base of the caption pilots that come before the 450M's captioned run). The project's next models build on
-the 450M base: first a captioned fine-tune (F1, planned: captions from a frozen multilingual LaBSE encoder, in English
+Planned, not done. The S models will not be trained further; they stay as small, cheap bases for pilots (this
+model is the base of the caption pilots that come before musicar-L's captioned run). The project's next models build on
+musicar-L: first a captioned fine-tune (F1, planned: captions from a frozen multilingual LaBSE encoder, in English
 and Ukrainian, section captions and length control; the recipe is being settled in laptop pilots), then a captioned
 fine-tune on about 5,400 Ukrainian songs transcribed from audio.
 
@@ -174,7 +173,7 @@ fine-tune on about 5,400 Ukrainian songs transcribed from audio.
 | `model.safetensors` + `config.json` | The same weights without pickle; `config.json` holds `model_args` |
 | `diagram.png` | The architecture diagram above |
 
-All in the `107m-band/` folder of the repository; the other two models are the sibling folders.
+All in the `S/` folder of the repository; the other two models are the sibling folders.
 
 ## License
 
@@ -190,6 +189,6 @@ released under the same non-commercial, share-alike terms. Check GigaMIDI's own 
   title        = {musicar: autoregressive symbolic music models},
   year         = {2026},
   howpublished = {\url{https://github.com/DmytroHilei/Music_generative_model}},
-  note         = {musicar 107M band}
+  note         = {musicar-S}
 }
 ```

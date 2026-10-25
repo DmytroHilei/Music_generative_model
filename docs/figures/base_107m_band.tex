@@ -1,4 +1,4 @@
-% musicar 107M band: the 107M piano base grown to 129 instruments (checkpoints/pilot_mi_grown), drawn in the poster's
+% musicar-S: the musicar-S-piano base grown to 129 instruments (checkpoints/pilot_mi_grown), drawn in the poster's
 % style (architecture.tex) and in the same layout as base_107m_piano.tex; "new" tags mark what the growth added.
 % No captions. Teal = structure, grey = linear layers and embedding tables.
 % Sources: shapes and parameter counts from checkpoints/pilot_mi_grown/model_bf16.pt (model_args, state dict) and
@@ -28,7 +28,7 @@
 \begin{tikzpicture}
 
 %% ================= title =================
-\node[font=\fontsize{20}{22}\selectfont\bfseries, text=tealT] at (4.35, 19.55) {musicar 107M band (108M)};
+\node[font=\fontsize{20}{22}\selectfont\bfseries, text=tealT] at (4.35, 19.55) {musicar-S (108M)};
 \node[font=\footnotesize, text=black!85] at (4.35, 18.9) {107.93M parameters: trunk 99.11M, cascade heads 7.90M,
   embeddings 0.92M. 129 instruments, context 2,048 notes.};
 \node[font=\scriptsize, text=black!75, text width=17.3cm, align=center] at (4.35, 18.2) {How to read: numbers give the
@@ -180,7 +180,7 @@ the head's output layer start at zero: at step~0 they change nothing.\\[3pt]
 \begin{scope}[on background layer]
   \draw[panel] (train.south west) rectangle (train.north east);
 \end{scope}
-\node[ptitle] at (train.north west) {\sect{4}{Grown from musicar 107M piano}};
+\node[ptitle] at (train.north west) {\sect{4}{Grown from musicar-S-piano}};
 
 \end{tikzpicture}
 \end{document}

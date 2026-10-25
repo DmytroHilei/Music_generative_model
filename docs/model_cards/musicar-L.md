@@ -8,7 +8,7 @@ tags:
 - pytorch
 ---
 
-# musicar 450M base
+# musicar-L
 
 A 464M-parameter autoregressive transformer that writes multi-instrument MIDI one note at a time, pretrained on 8.3B
 notes of public MIDI data.
@@ -17,17 +17,17 @@ notes of public MIDI data.
 |---|---|---|---|---|
 | 464.24M | 2,048 notes | 129 (128 General MIDI programs + drums) | 8.3B (GigaMIDI, Aria-MIDI, Discover MIDI) | CC BY-NC-SA 4.0 |
 
-![Architecture of musicar 450M base](https://huggingface.co/Dimitri-206265/musicar/resolve/main/450m-base/diagram.png)
+![Architecture of musicar-L](https://huggingface.co/Dimitri-206265/musicar/resolve/main/L/diagram.png)
 
 ## Model summary
 
-musicar 450M base is the project's pretrained multi-instrument model. Each sequence position is one whole note, and
+musicar-L is the project's pretrained multi-instrument model. Each sequence position is one whole note, and
 five cascade output heads choose its time shift, instrument, pitch, duration and velocity one after another. It is a
 pretrained model only: it has no text captions, and besides a MIDI prompt its only controls are two optional window
 conditions (the set of instruments and the notes per second). It is the starting point of the project's planned
 captioned model (see Future work).
 
-Smaller bases of the same family: [musicar 107M piano](https://huggingface.co/Dimitri-206265/musicar/tree/main/107m-piano) and [musicar 107M band](https://huggingface.co/Dimitri-206265/musicar/tree/main/107m-band).
+Smaller bases of the same family: [musicar-S-piano](https://huggingface.co/Dimitri-206265/musicar/tree/main/S-piano) and [musicar-S](https://huggingface.co/Dimitri-206265/musicar/tree/main/S).
 
 ## Model details
 
@@ -53,9 +53,9 @@ Smaller bases of the same family: [musicar 107M piano](https://huggingface.co/Di
 From a clone of the code repository, with its environment installed (README, "Setup"):
 
 ```bash
-hf download Dimitri-206265/musicar --include "450m-base/*" --local-dir checkpoints/musicar
-.venv/bin/python generate.py --checkpoint checkpoints/musicar/450m-base/model_bf16.pt --sample-instruments \
-    --max-new-tokens 1000 --output samples/musicar-450m-base.mid
+hf download Dimitri-206265/musicar --include "L/*" --local-dir checkpoints/musicar
+.venv/bin/python generate.py --checkpoint checkpoints/musicar/L/model_bf16.pt --sample-instruments \
+    --max-new-tokens 1000 --output samples/musicar-L.mid
 ```
 
 One token is one note, so this writes up to 1,000 new notes, starting from the start-of-piece token (BOS); if the
@@ -76,9 +76,9 @@ import json
 from safetensors.torch import load_file
 from musicar.model.gpt import GPT, MusicConfig
 
-cfg = json.load(open("checkpoints/musicar/450m-base/config.json"))
+cfg = json.load(open("checkpoints/musicar/L/config.json"))
 model = GPT(MusicConfig(**cfg["model_args"]))
-model.load_state_dict(load_file("checkpoints/musicar/450m-base/model.safetensors"))
+model.load_state_dict(load_file("checkpoints/musicar/L/model.safetensors"))
 model.eval()
 ```
 
@@ -185,7 +185,7 @@ Planned, not done:
 | `model.safetensors` + `config.json` | The same weights without pickle; `config.json` holds `model_args` |
 | `diagram.png` | The architecture diagram above |
 
-All in the `450m-base/` folder of the repository; the other two models are the sibling folders.
+All in the `L/` folder of the repository; the other two models are the sibling folders.
 
 ## License
 
@@ -201,7 +201,7 @@ Check GigaMIDI's own terms before any reuse.
   title        = {musicar: autoregressive symbolic music models},
   year         = {2026},
   howpublished = {\url{https://github.com/DmytroHilei/Music_generative_model}},
-  note         = {musicar 450M base}
+  note         = {musicar-L}
 }
 ```
 

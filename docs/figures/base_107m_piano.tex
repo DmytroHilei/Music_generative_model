@@ -1,4 +1,4 @@
-% musicar 107M piano: the earlier solo-piano base (checkpoints/big_107M), drawn in the poster's style (architecture.tex).
+% musicar-S-piano: the earlier solo-piano base (checkpoints/big_107M), drawn in the poster's style (architecture.tex).
 % No captions, no instrument, learned positions. Teal = structure, grey = linear layers and embedding tables.
 % Sources: shapes and parameter counts from checkpoints/big_107M/model_bf16.pt (model_args, state dict) and
 % musicar/model/gpt.py (MusicEmbeddings, Block, CascadeHeads, ResidualHead); recipe from its stored config
@@ -22,7 +22,7 @@
 \begin{tikzpicture}
 
 %% ================= title =================
-\node[font=\fontsize{20}{22}\selectfont\bfseries, text=tealT] at (4.35, 19.55) {musicar 107M piano (107M)};
+\node[font=\fontsize{20}{22}\selectfont\bfseries, text=tealT] at (4.35, 19.55) {musicar-S-piano (107M)};
 \node[font=\footnotesize, text=black!85] at (4.35, 18.9) {106.84M parameters: trunk 99.11M, cascade heads 6.52M,
   embeddings 1.21M. Solo piano, context 512 notes.};
 \node[font=\scriptsize, text=black!75, text width=17.3cm, align=center] at (4.35, 18.2) {How to read: numbers give the
