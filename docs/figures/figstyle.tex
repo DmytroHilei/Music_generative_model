@@ -1,0 +1,62 @@
+% Shared preamble of the per-model diagrams (base_450m.tex, base_107m_band.tex, base_107m_piano.tex,
+% base_models.tex): packages, colours, TikZ styles and macros copied unchanged from architecture.tex, so they look
+% the same. Use after \documentclass[border=8pt]{standalone}; keep in sync when the poster's style changes.
+
+\usepackage[T1]{fontenc}
+\usepackage[scaled=0.92]{helvet}
+\renewcommand{\familydefault}{\sfdefault}
+\usepackage{inconsolata}
+\usepackage{amsmath}
+\usepackage[italic]{mathastext}     % maths letters and digits in Helvetica, like the text
+\usepackage[table]{xcolor}
+\usepackage{array}
+\usepackage{tabularx}
+\usepackage{pgfplots}
+\pgfplotsset{compat=1.18}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta,calc,decorations.pathreplacing,backgrounds}
+\usepackage[hidelinks]{hyperref}
+\hyphenpenalty=10000
+\exhyphenpenalty=10000
+
+\definecolor{tealT}{HTML}{3B7D70}   % title, structure labels, section numbers, brace
+\definecolor{tealF}{HTML}{C3E0D6}   % repeated block, table header
+\definecolor{tealB}{HTML}{6FA696}
+\definecolor{greyF}{HTML}{F2F2F2}   % containers, text panels
+\definecolor{greyB}{HTML}{8A8A8A}
+\definecolor{rowG}{HTML}{F2F2F2}    % alternating table rows
+\definecolor{pinkL}{HTML}{C2577A}   % captions: lines, labels
+\definecolor{pinkF}{HTML}{F6CCD9}
+\definecolor{boxG}{HTML}{D5D5D5}    % linear layers, embedding tables
+\definecolor{altG}{HTML}{767676}    % curves: the alternative a choice was compared with (teal = what the model uses)
+
+\tikzset{
+  box/.style={draw=black, fill=white, rounded corners=3pt, minimum height=5.6mm, inner sep=3pt, align=center,
+              font=\footnotesize, line width=0.6pt},
+  gbox/.style={box, fill=boxG},
+  pbox/.style={box, fill=pinkF, draw=pinkL},
+  sub/.style={draw=tealB, dashed, rounded corners=6pt, line width=0.9pt},
+  sublab/.style={text=tealT, font=\footnotesize\bfseries},
+  zoom/.style={draw=black, densely dotted, rounded corners=10pt, line width=1.5pt},
+  zline/.style={densely dotted, line width=1.5pt},
+  panel/.style={draw=greyB, fill=greyF, rounded corners=8pt, line width=1pt},
+  ptitle/.style={font=\small\bfseries, anchor=south west, inner sep=2pt},
+  arr/.style={-{Stealth[length=2.4mm]}, line width=0.9pt},
+  parr/.style={arr, draw=pinkL},
+  sum/.style={draw=black, fill=white, circle, inner sep=0pt, minimum size=4.6mm, line width=0.8pt},
+  tok/.style={draw=black, fill=white, minimum width=2.9mm, minimum height=2.9mm, inner sep=0pt, line width=0.4pt},
+  ptok/.style={tok, fill=pinkF, draw=pinkL},
+  note/.style={font=\scriptsize, text=black!85, align=left},
+  ptext/.style={font=\footnotesize, text=black!90, align=left, inner sep=8pt},
+  head/.style={box, minimum width=9mm, minimum height=7.5mm, inner sep=1pt, densely dotted, line width=1.1pt},
+}
+\newcommand{\rcite}[1]{{\scriptsize[#1]}}
+\newcommand{\capt}[1]{\textcolor{pinkL}{``#1''}}
+\newcommand{\badge}[1]{\tikz[baseline=(b.base)]\node[circle, fill=tealT, text=white, inner sep=0pt, minimum size=4.4mm,
+  font=\scriptsize\bfseries] (b) {#1};}
+\newcommand{\sect}[2]{\badge{#1}\hspace{4pt}#2}
+
+\pgfplotsset{cplot/.style={scale only axis, width=5.3cm, height=3.3cm, axis lines*=left, axis line style={black!55},
+  tick style={black!55}, grid=major, grid style={black!10}, tick label style={font=\scriptsize}, label style={font=\scriptsize},
+  every axis plot/.append style={line join=round}, clip=false, xlabel shift=-2pt, ylabel shift=-3pt,
+  scaled ticks=false, tick label style={/pgf/number format/fixed}}}

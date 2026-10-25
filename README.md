@@ -36,8 +36,8 @@ Full results: [`docs/experiments.md`](docs/experiments.md).
 
 ![Captioned music model](docs/figures/architecture.png)
 
-The figure shows the captioned layout of the 450M model as F1 will train it: 427M trainable parameters with the two
-caption adapters and grouped-query attention (6 key / value heads for 18 query heads; 464M with full attention).
+The figure shows the captioned layout of the 450M model as F1 will train it: 477M trainable parameters, the 464M
+base with full attention plus the two caption adapters (13M).
 The sections are numbered in reading order:
 
 - **1–4: the model.** Captions go through the frozen LaBSE encoder and a small learned-query adapter, and become a
@@ -48,19 +48,41 @@ The sections are numbered in reading order:
   Change-aware captions, half of the windows spliced from another file, the caption repeated every 64 notes and
   caption words from section statistics take the 107M pilot's switch score from 0.06 to 0.98. A counterfactual loss
   was tested and left out (0.85 with splice and repeat, at 1.8× the step time).
-- **7: training curves** behind the design choices: trunk block, base pretraining, section-caption measures, and
-  the conversion to grouped-query attention.
+- **7: training curves** behind the design choices: trunk block, base pretraining, section-caption measures, a
+  grouped-query attention conversion (worked at 107M, broke the 450M, so F1 keeps full attention), and the output
+  heads (the chain is worth 0.34 nats per note at 42M).
 - **8–9: training stages and the audio → MIDI pipeline** that builds the Ukrainian fine-tune set.
 - **10–11: glossary and references.**
 
 Status: the music model without captions is trained. The caption stage at 450M (the F1 run) is still planned, so the
 caption results in the figure come from 107M pilots. F1 will also add a length-control input (roadmap item 11), not
-drawn yet; infilling (item 12) comes in a later fine-tune. The cascade-vs-independent-heads curve will be added after that
-A/B is re-run on the current setup; the only existing one is from an early 6M piano model.
+drawn yet; infilling (item 12) comes in a later fine-tune.
 
 The figure is TikZ / pgfplots: [`docs/figures/architecture.tex`](docs/figures/architecture.tex) (PDF and SVG next to
 it). [`docs/figures/curves_data.py`](docs/figures/curves_data.py) rebuilds the curve data from the run logs, then
 `pdflatex architecture.tex` in `docs/figures/`.
+
+## Pretrained models
+
+The three pretrained bases are on Hugging Face under CC BY-NC-SA 4.0, each with its weights (`model_bf16.pt` for the
+scripts here; `model.safetensors` + `config.json` without pickle), an architecture diagram and a model card:
+
+| Model | Parameters | What it is | Validation (nats / note) |
+|---|---|---|---|
+| [musicar-450m-base](https://huggingface.co/Dimitri-206265/musicar-450m-base) | 464M | multi-instrument (129 instruments), 2,048-note context, window conditions; the base of the planned captioned model | clean GigaMIDI 1.679 |
+| [musicar-107m-band](https://huggingface.co/Dimitri-206265/musicar-107m-band) | 108M | the piano model grown to 129 instruments and RoPE; the base of the 107M caption pilots | GigaMIDI 2.232 (original split) |
+| [musicar-107m-piano](https://huggingface.co/Dimitri-206265/musicar-107m-piano) | 107M | solo piano, 512-note context; the earlier base | Aria-MIDI 5.706 |
+
+![The three pretrained bases](docs/figures/base_models.png)
+
+```bash
+hf download Dimitri-206265/musicar-450m-base --local-dir checkpoints/musicar-450m-base
+.venv/bin/python generate.py --checkpoint checkpoints/musicar-450m-base/model_bf16.pt --sample-instruments \
+    --max-new-tokens 1000 --output samples/out.mid
+```
+
+The diagrams are [`docs/figures/base_*.tex`](docs/figures) (one per model, plus `base_models.tex` for the page above;
+`figstyle.tex` is the shared style), the cards are in [`docs/model_cards/`](docs/model_cards).
 
 ## Layout
 
@@ -84,7 +106,8 @@ config/               run configs: pretrain/, finetune/, pilots/, f1/, smoke.py 
 data/                 datasets, token stores and their metadata (see data/README.md); skryabin/ = the hand-picked songs
 data_prep/            datasets/ (downloads, tokenization into stores, store splits), songs/ (song search, download,
                       audio -> MIDI, fine-tune CSVs), labels/ (features, labels, pseudo-labels, caption text)
-docs/                 experiment results (experiments.md), figures/ (architecture figure and its curve data)
+docs/                 experiment results (experiments.md), figures/ (architecture figure, per-model diagrams, curve
+                      data), model_cards/ (the Hugging Face model cards)
 eval/                 settings/ (sampling sweeps, settings search), compare/ (seeded comparisons, text control,
                       sample statistics), probes/ (hidden-state probes, label coverage)
 tools/                status.py (dashboard), sweeps/ (fine-tune sweeps), bench/ (GPU / CPU throughput),

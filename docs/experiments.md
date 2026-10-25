@@ -55,7 +55,7 @@ dropout 0, ~2 passes gave the best generations (Section 7).
 | Change | Setting | Result |
 |---|---|---|
 | **RMSNorm + SwiGLU + QK-norm** ("new block") | 42M, context 2048, 3 seeds | clean GigaMIDI 3.886 ± 0.075 → **3.137 ± 0.013** (−0.75, 10 sd, lower seed spread) |
-| **Growing a trained model** vs training from scratch | 108M, 197M notes; the 107M piano model grown to 129 instruments, BOS/EOS and RoPE, new parts zero-initialised | GigaMIDI 2.232 vs 2.597, Aria 5.819 vs 6.931: **≈ 2.5–4× step efficiency**. Adding the instrument attribute alone is function-preserving (identical loss at step 0) |
+| **Growing a trained model** vs training from scratch | 108M, 197M notes; the 107M piano model grown to 129 instruments and RoPE, new parts zero-initialised (BOS/EOS came later, in the caption pilots) | GigaMIDI 2.232 vs 2.597, Aria 5.819 vs 6.931: **≈ 2.5–4× step efficiency**. Adding the instrument attribute alone is function-preserving (identical loss at step 0) |
 | RoPE vs the learned position table stretched 512 → 2048 | same pilot | stretched table −0.02 at the end (−0.39 early); RoPE kept for longer context and rolling KV-cache decoding |
 | Window conditioning (instrument set + notes/s level, condition dropout) | 42M | no CE cost (3.125 vs 3.137 ± 0.013); off-band instruments in generation 50% → 25% |
 | Domain / artist style label (fine-tune) | 107M | artist labels no measurable effect; a single "reduction" domain label steers generation density and polyphony to the target style |
