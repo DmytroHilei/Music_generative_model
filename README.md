@@ -64,25 +64,27 @@ it). [`docs/figures/curves_data.py`](docs/figures/curves_data.py) rebuilds the c
 
 ## Pretrained models
 
-The three pretrained bases are on Hugging Face under CC BY-NC-SA 4.0, each with its weights (`model_bf16.pt` for the
-scripts here; `model.safetensors` + `config.json` without pickle), an architecture diagram and a model card:
+The three pretrained bases are in one Hugging Face repository, [Dimitri-206265/musicar](https://huggingface.co/Dimitri-206265/musicar), under CC BY-NC-SA
+4.0: one folder per model, each with its weights (`model_bf16.pt` for the scripts here; `model.safetensors` +
+`config.json` without pickle), an architecture diagram and a model card.
 
-| Model | Parameters | What it is | Validation (nats / note) |
+| Folder | Parameters | What it is | Validation (nats / note) |
 |---|---|---|---|
-| [musicar-450m-base](https://huggingface.co/Dimitri-206265/musicar-450m-base) | 464M | multi-instrument (129 instruments), 2,048-note context, window conditions; the base of the planned captioned model | clean GigaMIDI 1.679 |
-| [musicar-107m-band](https://huggingface.co/Dimitri-206265/musicar-107m-band) | 108M | the piano model grown to 129 instruments and RoPE; the base of the 107M caption pilots | GigaMIDI 2.232 (original split) |
-| [musicar-107m-piano](https://huggingface.co/Dimitri-206265/musicar-107m-piano) | 107M | solo piano, 512-note context; the earlier base | Aria-MIDI 5.706 |
+| [`450m-base/`](https://huggingface.co/Dimitri-206265/musicar/tree/main/450m-base) | 464M | multi-instrument (129 instruments), 2,048-note context, window conditions; the base of the planned captioned model | clean GigaMIDI 1.679 |
+| [`107m-band/`](https://huggingface.co/Dimitri-206265/musicar/tree/main/107m-band) | 108M | the piano model grown to 129 instruments and RoPE; the base of the 107M caption pilots | GigaMIDI 2.232 (original split) |
+| [`107m-piano/`](https://huggingface.co/Dimitri-206265/musicar/tree/main/107m-piano) | 107M | solo piano, 512-note context; the earlier base | Aria-MIDI 5.706 |
 
 ![The three pretrained bases](docs/figures/base_models.png)
 
 ```bash
-hf download Dimitri-206265/musicar-450m-base --local-dir checkpoints/musicar-450m-base
-.venv/bin/python generate.py --checkpoint checkpoints/musicar-450m-base/model_bf16.pt --sample-instruments \
+hf download Dimitri-206265/musicar --include "450m-base/*" --local-dir checkpoints/musicar
+.venv/bin/python generate.py --checkpoint checkpoints/musicar/450m-base/model_bf16.pt --sample-instruments \
     --max-new-tokens 1000 --output samples/out.mid
 ```
 
 The diagrams are [`docs/figures/base_*.tex`](docs/figures) (one per model, plus `base_models.tex` for the page above;
-`figstyle.tex` is the shared style), the cards are in [`docs/model_cards/`](docs/model_cards).
+`figstyle.tex` is the shared style), the cards are in [`docs/model_cards/`](docs/model_cards) (`musicar.md` is the
+repository's root card).
 
 ## Layout
 

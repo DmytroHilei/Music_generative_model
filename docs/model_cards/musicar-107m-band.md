@@ -11,20 +11,20 @@ tags:
 # musicar 107M band
 
 A 108M-parameter autoregressive transformer that writes multi-instrument MIDI one note at a time, grown from [musicar
-107M piano](https://huggingface.co/Dimitri-206265/musicar-107m-piano).
+107M piano](https://huggingface.co/Dimitri-206265/musicar/tree/main/107m-piano).
 
 | Parameters | Context | Instruments | Training notes | License |
 |---|---|---|---|---|
 | 107.93M | 2,048 notes | 129 (128 General MIDI programs + drums) | 197M (band stage), after the piano model's 2.33B | CC BY-NC-SA 4.0 |
 
-![Architecture of musicar 107M band](diagram.png)
+![Architecture of musicar 107M band](https://huggingface.co/Dimitri-206265/musicar/resolve/main/107m-band/diagram.png)
 
 ## Model summary
 
 musicar 107M band is musicar 107M piano, the project's earlier piano base, grown to 129 instruments: each note gained
 an instrument attribute with its own embedding and output head, the learned positions were replaced by RoPE, and the
 context grew from 512 to 2,048 notes. It was then trained for 3,000 steps (197M notes) on GigaMIDI and Aria-MIDI. It is
-the base of the project's 107M caption pilots. For new work it is superseded by the [musicar 450M base](https://huggingface.co/Dimitri-206265/musicar-450m-base).
+the base of the project's 107M caption pilots. For new work it is superseded by the [musicar 450M base](https://huggingface.co/Dimitri-206265/musicar/tree/main/450m-base).
 
 ## Model details
 
@@ -49,8 +49,8 @@ the base of the project's 107M caption pilots. For new work it is superseded by 
 From a clone of the code repository, with its environment installed (README, "Setup"):
 
 ```bash
-hf download Dimitri-206265/musicar-107m-band --local-dir checkpoints/musicar-107m-band
-.venv/bin/python generate.py --checkpoint checkpoints/musicar-107m-band/model_bf16.pt --sample-instruments \
+hf download Dimitri-206265/musicar --include "107m-band/*" --local-dir checkpoints/musicar
+.venv/bin/python generate.py --checkpoint checkpoints/musicar/107m-band/model_bf16.pt --sample-instruments \
     --max-new-tokens 1000 --output samples/musicar-107m-band.mid
 ```
 
@@ -70,9 +70,9 @@ import json
 from safetensors.torch import load_file
 from musicar.model.gpt import GPT, MusicConfig
 
-cfg = json.load(open("config.json"))
+cfg = json.load(open("checkpoints/musicar/107m-band/config.json"))
 model = GPT(MusicConfig(**cfg["model_args"]))
-model.load_state_dict(load_file("model.safetensors"))
+model.load_state_dict(load_file("checkpoints/musicar/107m-band/model.safetensors"))
 model.eval()
 ```
 
@@ -173,6 +173,8 @@ fine-tune on about 5,400 Ukrainian songs transcribed from audio.
 | `model_bf16.pt` | Training checkpoint: bf16 weights + `model_args` + the training config. This is what the repository's scripts load (`generate.py --checkpoint`, `train.py` with `init_from='finetune'`) |
 | `model.safetensors` + `config.json` | The same weights without pickle; `config.json` holds `model_args` |
 | `diagram.png` | The architecture diagram above |
+
+All in the `107m-band/` folder of the repository; the other two models are the sibling folders.
 
 ## License
 
