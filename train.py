@@ -89,6 +89,8 @@ style_map = ''            # e.g. 'data/styles.json': conditioning on genre/artis
 style_lr_mult = 1.0       # Muon runs: LR multiplier for the style table (own AdamW group, no weight decay)
 style_dropout = 0.1       # training: probability of dropping the style to 'none' (keeps an unconditional mode)
 boundary_frac = 0.1       # with special_tokens: share of train windows placed at a piece's start/end
+boundary_start = -1.0     # with special_tokens: share of train windows placed at a piece's start (-1 = boundary_frac / 2)
+boundary_end = -1.0       # ... at a piece's end (-1 = boundary_frac / 2); the other windows are uniform over the pieces
 aug_tempo = 0.0           # training: time stretch up to x(1+aug_tempo) either way per window (0 = off)
 aug_stores = ''           # e.g. '1,0': which train stores get tempo aug (same order as source_weights); '' = all
 source_weights = ''       # e.g. '0.8,0.2': sampling weight per train store (CSVs = one store, then each store:); '' = by size
@@ -289,6 +291,8 @@ cf_from_iter = int(section_cf_from * lr_decay_iters)
 # train: random windows (uniform over all note positions of all files), with augmentation
 train_dataset = NoteWindowDataset(csv_path, split='train', block_size=block_size, augment=True, **data_kw,
                                style_dropout=style_dropout, boundary_frac=boundary_frac, aug_tempo=aug_tempo,
+                               boundary_start=None if boundary_start < 0 else boundary_start,
+                               boundary_end=None if boundary_end < 0 else boundary_end,
                                pack_short=pack_short, caption_dropout=caption_dropout, section_dropout=section_dropout,
                                change_frac=section_change_frac, change_min=section_change_min,
                                counterfactual=section_cf_weight > 0, splice_frac=section_splice_frac,

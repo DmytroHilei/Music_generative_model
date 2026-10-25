@@ -228,5 +228,30 @@ def test_elapsed_input():
         assert len(plain[0][0]) == 4, 'elapsed only with remain'
 
 
+def test_boundary_start_end():
+    """boundary_start / boundary_end: the shares of train windows placed at a piece's start / end; None = half of
+    boundary_frac each (the old split); the other windows stay uniform over the piece."""
+    import random
+    with tempfile.TemporaryDirectory() as d:
+        f = [notes(200, 0)]
+        def kinds(ds, n=60):
+            random.seed(0)
+            out = set()
+            for _ in range(n):
+                x, y = ds[0]
+                out.add('start' if x[0][0] == BOS_PITCH else 'end' if y[0][-1] == EOS_PITCH else 'middle')
+            return out
+        both = dataset(d, f, special_tokens=True, boundary_frac=1.0)
+        assert (both.boundary_start, both.boundary_end) == (0.5, 0.5) and kinds(both) == {'start', 'end'}
+        starts = dataset(d, f, name='s', special_tokens=True, boundary_frac=1.0, boundary_start=1.0, boundary_end=0.0)
+        assert kinds(starts) == {'start'}
+        ends = dataset(d, f, name='e', special_tokens=True, boundary_start=0.0, boundary_end=1.0)
+        assert kinds(ends) == {'end'}
+        half = dataset(d, f, name='h', special_tokens=True, boundary_start=0.5, boundary_end=0.0)
+        assert half.boundary_frac == 0.5 and kinds(half) == {'start', 'middle'}
+        plain = dataset(d, f, name='p', special_tokens=False, boundary_start=0.5, boundary_end=0.5)
+        assert plain.boundary_frac == 0.0, 'no special tokens: no boundary placement'
+
+
 if __name__ == '__main__':
     run(globals())

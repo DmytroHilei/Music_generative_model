@@ -184,6 +184,8 @@ class NoteWindowDataset(Dataset):
         styles=None,
         style_dropout=0.0,
         boundary_frac=0.0,
+        boundary_start=None,
+        boundary_end=None,
         aug_tempo=0.0,
         aug_stores=None,
         programs=False,
@@ -226,6 +228,9 @@ class NoteWindowDataset(Dataset):
                      style_dropout: probability (training only) of replacing it with 0 = unconditional
         boundary_frac: training only, with special_tokens: this fraction of windows is placed exactly at a piece's
                      start (half) or end (half), so openings and EOS are seen often (otherwise ~0.2% of windows)
+        boundary_start, boundary_end: the two shares set apart (None = boundary_frac / 2 each): e.g. 0.5 and 0 put
+                     half of the windows at a piece start and leave the rest uniform over whole pieces (with
+                     boundary_frac 1.0 the middle of a piece longer than the block is never sampled)
         aug_tempo:   training only: stretch time (duration and delta_time) by a log-uniform factor in
                      [1/(1+aug_tempo), 1+aug_tempo] per window, with stochastic rounding (0 = off)
         aug_stores:  optional 0/1 per store (same order as source_weights): which stores get the tempo
@@ -318,7 +323,10 @@ class NoteWindowDataset(Dataset):
         assert not self.pack_short or special_tokens, "pack_short needs special_tokens (BOS/EOS separate the pieces)"
         self.min_notes = min_notes
         self.style_dropout = style_dropout
-        self.boundary_frac = boundary_frac if special_tokens else 0.0
+        self.boundary_start = (boundary_frac / 2 if boundary_start is None else boundary_start) if special_tokens else 0.0
+        self.boundary_end = (boundary_frac / 2 if boundary_end is None else boundary_end) if special_tokens else 0.0
+        self.boundary_frac = self.boundary_start + self.boundary_end  # the share of windows placed at a boundary
+        assert self.boundary_frac <= 1.0 + 1e-9, "boundary_start + boundary_end must not exceed 1"
         self.style_ids = {name: i for i, name in enumerate(styles)} if styles else None
         self.store_dirs, file_styles = [], []
         for csv in self.csv_paths:  # one store per CSV, so source_weights can weight each CSV
@@ -649,7 +657,7 @@ class NoteWindowDataset(Dataset):
                 v = 0 if self.short[file_idx] else pos - prev
             if change is None and self.boundary_frac and not self.short[file_idx]:
                 r = random.random()
-                if r < self.boundary_frac / 2:
+                if r < self.boundary_start:
                     v = 0                                                   # starts with BOS
                 elif r < self.boundary_frac:
                     v = int(self.lengths[file_idx]) - self.block_size - 1  # ends with EOS
