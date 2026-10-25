@@ -6,10 +6,12 @@
 #   - section recipe s50_v2 (2026-10-23, logs/sections/forget.md): splice 0.5 + caption repeat every 64 notes, no
 #     counterfactual loss (switch mean 0.98 vs 0.94 for all_v2 with cf, at ~half the step cost)
 #   - length control v2 (len2): seconds-to-the-end + progress levels, +-10% target jitter, length tables at 10x LR
-#   - GQA 18 -> 6 KV heads (the 107M lw / pca arms of tools/sweeps/gqa_convert.py decide; stage 1 for 'lw':
-#     config/f1/f1_gqa_s1.py first, then this file with init_ckpt = its ckpt.pt)
-# Open until their pilots report (set here to the planned choice): n_kv_head / gqa_init (gqa_convert lw vs pca vs
-# full attention), remain_jitter vs remain_slack and length_words (len2 / len2_slack / len2_words).
+#   - full attention (18 KV heads): GQA dropped 2026-10-25. The pca merge broke the QK-norm 450M (held-out CE 2.01 ->
+#     6.57 at the merge; the 2,400-it rehearsal still 2.115 vs 2.058 for full attention after 600 it) and it was not
+#     what kept captions out; context/claude/caption_450m_2026-10-25.md. A GQA conversion for the Pi, if any, is its
+#     own step after F1 (config/f1/f1_gqa_s1.py)
+# Open until their pilots report (set here to the planned choice): remain_jitter vs remain_slack and length_words
+# (len2 / len2_slack / len2_words).
 # Data = the cloud stores (cloud/sync/hub.py) in the text_control.md tiers: GigaMIDI labeled (MidiCaps, XMIDI,
 # GigaMIDI metadata, artists) 0.55, Aria labeled (genre / composer) 0.15, GigaMIDI unlabeled (feature captions) 0.30.
 # Needs on the instance: data/labels/gigamidi_train.features.npz (data_prep/labels/song_features.py; not on the Hub
@@ -38,8 +40,7 @@ val_extra = 'clean=store:data/cache/gigamidi_clean'           # long_450m's val 
 n_layer = 28
 n_embd = 1152
 n_head = 18
-n_kv_head = 6                   # GQA, groups of 3 query heads (0 = full attention)
-gqa_init = 'pca'                # data-aware K / V merge (musicar/model/gqa.py) instead of the mean-pool
+n_kv_head = 0                   # full attention (GQA dropped 2026-10-25, see the header)
 n_programs = 129
 pos_emb = 'rope'
 block_size = 2048

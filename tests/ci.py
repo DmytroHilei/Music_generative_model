@@ -425,13 +425,13 @@ def train_sections(s):
 
 def f1_train(s, name, init_ckpt, *overlays, check=True, **kw):
     """config/f1/f1.py (+ overlays) from init_ckpt on the synthetic stores, 32-note sections (caption repeated every 8
-    notes, a quarter as in F1), GQA into 1 KV head; check=False: no val-loss check (a transfer stage trains on another
+    notes, a quarter as in F1), full attention as F1; check=False: no val-loss check (a transfer stage trains on another
     loss)."""
     w = s.work
     config = ['config/f1/f1.py', *overlays]
     kw = dict(init_ckpt=init_ckpt, csv_path=f'store:{w}/multi#labeled,store:{w}/syn#labeled,store:{w}/multi#unlabeled',
               val_csv_path=f'store:{w}/multi#labeled', val2_csv_path=f'store:{w}/multi#unlabeled', val_extra='',
-              captions=w / 'labels', section_len=32, section_repeat=8, n_kv_head=1, gqa_calib_batches=2, **kw)
+              captions=w / 'labels', section_len=32, section_repeat=8, text_encoder_device='', **kw)
     if check:
         return s.train(name, config=config, **kw)
     over = {**TINY, 'out_dir': w / name, 'cache_dir': w, **kw}
@@ -451,12 +451,12 @@ def f1_checks(out, s, name):
 @test('train-f1', gpu=True, needs=('train-recipe',))
 def train_f1(s):
     """config/f1/f1.py from train-recipe's weights (the tiny long_450m): T2 text prefix, change-aware section captions
-    with splice + repeat and attributes v2, the length input v2 with length words, GQA by the pca merge, 8-bit AdamW
-    with the length tables' group, bf16 snapshots every 3 steps; a resume of its ckpt.pt (8-bit AdamW states) to step
-    9; then generate.py with a caption, guidance and a length."""
+    with splice + repeat and attributes v2, the length input v2 with length words, full attention (no GQA merge),
+    8-bit AdamW with the length tables' group, bf16 snapshots every 3 steps; a resume of its ckpt.pt (8-bit AdamW
+    states) to step 9; then generate.py with a caption, guidance and a length."""
     out = f1_train(s, 'train-f1', s.work / 'train-recipe' / 'model_bf16.pt', save_every=3, ckpt_interval_min=0.01)
-    if 'gqa_init pca: 2 layers merged' not in out:
-        raise Fail('no pca merge in the output')
+    if 'layers merged' in out or 'mean-pooled' in out:
+        raise Fail('F1 converted the attention to GQA (full attention since 2026-10-25)')
     if not (s.work / 'train-f1' / 'model_bf16_it3.pt').exists():
         raise Fail('no snapshot model_bf16_it3.pt (save_every)')
     res = f1_train(s, 'train-f1', None, check=False, init_from='resume', max_iters=9, lr_decay_iters=9,
@@ -468,10 +468,11 @@ def train_f1(s):
 
 @test('train-f1-lw', gpu=True, needs=('train-recipe',))
 def train_f1_lw(s):
-    """The GQA 'lw' path of F1: config/f1/f1_gqa_s1.py (pca merge + per-layer attention transfer, eager) from
-    train-recipe's weights, then config/f1/f1.py from its ckpt.pt (already 1 KV head: no merge again)."""
+    """The optional GQA conversion after F1: config/f1/f1_gqa_s1.py (pca merge into 1 KV head + per-layer attention
+    transfer, eager) from train-recipe's weights, then config/f1/f1.py from its ckpt.pt (the uptrain: already 1 KV
+    head, no merge again)."""
     s1 = f1_train(s, 'train-f1-s1', s.work / 'train-recipe' / 'model_bf16.pt', 'config/f1/f1_gqa_s1.py', check=False,
-                  ckpt_interval_min=0.01)
+                  ckpt_interval_min=0.01, n_kv_head=1, gqa_calib_batches=2)
     if 'gqa_init pca: 2 layers merged' not in s1:
         raise Fail('no pca merge in stage 1')
     transfer = [float(x) for x in re.findall(r'step [1-9]\d*: train loss ([\d.]+)', s1)]
