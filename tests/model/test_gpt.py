@@ -213,6 +213,25 @@ def test_zero_init_conditioning():
     assert torch.allclose(h0, h1, atol=1e-6)
 
 
+def test_cond_none_is_the_trained_none():
+    """cond=None (what the generation evals pass) = the 'none' a dropped window trains with: zero multi-hot and
+    density level 0, whose embedding row is not zero once trained."""
+    streams, program, _ = batch(n_programs=129)
+    m = tiny(n_programs=129, cond_inst=True, n_density=16)
+    torch.nn.init.normal_(m.transformer['cond_density'].weight)
+    torch.nn.init.normal_(m.transformer['cond_inst'].weight)
+    none = (torch.zeros(3, 129), torch.zeros(3, dtype=torch.long))
+    with torch.no_grad():
+        h = m.encode(*streams, program=program, cond=none)
+        assert torch.allclose(m.encode(*streams, program=program), h, atol=1e-6)
+        cache = KVCache(2, 3, 2, streams[0].size(1), 16, 'cpu', torch.float32)
+        assert torch.allclose(m.encode(*(s[:, :5] for s in streams), program=program[:, :5], cache=cache), h[:, :5],
+                              atol=1e-5)
+        cache.pos.fill_(5)
+        step = m.encode(*(s[:, 5:6] for s in streams), program=program[:, 5:6], cache=cache)
+        assert torch.allclose(step[:, 0], h[:, 5], atol=1e-5)
+
+
 def test_style_changes_output_once_trained():
     m = tiny(n_styles=5)
     torch.nn.init.normal_(m.transformer['style'].weight)
