@@ -196,6 +196,22 @@
 \end{axis}
 \end{tikzpicture}}
 
+\newsavebox{\curveHeads}
+\sbox{\curveHeads}{\begin{tikzpicture}
+\begin{axis}[cplot, xmin=250, xmax=1500, ymin=2.6, ymax=7.6, xtick={250,500,750,1000,1250,1500},
+    xlabel={training step}, ylabel={held-out CE (nats / note)}]
+  \foreach \s in {1,2,3} {
+    \addplot[tealT, line width=0.5pt] table {curves/heads_cascade_s\s.dat};
+  }
+  \addplot[tealT, line width=1.6pt] table {curves/heads_cascade_mean.dat};
+  \addplot[altG, dashed, line width=1.1pt] table {curves/heads_indep.dat};
+  \addplot[altG, densely dotted, line width=1.1pt] table {curves/heads_linear.dat};
+  \node[anchor=west, font=\scriptsize, text=black!85, align=left] at (axis cs:1520, 3.40) {linear 3.145};
+  \node[anchor=west, font=\scriptsize, text=black!85, align=left] at (axis cs:1520, 3.08) {no chain 3.106};
+  \node[anchor=west, font=\scriptsize, text=tealT, align=left] at (axis cs:1520, 2.70) {cascade 2.766};
+\end{axis}
+\end{tikzpicture}}
+
 \newsavebox{\setupBox}
 \sbox{\setupBox}{\footnotesize\renewcommand{\arraystretch}{1.25}%
 \begin{tabularx}{\panelW}{@{\hspace{7pt}}>{\raggedright}p{2.2cm}>{\raggedright}X>{\raggedright}X>{\raggedright\arraybackslash}X@{\hspace{7pt}}}
@@ -424,7 +440,7 @@ stem & one separated part of a recording (vocals, bass, drums, ...) & Demucs \rc
 \textbf{Why a cascade.} One position predicts all five values of the next note. Head $i$ reads the running state\\[2pt]\hspace*{0.5cm}$z_0 = h_t,\quad z_i = z_{i-1} + E_i(a_i)$,\\[2pt]the trunk state $h_t$ plus the embeddings $E$ of the values already chosen. So the note's probability follows the chain rule,
 $p(\Delta t)\,p(\text{instr.}\mid\Delta t)\,p(\text{pitch}\mid\Delta t,\text{instr.})\cdots$ (compound tokens as in \rcite{6}).\\[3pt]
 $a_i$ is the true value in training (teacher forcing) and the sampled value in generation.
-Loss: the sum of the five cross-entropies.};
+Loss: the sum of the five cross-entropies. Without the chain: $+0.34$ nats / note at 42M (section 7).};
 
 %% ================= 1: caption path (left column, flows down) =================
 \begin{scope}[on background layer]
@@ -579,11 +595,32 @@ and again every 64 notes. Past 2,048 notes the window slides by a quarter.};
   (relative MSE) on the original layer inputs, LR $10^{-3}$; the rest of the model is frozen.\\[4pt]
   \textbf{Result.} After 1,500 steps: mean-pool $+0.200$ vs full attention, merge only $+0.069$, merge + transfer
   $+0.040$ and still closing. F1 converts the 450M the same way (18 $\to$ 6 heads) and trains $\approx$30$\times$ longer.};
+\path let \p1 = (cv4.south), \p2 = (cv5.south), \n1 = {min(\y1, \y2)} in coordinate (C3) at (-11.4, \n1);
+\node[anchor=north west, text width=8.1cm, font=\scriptsize, text=black!85, align=left, inner sep=10pt] (cv6) at (C3) {%
+  {\footnotesize\bfseries Output heads (42M, 98M notes)}\\[3pt]
+  \usebox{\curveHeads}\\[2pt]
+  Held-out GigaMIDI. \textcolor{tealT}{\textbf{Cascade}}: each head reads the values already chosen, 3 seeds (thin) and
+  mean. \textcolor{altG}{\textbf{No chain}} (dashed): the same residual heads, each reading $h_t$ alone;
+  \textcolor{altG}{\textbf{linear}} (dotted): one linear layer per attribute; one seed each. The chain is worth
+  $-0.34$ at the end (pitch $+0.18$, velocity $+0.11$ without it), the residual head form only $-0.04$.};
+\node[anchor=north west, text width=9.2cm, font=\scriptsize, text=black!85, align=left, inner sep=10pt] (cv7) at (cv6.north east) {%
+  {\footnotesize\bfseries Per head at step 1,500 (seed 1337, nats / note)}\\[5pt]
+  {\renewcommand{\arraystretch}{1.3}\setlength{\tabcolsep}{5pt}%
+  \begin{tabular}{@{}lrrrrrr@{}}
+  heads & $\Delta t$ & pitch & dur. & vel. & sum & instr.\\\hline
+  \textcolor{tealT}{\textbf{cascade}} & 0.285 & 0.779 & 0.966 & 0.737 & \textbf{2.766} & 0.315\\
+  no chain & 0.281 & 0.956 & 1.025 & 0.844 & 3.106 & 0.346\\
+  linear & 0.286 & 0.970 & 1.037 & 0.853 & 3.145 & 0.353\\
+  \end{tabular}}\\[6pt]
+  $\Delta t$ is the first head, so it reads nothing extra and is the same in all three. Pitch gains most from the chain
+  ($-0.18$): knowing when the note starts and on which instrument narrows its pitch. The sum is the held-out CE above;
+  the instrument head is reported apart. An earlier 6M piano A/B (4 heads, chained plain MLP heads) had found only
+  $-0.03$ for the chain: there its pitch head had lost the direct path from $h_t$.};
 \begin{scope}[on background layer]
-  \path let \p1 = (cv4.south), \p2 = (cv5.south), \n1 = {min(\y1, \y2)} in
+  \path let \p1 = (cv6.south), \p2 = (cv7.south), \n1 = {min(\y1, \y2)} in
     [panel] (C) rectangle (R |- 0, \n1);
 \end{scope}
-\path let \p1 = (cv4.south), \p2 = (cv5.south), \n1 = {min(\y1, \y2)} in coordinate (Cs) at (-11.4, \n1);
+\path let \p1 = (cv6.south), \p2 = (cv7.south), \n1 = {min(\y1, \y2)} in coordinate (Cs) at (-11.4, \n1);
 \node[ptitle] at (C) {\sect{7}{Why these choices: training curves (teal = what the model uses)}};
 
 \coordinate (B) at ($(Cs)+(0, -1.0)$);

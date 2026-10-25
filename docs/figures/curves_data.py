@@ -9,6 +9,9 @@ section_arms.dat                    arm, switch mean, held-out CE of the section
 gqa_{full,mean,pca,lw}.dat          step, held-out CE of the 107M GQA conversion arms (logs/sections/): full attention
                                     (forget_ctrl), mean-pooled K / V (forget_gqa4), the merge (gqa_pca), the merge +
                                     per-layer transfer (gqa_lw; its 300 transfer steps at steps -300..-1)
+heads_cascade_s{1,2,3}.dat          step, held-out GigaMIDI CE of the 42M heads A/B (logs/muon_*.log): the cascade
+heads_cascade_mean.dat              (muon_base, seeds 1337 / 2 / 3) and its mean, the same residual heads without the
+heads_{indep,linear}.dat            chain (muon_indep) and independent linear heads (muon_linear), seed 1337
 """
 import re
 from pathlib import Path
@@ -63,6 +66,17 @@ def main():
         write(f'gqa_{name}.dat', ('step', 'ce'), evals(sec / f'{log}.log', 'heldout_labeled'))
     transfer = [(s - 300, ce) for s, ce in evals(sec / 'gqa_lw_s1.log', 'heldout_labeled')]
     write('gqa_lw.dat', ('step', 'ce'), transfer + evals(sec / 'gqa_lw.log', 'heldout_labeled'))
+
+    seeds = []
+    for i, seed in enumerate((1337, 2, 3), 1):
+        rows = [(t, ce) for t, ce in evals(LOGS / f'muon_base_s{seed}.log', 'gigamidi_heldout') if t > 0]
+        write(f'heads_cascade_s{i}.dat', ('step', 'ce'), rows)
+        seeds.append(dict(rows))
+    steps = sorted(set.intersection(*(set(r) for r in seeds)))
+    write('heads_cascade_mean.dat', ('step', 'ce'), [(t, round(sum(r[t] for r in seeds) / 3, 4)) for t in steps])
+    for arm in ('indep', 'linear'):
+        write(f'heads_{arm}.dat', ('step', 'ce'),
+              [(t, ce) for t, ce in evals(LOGS / f'muon_{arm}_s1337.log', 'gigamidi_heldout') if t > 0])
 
 
 if __name__ == '__main__':
