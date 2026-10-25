@@ -140,6 +140,7 @@ pack_short = False        # train only: short files fill their window with more 
 min_notes = 64            # with pad_short / pack_short: shorter files are still dropped
 n_programs = 0            # multi-instrument: 129 = GM programs + drums (needs a programs.u8 store or reads piano as 0)
 text_sink = False         # text_prefix position 0 = a learned sink vector (init from a BOS note), caption in the rest
+text_prefix_after = False  # the prefix after the window's first token (which keeps position 0, the base's sink) instead of in front
 heads = 'cascade'         # output heads: 'cascade' | 'independent' (no chain) | 'linear' (rejected.py); heads A/B only
 # text control (context/claude/text_control.md): a caption per window from the label tables in `captions`, encoded by
 # the frozen `text_encoder`, added at every position through the model's zero-init text_proj (text_dim = its width)

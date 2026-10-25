@@ -11,13 +11,14 @@ ARCH_KEYS = ('n_layer', 'n_head', 'n_kv_head', 'n_embd', 'block_size', 'bias', '
              'duration_size', 'delta_time_size', 'n_styles', 'n_programs', 'pos_emb', 'rope_base', 'norm', 'mlp',
              'qk_norm', 'cond_inst', 'n_density', 'n_remain', 'n_progress', 'text_dim', 'text_center', 'text_prefix',
              'section_len', 'section_lead', 'section_slots', 'section_mode', 'section_xattn_every', 'section_repeat',
-             'linear_attn', 'heads', 'text_sink')
+             'linear_attn', 'heads', 'text_sink', 'text_prefix_after')
 # what checkpoints that predate a key actually used
 LEGACY_DEFAULTS = {'n_kv_head': 0, 'n_styles': 0, 'n_programs': 0, 'pos_emb': 'learned', 'rope_base': 10000.0,
                    'norm': 'layernorm', 'mlp': 'gelu', 'qk_norm': False, 'cond_inst': False, 'n_density': 0, 'n_remain': 0,
                    'n_progress': 0, 'text_dim': 0, 'text_center': False, 'text_prefix': 0, 'section_len': 0, 'section_lead': 0,
                    'section_slots': 4, 'section_mode': 'prefix', 'section_xattn_every': 2,
-                   'section_repeat': 0, 'linear_attn': '', 'heads': 'cascade', 'text_sink': False}
+                   'section_repeat': 0, 'linear_attn': '', 'heads': 'cascade', 'text_sink': False,
+                   'text_prefix_after': False}
 
 
 def torch_load(path, **kw):
@@ -116,8 +117,8 @@ def merge_model_args(saved, wanted, finetune, block_size):
             args[k] = wanted[k]  # add the length input (zero-init cond_remain / cond_progress: starts as the old model)
         if finetune and k == 'text_prefix' and args[k] == 0:
             args[k] = wanted[k]  # add the T2 prefix adapter
-        if finetune and k == 'text_sink' and wanted.get(k) and not saved.get('text_prefix'):
-            args[k] = True  # with a new T2 prefix: its first slot a sink vector (fresh adapter either way)
+        if finetune and k in ('text_sink', 'text_prefix_after') and wanted.get(k) and not saved.get('text_prefix'):
+            args[k] = True  # with a new T2 prefix: its first slot a sink vector / its place after the first note
         if add_sections and k.startswith('section_'):
             args[k] = wanted.get(k, args[k])  # add section captions (fresh adapter; 'xattn' starts as the old model)
         if finetune and k == 'section_repeat' and wanted.get(k):

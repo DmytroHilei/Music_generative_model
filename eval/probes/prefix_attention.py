@@ -43,23 +43,30 @@ def recording_sdpa(q, k, v, attn_mask=None, dropout_p=0.0, is_causal=False, enab
         p = p[:, :, REC['notes']:]                                    # note queries
         vn = v.norm(dim=-1).mean((0, 1))                              # value norm per position
         notes = vn[REC['notes']:].mean()
-        (tl, th), (sl, sh), f = REC['text'], REC['sec'], REC['front']
-        REC['rows'].append(dict(front=p[..., :f].sum(-1).mean().item(), text=p[..., tl:th].sum(-1).mean().item(),
+        (tl, th), (sl, sh), (fl, fh), n0 = REC['text'], REC['sec'], REC['front'], REC['note0']
+        REC['rows'].append(dict(front=p[..., fl:fh].sum(-1).mean().item(), text=p[..., tl:th].sum(-1).mean().item(),
                                 sec=p[..., sl:sh].sum(-1).mean().item(),
                                 head=p[..., tl:th].sum(-1).mean((0, 2)).max().item() if th > tl else 0.0,
                                 v_text=(vn[tl:th].mean() / notes).item() if th > tl else float('nan'),
-                                v_front=(vn[:f].mean() / notes).item() if f else float('nan')))
+                                v_front=(vn[fl:fh].mean() / notes).item() if fh > fl else float('nan'),
+                                note0=p[..., n0].mean().item(), v_note0=(vn[n0] / notes).item()))
     return out
 
 
 def layout(cfg, front):
-    """(front tokens, caption slots, section slots, first note) as sequence ranges; section captions = the null one
-    at note 0, so its slots sit right after the caption prefix (musicar.model.gpt.section_layout)."""
+    """Sequence ranges: front (the first `front` positions of a model without a prefix; the sink slot of a text_sink
+    model), text (the caption slots), sec (section slots), notes (where the notes start) and note0 (the first note);
+    section captions = the null one at note 0, so its slots sit right after the caption prefix
+    (musicar.model.gpt.section_layout). text_prefix_after: [first note, prefix, the other notes]."""
     if not cfg.text_prefix:
-        return dict(front=front, text=(0, 0), sec=(0, 0), notes=front)
+        return dict(front=(0, front), text=(0, 0), sec=(0, 0), notes=front, note0=0)
     k = cfg.text_prefix
     n_sec = cfg.section_slots if cfg.section_len and cfg.section_mode == 'prefix' else 0
-    return dict(front=0, text=(0, k), sec=(k, k + n_sec), notes=k + n_sec)
+    sink = 1 if getattr(cfg, 'text_sink', False) else 0  # text_sink: slot 0 is the learned sink, the caption after it
+    if getattr(cfg, 'text_prefix_after', False):
+        return dict(front=(1, 1 + sink), text=(1 + sink, 1 + k), sec=(1 + k, 1 + k + n_sec), notes=1 + k + n_sec,
+                    note0=0)
+    return dict(front=(0, sink), text=(sink, k), sec=(k, k + n_sec), notes=k + n_sec, note0=k + n_sec)
 
 
 def main():
@@ -101,11 +108,14 @@ def main():
             res[name], REC = REC['rows'], None
         print(f'\n{path} (it {it}, {cfg.n_layer} layers, caption slots {cfg.text_prefix})')
         if cfg.text_prefix:
+            sink = getattr(cfg, 'text_sink', False)
             print('layer | caption true: caption slots / section slots / top head | null: caption slots | '
-                  'value norm caption slots / notes')
+                  'value norm caption slots / notes | first note (BOS): attention / value norm'
+                  + (' | sink slot: attention / value norm' if sink else ''))
             for i, (a, b) in enumerate(zip(res['true'], res['null'])):
                 print(f"{i:5d} | {a['text']:.3f} / {a['sec']:.3f} / {a['head']:.3f} | {b['text']:.3f} | "
-                      f"{a['v_text']:.2f}")
+                      f"{a['v_text']:.2f} | {a['note0']:.3f} / {a['v_note0']:.2f}"
+                      + (f" | {a['front']:.3f} / {a['v_front']:.2f}" if sink else ''))
         else:
             print(f'layer | first {args.front} position(s): attention / value norm vs the other notes')
             for i, a in enumerate(res['-']):

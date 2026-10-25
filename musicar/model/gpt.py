@@ -265,6 +265,11 @@ class MusicConfig:
     # with text_prefix: prefix position 0 is a learned caption-independent sink vector (init from a BOS note's
     # embedding, the base's position 0), the caption takes the other text_prefix - 1 slots (attention-sink A/B)
     text_sink: bool = False
+    # with text_prefix: the prefix sits after the window's first token instead of in front of it, so that token keeps
+    # position 0, where the base's attention sink lives (the 450M moved its sink from the prefix back onto the first
+    # note and stopped attending to the prefix, 2026-10-25); the first note's prediction then never sees the caption.
+    # Not with section captions (their layout puts the prefix in front)
+    text_prefix_after: bool = False
     # section captions (text_control.md "Where the caption acts"): a caption per section_len notes of the piece, from
     # that section's own notes (0 = off; needs text_prefix). The caption of section k arrives section_lead notes
     # before the section starts (0 = with its first note, section_len = a whole section ahead). Its token states ->
@@ -542,6 +547,7 @@ class GPT(nn.Module):
             # else the largest one below that does (450M: 18 heads, LaBSE 768 -> 16); weight shapes don't depend on it
             text_heads = max(h for h in range(1, config.n_head + 1) if config.text_dim % h == 0)
             assert not config.text_sink or config.text_prefix >= 2, 'text_sink needs a caption slot after the sink'
+            assert not (config.text_prefix_after and config.section_len), 'section captions need the prefix in front'
             self.transformer['text_prefix'] = TextPrefix(config.text_dim, config.n_embd, config.text_prefix,
                                                          n_head=text_heads, sink=config.text_sink)
             if config.section_len:
@@ -724,7 +730,11 @@ class GPT(nn.Module):
         if k_pre:
             if text is None:
                 text = torch.zeros(b, 1, self.config.text_dim, device=device)
-            x = torch.cat([self.transformer['text_prefix'](text.to(x.dtype)).to(x.dtype), x], dim=1)
+            pre = self.transformer['text_prefix'](text.to(x.dtype)).to(x.dtype)
+            if self.config.text_prefix_after:  # [first token, prefix, the other notes]: position 0 stays a note
+                x = torch.cat([x[:, :1], pre, x[:, 1:]], dim=1)
+            else:
+                x = torch.cat([pre, x], dim=1)
             n_seq = k_pre + t
             if S and self.config.section_mode == 'prefix':
                 vecs, pos = sections
@@ -761,7 +771,11 @@ class GPT(nn.Module):
             x = x[:, :n_real]
         if read is not None:
             return self.transformer.ln_f(x.gather(1, read[..., None].expand(-1, -1, x.size(-1))))
-        return self.transformer.ln_f(x[:, k_pre:] if k_pre else x)
+        if k_pre and self.config.text_prefix_after:
+            x = torch.cat([x[:, :1], x[:, k_pre + 1:]], dim=1)  # the notes' states, in order
+        elif k_pre:
+            x = x[:, k_pre:]
+        return self.transformer.ln_f(x)
 
     def section_vectors(self, states):
         """Section caption token states (..., L, text_dim) -> (..., section_slots, n_embd); all-zero = the null

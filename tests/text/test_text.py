@@ -173,6 +173,49 @@ def test_text_sink():
     assert not merge_model_args(old, wanted, True, 64)['text_sink'], 'an existing prefix keeps its layout'
 
 
+def test_text_prefix_after():
+    """text_prefix_after: the sequence is [first note, prefix, the other notes]: the first note's state cannot see the
+    caption, the later ones can; the notes' states come back in order; KV-cache decoding matches the full forward;
+    a finetune may pick the layout only together with a new prefix; no section captions with it."""
+    from musicar.model.checkpoint import ARCH_KEYS, merge_model_args
+    from musicar.model.gpt import KVCache
+    m = tiny(text_dim=8, text_prefix=4, text_prefix_after=True)
+    tp = m.transformer['text_prefix']
+    torch.nn.init.normal_(tp.gate)
+    torch.nn.init.normal_(tp.null)
+    streams, program, _ = batch(B=2, T=10)
+    states = torch.randn(2, 5, 8)
+    with torch.no_grad():
+        full = m.encode(*streams, program=program, text=states)
+        other = m.encode(*streams, program=program, text=torch.randn(2, 5, 8))
+        none = m.encode(*streams, program=program)
+        front = tiny(text_dim=8, text_prefix=4).encode(*streams, program=program, text=states)
+    assert full.shape == (2, 10, 32)
+    assert torch.allclose(full[:, 0], other[:, 0]) and torch.allclose(full[:, 0], none[:, 0])
+    assert not torch.allclose(full[:, 1:], other[:, 1:]) and not torch.allclose(full[:, 1:], none[:, 1:])
+    assert not torch.allclose(full, front)
+    with torch.no_grad():
+        for n0 in (1, 4):  # a 1-note prefill = [note, prefix]
+            cache = KVCache(2, 2, 2, 4 + 10, 16, 'cpu', torch.float32)
+            h = m.encode(*(t[:, :n0] for t in streams), program=program[:, :n0], cache=cache, text=states,
+                         step=False)
+            assert torch.allclose(h, full[:, :n0], atol=1e-5), n0
+            for i in range(n0, 10):
+                cache.pos.fill_(4 + i)
+                h = m.encode(*(t[:, i:i + 1] for t in streams), program=program[:, i:i + 1], cache=cache)
+                assert torch.allclose(h[:, 0], full[:, i], atol=1e-4), (n0, i)
+    wanted = {k: getattr(m.config, k) for k in ARCH_KEYS}
+    plain = {**wanted, 'text_prefix': 0, 'text_prefix_after': False}
+    assert merge_model_args(plain, wanted, True, 64)['text_prefix_after'], 'a new prefix may take the layout'
+    old = {**wanted, 'text_prefix_after': False}
+    assert not merge_model_args(old, wanted, True, 64)['text_prefix_after'], 'an existing prefix keeps its layout'
+    try:
+        tiny(text_dim=8, text_prefix=4, text_prefix_after=True, section_len=8, section_slots=2)
+        assert False, 'section captions need the prefix in front'
+    except AssertionError as e:
+        assert 'in front' in str(e)
+
+
 def test_text_prefix_generate():
     m = prefix_model()
     start = [torch.full((2, 1), 128)] + [torch.zeros(2, 1, dtype=torch.long)] * 3
