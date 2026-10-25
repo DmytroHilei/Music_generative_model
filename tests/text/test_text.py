@@ -173,6 +173,38 @@ def test_text_sink():
     assert not merge_model_args(old, wanted, True, 64)['text_sink'], 'an existing prefix keeps its layout'
 
 
+def test_open_weight():
+    """open_weight: the training loss is the weighted mean over the targets, the first open_notes notes after a BOS
+    (and after a section caption event) weighing open_weight; open_weight 1 = the plain loss; parts stay the plain
+    CE; opening_mask covers BOS openings and section events."""
+    from musicar.data.loader import BOS_PITCH
+    m = tiny()
+    streams, program, targets = batch(B=2, T=16)
+    streams[0][0, 3] = BOS_PITCH  # row 0: a piece starts at note 3 -> notes 3..6 are its opening (open_notes 4)
+    streams[0][1, :] = streams[0][1].clamp(max=BOS_PITCH - 1)  # row 1: no BOS
+    mask = m.opening_mask(streams[0], 4)
+    assert mask[0].tolist() == [False] * 3 + [True] * 4 + [False] * 9 and not mask[1].any()
+    sec = torch.tensor([[0, 10, 99], [5, 99, 99]])  # section caption events (> T = unused)
+    mask_sec = m.opening_mask(streams[0], 4, sec)
+    assert mask_sec[0].tolist() == [True] * 7 + [False] * 3 + [True] * 4 + [False] * 2
+    assert mask_sec[1].tolist() == [False] * 5 + [True] * 4 + [False] * 7
+    with torch.no_grad():
+        parts1, loss1 = m(*streams, program=program, targets=targets)
+        parts1b, loss1b = m(*streams, program=program, targets=targets, open_weight=1.0, open_notes=4)
+        parts8, loss8 = m(*streams, program=program, targets=targets, open_weight=8.0, open_notes=4)
+        # the weighted mean by hand: the loss over the opening targets only and over the rest only
+        inside = [torch.where(mask, t, -1) for t in targets]
+        outside = [torch.where(mask, -1, t) for t in targets]
+        _, l_in = m(*streams, program=program, targets=inside)
+        _, l_out = m(*streams, program=program, targets=outside)
+    assert torch.allclose(loss1, loss1b)
+    assert all(torch.allclose(parts1[k], parts8[k]) for k in parts1), 'parts stay the plain CE'
+    n_in, n_out = mask.sum().item(), (~mask).sum().item()
+    want = (8.0 * n_in * l_in + n_out * l_out) / (8.0 * n_in + n_out)
+    assert torch.allclose(loss8, want, atol=1e-5), (loss8, want)
+    assert not torch.allclose(loss8, loss1)
+
+
 def test_text_prefix_after():
     """text_prefix_after: the sequence is [first note, prefix, the other notes]: the first note's state cannot see the
     caption, the later ones can; the notes' states come back in order; KV-cache decoding matches the full forward;

@@ -191,6 +191,12 @@ section_cf_from = 0.0     # cf loss and recognition head from this share of lr_d
 section_splice_frac = 0.0  # training: share of spliced windows (section of another file, its caption)
 late_from = 256           # validation with captions: also the CE over window positions >= late_from (val/*late*)
 early_notes = 128         # validation with captions: also the CE over the first early_notes notes after a BOS (val/*early*)
+# training loss weight of the opening notes: the first open_notes notes after a BOS, and after each section caption
+# event (section_len models), count open_weight times (weighted mean, so the loss scale stays); 1 = off. The notes a
+# caption explains are a small share of a 2,048-note window (~1.6% at boundary_frac 0.5), and the 450M only learned to
+# read captions when that share was large (block 512 at piece starts, 2026-10-25); this raises the share in place
+open_weight = 1.0
+open_notes = 128
 
 # wandb logging
 wandb_log = True
@@ -658,12 +664,17 @@ def request_stop(signum, frame):
     stop_signal.append(signum)
 
 
+train_kw = dict(open_weight=open_weight, open_notes=open_notes) if open_weight != 1.0 else {}  # training loss only
+if train_kw:
+    print(f"opening notes weighted x{open_weight:g} in the loss (the first {open_notes} after a BOS / section caption)")
+
+
 def accumulate(X, Y, net):
     """Forward + backward over gradient_accumulation_steps micro-batches; returns the next batch and the metrics."""
     sums = {}
     for micro_step in range(gradient_accumulation_steps):
         with phases('forward'), ctx:
-            parts, loss = net(*X[0], **X[1], targets=Y)
+            parts, loss = net(*X[0], **X[1], targets=Y, **train_kw)
         # kept as GPU tensors to avoid a CPU sync per micro step
         sums['loss'] = sums.get('loss', 0.0) + loss.detach() / gradient_accumulation_steps
         for name, v in parts.items():

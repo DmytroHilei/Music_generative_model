@@ -777,6 +777,20 @@ class GPT(nn.Module):
             x = x[:, k_pre:]
         return self.transformer.ln_f(x)
 
+    @staticmethod
+    def opening_mask(pitch, n, section_pos=None):
+        """(B, T) bool: the positions less than n notes after the window's last BOS (pitch BOS_PITCH), and, with
+        section_pos (B, E) = the note index each section caption comes before (> T = unused), less than n notes after
+        a section caption event: the notes a caption explains most."""
+        from musicar.data.loader import BOS_PITCH
+        pos = torch.arange(pitch.size(1), device=pitch.device)
+        bos = torch.where(pitch == BOS_PITCH, pos, -1).cummax(1).values      # (B, T) index of the last BOS
+        opening = (bos >= 0) & (pos - bos < n)
+        if section_pos is not None:
+            d = pos[None, None, :] - section_pos[:, :, None]                  # (B, E, T) notes since each event
+            opening = opening | ((d >= 0) & (d < n)).any(1)
+        return opening
+
     def section_vectors(self, states):
         """Section caption token states (..., L, text_dim) -> (..., section_slots, n_embd); all-zero = the null
         caption."""
@@ -819,7 +833,8 @@ class GPT(nn.Module):
         self.aux_section_cls = nn.Linear(self.config.n_embd, 1)
 
     def forward(self, pitch, velocity, duration, delta_time, style=None, program=None, targets=None, cond=None,
-                text=None, sections=None, late_from=0, cf=None, remain=None, early_notes=0):
+                text=None, sections=None, late_from=0, cf=None, remain=None, early_notes=0, open_weight=1.0,
+                open_notes=0):
         """
         Returns (parts, loss). loss = sum of the per-head CEs with label smoothing (what we optimize),
         parts = dict name -> CE without label smoothing (detached, for honest logging / comparing runs).
@@ -835,6 +850,10 @@ class GPT(nn.Module):
         early_notes > 0: parts also has 'early_sum_<head>' / 'early_n_<head>' = the CE summed over, and the count of,
           the positions less than early_notes notes after the window's last BOS (validation: where captions act;
           a sum and a count, since many windows have none - summed_ce divides the totals).
+        open_weight != 1 (training): the loss is the weighted mean over the targets, the opening notes (the first
+          open_notes after a BOS, and after each section caption event of `sections`) weighing open_weight, the rest
+          1 (opening_mask); parts stay the plain CE. The notes a caption explains are a small share of a long window,
+          and the 450M only learned to read captions when that share was large (2026-10-25).
         cf (training, sections): counterfactual loss with the previous section caption, a dict of
           rows (R,) batch rows to compare (a fixed number, so the compiled shapes stay put), states (R, E, L,
           text_dim) their section captions with the changed section's replaced by the one before it, start (R,)
@@ -856,17 +875,23 @@ class GPT(nn.Module):
         parts = {}
         early = None
         if early_notes:
-            from musicar.data.loader import BOS_PITCH
-            pos = torch.arange(pitch.size(1), device=pitch.device)
-            bos = torch.where(pitch == BOS_PITCH, pos, -1).cummax(1).values      # (B, T) index of the last BOS
-            early = (bos >= 0) & (pos - bos < early_notes)
+            early = self.opening_mask(pitch, early_notes)
+        w = None
+        if open_weight != 1.0 and open_notes:
+            opening = self.opening_mask(pitch, open_notes, sections[1] if sections is not None else None)
+            w = torch.where(opening, float(open_weight), 1.0).reshape(-1)
         for name in self.head_names:
             lg = logits[name].view(-1, logits[name].size(-1))
             t = tgt[name].reshape(-1)
             # mean over the unmasked targets, 0 (not NaN = 0/0) when there are none, e.g. the duration head
             # of a drums-only window; no data-dependent branch, so no sync / graph break under compile
             n_valid = (t != -1).sum().clamp(min=1)
-            loss = loss + F.cross_entropy(lg, t, ignore_index=-1, label_smoothing=ls, reduction='sum') / n_valid
+            if w is None:
+                loss = loss + F.cross_entropy(lg, t, ignore_index=-1, label_smoothing=ls, reduction='sum') / n_valid
+            else:  # weighted mean: ignored targets give CE 0 and weight 0
+                ce = F.cross_entropy(lg, t, ignore_index=-1, label_smoothing=ls, reduction='none')
+                wv = w.to(ce.dtype) * (t != -1).to(ce.dtype)
+                loss = loss + (ce * wv).sum() / wv.sum().clamp(min=1)
             with torch.no_grad():
                 parts[name] = F.cross_entropy(lg.float(), t, ignore_index=-1, reduction='sum') / n_valid
                 if late_from:

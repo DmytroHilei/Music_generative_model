@@ -38,3 +38,6 @@ cloud/.hash_cache.json
 context/*
 !context/schedule.md
 results/
+
+# Claude Code local settings and worktrees
+.claude/
