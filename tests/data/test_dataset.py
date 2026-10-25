@@ -11,9 +11,9 @@ import torch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from helpers import make_store, notes, run  # noqa: E402
-from musicar.data.loader import (BOS_PITCH, DRUM_PROGRAM, EOS_PITCH, NoteWindowDataset, collate_windows,  # noqa: E402
-                                 density_level, elapsed_seconds, progress_level, remain_level, remaining_seconds,
-                                 source_name, window_conditions)
+from musicar.data.loader import (BOS_PITCH, DRUM_PROGRAM, EOS_PITCH, NoteWindowDataset,  # noqa: E402
+                                 captioned_windows, collate_windows, density_level, elapsed_seconds, progress_level,
+                                 remain_level, remaining_seconds, source_name, window_conditions)
 
 
 def dataset(d, files, progs=None, name='toy', **kw):
@@ -126,6 +126,13 @@ def test_conditions_and_collate():
     assert dens.tolist() == [density_level(3 / 1.5).item(), density_level(3 / 0.5).item()]
     inst, dens = window_conditions(pitch, dt, program, 129, 16, drop_p=1.0)
     assert inst.sum() == 0 and dens.sum() == 0
+    # a probability per row (cond_dropout_captioned): row 0 always dropped, row 1 always kept
+    inst, dens = window_conditions(pitch, dt, program, 129, 16, drop_p=torch.tensor([1.0, 0.0]))
+    assert inst[0].sum() == 0 and dens[0] == 0 and inst[1].nonzero().flatten().tolist() == [0] and dens[1] > 0
+    # captioned: a file caption or any section caption ('' = none / dropped)
+    has = captioned_windows(['a song', '', '', ''], [['', ''], ['', 'drums enter'], ['', ''], ['x', '']])
+    assert has.tolist() == [True, True, False, True]
+    assert captioned_windows(['a', '']).tolist() == [True, False]
     items = [((torch.zeros(4),) * 4 + (torch.tensor(i), f'cap {i}'), (torch.ones(4),) * 4) for i in range(3)]
     (streams, extra), y = collate_windows(items, extra_names=('style', 'text'))
     assert streams[0].shape == (3, 4) and extra['style'].tolist() == [0, 1, 2] and extra['text'][2] == 'cap 2'

@@ -118,7 +118,8 @@ def section_change_scores(store, section_len, pad, version='v1'):
 
 def window_conditions(pitch, delta_time, program, n_programs, n_density, drop_p=0.0, dt_seconds=0.02):
     """Conditioning of whole windows (B, T): instrument multi-hot (B, n_programs) and density level (B,), from the
-    notes themselves (BOS/EOS rows ignored). drop_p: per row, both conditions are replaced by 'none' (zeros / 0)."""
+    notes themselves (BOS/EOS rows ignored). drop_p: per row, both conditions are replaced by 'none' (zeros / 0);
+    a float, or a (B,) tensor of one probability per row (captioned_windows)."""
     real = pitch < BOS_PITCH
     inst = torch.zeros(pitch.size(0), n_programs, device=pitch.device)
     if program is not None:
@@ -129,11 +130,17 @@ def window_conditions(pitch, delta_time, program, n_programs, n_density, drop_p=
     secs = (delta_time * real).sum(1).float() * dt_seconds
     density = density_level(n / secs.clamp(min=0.5), n_density).to(pitch.device) if n_density else \
         torch.zeros(pitch.size(0), dtype=torch.long, device=pitch.device)
-    if drop_p > 0:
+    if torch.is_tensor(drop_p) or drop_p > 0:
         keep = torch.rand(pitch.size(0), device=pitch.device) >= drop_p
         inst = inst * keep[:, None]
         density = density * keep
     return inst, density
+
+
+def captioned_windows(text, sec_text=None):
+    """Which windows of a batch carry a caption: a file caption (text, B strings, '' = none) or any section caption
+    (sec_text, B lists of strings, '' = unused or dropped). Returns a (B,) bool tensor."""
+    return torch.tensor([bool(t) or bool(sec_text is not None and any(sec_text[i])) for i, t in enumerate(text)])
 
 
 class NoteWindowDataset(Dataset):

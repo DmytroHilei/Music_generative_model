@@ -29,8 +29,8 @@ from tqdm import tqdm
 
 from musicar.model.checkpoint import (ARCH_KEYS, bf16_cpu_state, load_expanded, merge_model_args, save_atomic,
                                 strip_compile_prefix, torch_load)
-from musicar.data.loader import (NoteWindowDataset, collate_windows, load_styles, progress_level, remain_level,
-                                 source_name, val_loader, window_conditions)
+from musicar.data.loader import (NoteWindowDataset, captioned_windows, collate_windows, load_styles, progress_level,
+                                 remain_level, source_name, val_loader, window_conditions)
 from musicar.eval.val_loss import estimate_val_loss, summed_ce
 from musicar.training.fp8 import convert_fp8, fp8_supported, refresh_fp8_weights
 from musicar.training.memory import spill_to_cpu
@@ -120,6 +120,8 @@ qk_norm = False           # RMSNorm on each head's q and k
 cond_inst = False         # condition on the set of instruments in the window (multi-hot, zero-init, needs n_programs)
 n_density = 0             # condition on the window's notes/s level (16 = 15 levels + none; 0 = off)
 cond_dropout = 0.15       # training: share of windows whose conditions are replaced by 'none'
+cond_dropout_captioned = -1.0  # >= 0: the conditions' dropout of windows with a caption (file or section), so the
+                          # caption carries the instruments / density there; cond_dropout for the rest (-1: all)
 eval_cond = True          # False: every evaluation (val CE, text / section gains) with the conditions set to 'none'
 text_encoder_device = ''  # '' = the model's device; 'cpu': the frozen text encoder off the GPU (~0.9 GB for LaBSE)
 n_remain = 0              # length control: seconds-to-the-end levels per note (33 = 32 levels + none; 0 = off)
@@ -443,11 +445,12 @@ def to_device(batch):
     return tuple(t.to(device, non_blocking=True) for t in batch)
 
 
-def prepare(X, Y, cond_drop_p, remain_drop_p=None, length_noise=False):
+def prepare(X, Y, cond_drop_p, remain_drop_p=None, length_noise=False, captioned_p=-1.0):
     """A batch on the device; cond_inst / n_density models also get the window conditions of its own notes,
     replaced by 'none' with probability cond_drop_p per window; n_remain models the levels of the seconds to each
     piece's end (n_progress: and of the share played), 'none' with probability remain_drop_p per window (default
-    cond_drop_p); length_noise (training): each window's piece lengths scaled by remain_jitter / remain_slack first."""
+    cond_drop_p); length_noise (training): each window's piece lengths scaled by remain_jitter / remain_slack first.
+    captioned_p >= 0: the conditions' dropout of the windows with a caption instead (captioned_windows)."""
     streams = to_device(X[0])
     extra = {k: encoder.encode(v, tokens=raw_model.config.text_prefix > 0) if k == 'text'
              else v.to(device, non_blocking=True) for k, v in X[1].items()
@@ -466,8 +469,12 @@ def prepare(X, Y, cond_drop_p, remain_drop_p=None, length_noise=False):
         extra['cf'] = dict(rows=rows.to(device), states=states, start=start[rows].to(device), notes=section_cf_notes,
                            eta=section_cf_eta, weight=section_cf_weight, cls_weight=section_cls_weight)
     if cond_inst or n_density:
+        drop = cond_drop_p
+        if captioned_p >= 0 and 'text' in X[1]:
+            has = captioned_windows(X[1]['text'], X[1].get('sec_text')).to(device)
+            drop = torch.where(has, captioned_p, cond_drop_p)
         extra['cond'] = window_conditions(streams[0], streams[3], extra.get('program'), n_programs, n_density,
-                                          drop_p=cond_drop_p)
+                                          drop_p=drop)
     if 'remain' in extra:
         remain, elapsed = extra['remain'], extra.pop('elapsed', None)
         total = None if elapsed is None else elapsed + remain  # the length of each row's piece
@@ -493,7 +500,7 @@ def prepare(X, Y, cond_drop_p, remain_drop_p=None, length_noise=False):
 def infinite_batches(loader):
     while True:
         for X, Y in loader:
-            yield prepare(X, Y, cond_dropout, remain_dropout, length_noise=True)
+            yield prepare(X, Y, cond_dropout, remain_dropout, length_noise=True, captioned_p=cond_dropout_captioned)
 
 
 def val_loss(loader, conditioned=None):
