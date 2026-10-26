@@ -41,3 +41,7 @@ results/
 
 # Claude Code local settings and worktrees
 .claude/
+
+# curated generations to share (from scratch, no dataset openings): kept in git despite the *.mid / *.mp3 rules above
+!docs/listen/
+!docs/listen/**
