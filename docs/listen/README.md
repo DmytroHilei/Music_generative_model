@@ -1,16 +1,16 @@
 # Listen: musicar text-to-MIDI samples
 
 Pieces written by musicar from a text prompt alone. Each one starts from an empty sequence: no notes are borrowed
-from existing music. Audio (MP3), video and MIDI for each prompt are added here as they are rendered.
+from existing music. The MP3s are cut at 75 seconds with a fade; the MIDI files are complete.
 
-| prompt | language | what it contrasts |
-|---|---|---|
-| A slow, quiet solo piano piece in a minor key | English | slow, solo piano |
-| A fast, energetic rock song with drums, electric guitar and bass | English | fast, full band |
-| A calm acoustic guitar piece without drums, in a high register | English | no drums, high register |
-| A lively jazz piece with piano, double bass and drums | English | jazz trio |
-| Швидка весела пісня з барабанами та електрогітарою | Ukrainian | fast, drums and guitar |
-| Повільна сумна мелодія для фортепіано | Ukrainian | slow, sad piano |
+| prompt | language | listen | MIDI | instruments in the result |
+|---|---|---|---|---|
+| A slow, quiet solo piano piece in a minor key | English | [1](slow_piano_1.mp3) · [2](slow_piano_2.mp3) | [1](slow_piano_1.mid) · [2](slow_piano_2.mid) | piano |
+| A fast, energetic rock song with drums, electric guitar and bass | English | [1](fast_rock_1.mp3) · [2](fast_rock_2.mp3) | [1](fast_rock_1.mid) · [2](fast_rock_2.mid) | guitars, bass, drums (+ sax in 1) |
+| A calm acoustic guitar piece without drums, in a high register | English | [1](guitar_nodrums_1.mp3) · [2](guitar_nodrums_2.mp3) | [1](guitar_nodrums_1.mid) · [2](guitar_nodrums_2.mid) | guitar, no drums |
+| A lively jazz piece with piano, double bass and drums | English | [1](jazz_band_1.mp3) · [2](jazz_band_2.mp3) | [1](jazz_band_1.mid) · [2](jazz_band_2.mid) | piano, acoustic bass, drums |
+| Швидка весела пісня з барабанами та електрогітарою | Ukrainian | [1](uk_fast_drums_1.mp3) | [1](uk_fast_drums_1.mid) | drums, bass, guitar and a crowded mix |
+| Повільна сумна мелодія для фортепіано | Ukrainian | [1](uk_slow_piano_1.mp3) · [2](uk_slow_piano_2.mp3) | [1](uk_slow_piano_1.mid) · [2](uk_slow_piano_2.mid) | piano (+ flute in 2) |
 
 ## How they were made
 
@@ -18,7 +18,8 @@ from existing music. Audio (MP3), video and MIDI for each prompt are added here 
   checkpoint on the way to the captioned musicar-L. The prompt goes through a frozen LaBSE encoder into 16 prefix
   vectors.
 - Sampling: classifier-free guidance 2, temperature and top-p as in `generate.py`, a repetition penalty on chords,
-  1,000 notes. Each file is the best of 4 candidates by an automatic caption-match score; no hand editing.
+  up to 1,000 notes (a piece may end earlier). Each file is one of the best 2 of 8 candidates by an automatic
+  caption-match score; one sample was left out after listening; no hand editing.
 - Rendering: FluidSynth with the FluidR3 General MIDI soundfont.
 
 Licence: CC BY-NC-SA 4.0, as the models. Code and model cards: the repository root and
