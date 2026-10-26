@@ -1,11 +1,31 @@
 ---
 license: cc-by-nc-sa-4.0
+datasets:
+- loubb/aria-midi
 tags:
 - music
 - midi
 - symbolic-music
 - music-generation
+- midi-generation
+- symbolic-music-generation
+- music-transformer
+- generative-music
+- ai-music
+- composition
+- transformer
+- decoder-only
+- autoregressive
+- rope
+- swiglu
+- rmsnorm
+- qk-norm
 - pytorch
+- piano
+- solo-piano
+- classical-music
+- maestro
+- giantmidi-piano
 ---
 
 # musicar-S-piano

@@ -1,11 +1,33 @@
 ---
 license: cc-by-nc-sa-4.0
+datasets:
+- Metacreation/GigaMIDI
+- loubb/aria-midi
+- projectlosangeles/Discover-MIDI-Dataset
 tags:
 - music
 - midi
 - symbolic-music
 - music-generation
+- midi-generation
+- symbolic-music-generation
+- music-transformer
+- generative-music
+- ai-music
+- composition
+- transformer
+- decoder-only
+- autoregressive
+- rope
+- swiglu
+- rmsnorm
+- qk-norm
 - pytorch
+- multi-instrument
+- general-midi
+- drums
+- long-context
+- fp8-training
 ---
 
 # musicar-L

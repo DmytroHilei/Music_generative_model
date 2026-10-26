@@ -1,11 +1,33 @@
 ---
 license: cc-by-nc-sa-4.0
+base_model: Dimitri-206265/musicar-S-piano
+base_model_relation: finetune
+datasets:
+- Metacreation/GigaMIDI
+- loubb/aria-midi
 tags:
 - music
 - midi
 - symbolic-music
 - music-generation
+- midi-generation
+- symbolic-music-generation
+- music-transformer
+- generative-music
+- ai-music
+- composition
+- transformer
+- decoder-only
+- autoregressive
+- rope
+- swiglu
+- rmsnorm
+- qk-norm
 - pytorch
+- multi-instrument
+- general-midi
+- drums
+- model-growth
 ---
 
 # musicar-S
