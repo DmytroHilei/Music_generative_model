@@ -112,6 +112,31 @@ the checkpoint is safely on the laptop; the data repo can stay for a later run (
 | AUTO_STOP did nothing | vast.ai didn't provide `CONTAINER_ID` / `CONTAINER_API_KEY` in this image: stop the instance in the console yourself |
 | finish on the laptop instead | `ckpt.py pull`, then edit `run.env`: `MICRO=1 ACCUM=32 ACT_CKPT=-1` (450M fits 8 GB only like this, ~8.8k notes/s), `cloud/run/launch.sh` |
 
+## F1: the caption run (config/f1/f1.py, 2026-10-28)
+
+The same machinery with three F1 scripts around it. The long run starts from `checkpoints/f1_plain512_long` (from the
+laptop), and after it the caption phase (`config/f1/f1_cap.py`) and the before / after evals run on the instance
+before it stops. Times are for the 84 Mbps 5090 host of 2026-10-27; data is ~24 GB (no Discover stores).
+
+| # | where | command | time |
+|---|---|---|---|
+| 1 | laptop | `ssh -p PORT root@HOST 'git clone -b transformer-v2 https://github.com/DmytroHilei/Music_generative_model.git music'` | 1 min |
+| 2 | laptop | `cloud/run/f1_ship.sh code -p PORT root@HOST` (uncommitted code + `cloud/secrets.env`) | 1 min |
+| 3 | instance | `cd music && DATA_STORES=gigamidi_train,aria_train,gigamidi_clean_validation,aria_validation,gigamidi_heldout_validation bash cloud/setup/setup_instance.sh` | ~55 min |
+| 4 | laptop, during 3 | `cloud/run/f1_ship.sh weights -p PORT root@HOST` (1.9 GB, sha256 checked) | uplink |
+| 5 | instance | `.venv/bin/python cloud/setup/preflight.py --run f1 --config config/f1/f1.py --hours H --skip-lr-probe` | ~25 min |
+| 6 | instance | `bash cloud/run/f1_checks.sh` (real step time -> run.env, length check, caption-phase micro-batch) | ~12 min |
+| 7 | instance | `POST_SWEEP=0 POST_RUN="bash cloud/run/f1_post.sh" POST_RUN_DIR=results/f1_post POST_RUN_LIMIT_MIN=120 cloud/run/launch.sh f1` | H h + ~45 min |
+
+Steps 3 and 5-7 in one go, detached (needs step 4 to finish; progress in `logs/f1_all.log`):
+`HOURS=18 setsid nohup bash cloud/run/f1_all.sh > logs/f1_all.log 2>&1 < /dev/null &`.
+Disk: ~70 GB at the end (data 24, packages 7, LaBSE 2, checkpoints ~30 with the bf16 snapshots); rent 100 GB.
+
+After: `.venv/bin/python cloud/sync/ckpt.py pull --run f1` (the long run) and
+`hf download <user>/f1-results --local-dir results/f1_post` (the caption-phase weights, its logs and the evals),
+then destroy the instance. Until the long run ends, `config/f1/f1_cap.py` on the instance can still change (the
+post-run reads it when it starts), e.g. after the length check in step 6.
+
 ## Files
 
 | file | role |
@@ -123,5 +148,6 @@ the checkpoint is safely on the laptop; the data repo can stay for a later run (
 | `launch.sh`, `stop.sh`, `status.sh` | start detached / graceful stop + final push / quick status |
 | `run_resumable.sh` | crash-restart wrapper around train.py (respects `out_dir/STOP`) |
 | `ckpt.py` | `push`, `pull`, `loop`, `status` for checkpoints on the Hub; vast.ai auto-stop |
+| `f1_ship.sh`, `f1_checks.sh`, `f1_post.sh` | F1: laptop -> instance copy; checks between preflight and launch; caption phase + evals after the run |
 | `requirements-lock.txt` | the exact training environment (torch 2.14.0+cu130, torchao 0.18, ...) |
 | `secrets.env.example` | template for `cloud/secrets.env` (git-ignored) |

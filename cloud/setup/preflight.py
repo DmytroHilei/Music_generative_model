@@ -92,7 +92,7 @@ def check_environment(args, cfg):
     needed += [(e.split('=', 1)[1], 'validation') for e in str(cfg.get('val_extra', '')).split(';') if '=' in e]
     for src, split in needed:
         if src.startswith('store:'):
-            store = ROOT / f"{src[len('store:'):]}_{split}"
+            store = ROOT / f"{src[len('store:'):].split('#')[0]}_{split}"   # '#labeled': a filter, not part of the path
             if not (store / 'meta.json').exists():
                 fail(f'{store} missing (read by {args.config})')
     say('data stores present and verified')
@@ -117,7 +117,8 @@ def bench(cfg, micro, act_ckpt):
            '--compile_ns', '1', '--norm', cfg.get('norm', 'layernorm'), '--mlp', cfg.get('mlp', 'gelu'),
            '--qk_norm', str(int(cfg.get('qk_norm', False))), '--fp8_cache', str(int(cfg.get('fp8_cache_weights', False)))]
     out = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True).stdout
-    m = re.search(r'^\s+\d+\s+1\s+\S+\s+1\s+-?\d+\s+([\d,]+)\s+(\d+)\s+([\d.]+)\s*$', out, re.M)
+    # micro, compile, attn, fp8, ckpt, [linear, kernel: since the linear-attention columns], tok/s, ms/step, peak GB
+    m = re.search(r'^\s+\d+\s+1\s+\S+\s+1\s+-?\d+\s+(?:\D\S*\s+\D\S*\s+)?([\d,]+)\s+(\d+)\s+([\d.]+)\s*$', out, re.M)
     if not m:
         return None
     return float(m.group(1).replace(',', '')), float(m.group(3))
