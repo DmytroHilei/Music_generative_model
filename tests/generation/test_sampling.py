@@ -199,5 +199,56 @@ def test_prompt_helpers():
     assert s[0].shape == (2, 4) and cond[0][:, 33].tolist() == [1.0, 1.0] and cond[1].sum() == 0
 
 
+def _prefix_model():
+    m = tiny(text_dim=8, text_prefix=4, pitch_size=130, pos_emb='rope')
+    torch.nn.init.normal_(m.transformer['text_prefix'].gate)
+    torch.nn.init.normal_(m.transformer['text_prefix'].null)
+    return m
+
+
+def test_guidance_schedule():
+    """guidance_scale: constant, a step (the opening only), an anneal and a warm-up."""
+    from musicar.generation.sampling import guidance_scale
+    assert [guidance_scale(i, 2.0) for i in range(3)] == [2.0, 2.0, 2.0]
+    assert [guidance_scale(i, 3.0, 2, 1.0) for i in range(4)] == [3.0, 3.0, 1.0, 1.0]
+    assert [guidance_scale(i, 3.0, 4, 1.0, True) for i in range(6)] == [3.0, 2.5, 2.0, 1.5, 1.0, 1.0]
+    assert [guidance_scale(i, 1.0, 2, 3.0, True) for i in range(4)] == [1.0, 2.0, 3.0, 3.0]
+
+
+def test_min_p_filter():
+    from musicar.generation.sampling import min_p_filter
+    logits = torch.log(torch.tensor([[0.5, 0.3, 0.15, 0.05]]))
+    kept = min_p_filter(logits, 0.25).isfinite()
+    assert kept.tolist() == [[True, True, True, False]]  # 0.15 >= 0.125, 0.05 < 0.125
+    assert min_p_filter(logits, 1.0).isfinite().tolist() == [[True, False, False, False]]
+    assert torch.equal(min_p_filter(logits, 0.0), logits)
+
+
+def test_cfg_schedule_and_min_p_in_generate():
+    """cfg_notes: the first notes of the step schedule are those of constant guidance, the rest those of no guidance
+    (greedy, so the paths are comparable while they share a prefix); a warm-up with cfg_scale 1 still runs guided;
+    min_p 1 equals greedy."""
+    m = _prefix_model()
+    streams, _, _ = batch(B=2, T=1)
+    streams[0][:] = BOS_PITCH
+    text = torch.randn(3, 8)
+    kw = dict(top_k=1, text=text, **KW)
+    const = generate(m, *streams, max_new_tokens=12, cfg_scale=3.0, **kw)
+    plain = generate(m, *streams, max_new_tokens=12, **kw)
+    sched = generate(m, *streams, max_new_tokens=12, cfg_scale=3.0, cfg_notes=5, **kw)
+    assert all(torch.equal(a[:, :6], b[:, :6]) for a, b in zip(sched, const)), 'the opening follows cfg 3'
+    assert not all(torch.equal(a, b) for a, b in zip(const, plain)), 'guidance changes the notes'
+    # after the step the scale is 1: the next note is what no guidance picks given the same prefix
+    with torch.no_grad():
+        h = m.encode(*(t[:, :6] for t in sched), text=text.expand(2, 3, 8))[:, [-1]]
+        nxt = m.cascade.sample(h, lambda logits, name: logits[:, -1].argmax(-1, keepdim=True))
+    assert all(torch.equal(nxt[name], t[:, 6:7]) for name, t in zip(STREAM_ORDER, sched))
+    warm = generate(m, *streams, max_new_tokens=12, cfg_scale=1.0, cfg_notes=4, cfg_end=3.0, cfg_linear=True, **kw)
+    assert all(o.shape == (2, 13) for o in warm)
+    assert not all(torch.equal(a, b) for a, b in zip(warm, plain)), 'a warm-up to 3 is guided'
+    minp = generate(m, *streams, max_new_tokens=12, min_p=1.0, text=text, **KW)
+    assert all(torch.equal(a, b) for a, b in zip(minp, plain)), 'min_p 1 keeps only the top value'
+
+
 if __name__ == '__main__':
     run(globals())

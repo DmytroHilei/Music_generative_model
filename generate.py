@@ -72,6 +72,9 @@ def parse_args(argv=None):
     parser.add_argument("--top-p", type=float, default=None,
                         help="nucleus sampling: keep the smallest set of values reaching this probability (e.g. 0.9; "
                              "the 2026-10-04 settings search found 0.9 helps in every style)")
+    parser.add_argument("--min-p", type=float, default=None,
+                        help="min-p truncation: drop values below this share of the most likely one (e.g. 0.035-0.1; "
+                             "after --top-k, before --top-p)")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--soundfont", type=str,
                         default="/usr/share/sounds/sf2/FluidR3_GM.sf2",
@@ -121,6 +124,11 @@ def parse_args(argv=None):
                              "'a sad slow piano ballad' (default: none = unconditional)")
     parser.add_argument("--cfg-scale", type=float, default=1.0,
                         help="classifier-free guidance strength over --text / --style (1 = off; e.g. 1.5-3)")
+    parser.add_argument("--cfg-notes", type=int, default=0,
+                        help="guidance schedule: --cfg-scale for this many new notes, then --cfg-end (0 = constant)")
+    parser.add_argument("--cfg-end", type=float, default=1.0, help="the scale after --cfg-notes notes (1 = off)")
+    parser.add_argument("--cfg-linear", action="store_true",
+                        help="a straight line from --cfg-scale to --cfg-end over --cfg-notes notes instead of a step")
     parser.add_argument("--retrieve", type=str, default=None,
                         help="caption retrieval (musicar/generation/retrieval.py): each row's prompt is the opening "
                              "(--prompt-notes) of a file of this captioned store (a name under data/cache, e.g. "
@@ -509,6 +517,7 @@ def generate_batch(model, config, args, pieces, seed, n_rows, device, progress=N
             cond=cond,
             text=text,
             cfg_scale=args.cfg_scale,
+            cfg_notes=args.cfg_notes, cfg_end=args.cfg_end, cfg_linear=args.cfg_linear, min_p=args.min_p,
             length_seconds=args.length_seconds,
             eos_ramp=args.eos_ramp,
             length_stop=args.length_stop,
