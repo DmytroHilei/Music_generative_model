@@ -304,18 +304,20 @@ class FileAttributes:
         return a
 
 
-def match(wants, a):
-    """(score 0-1, {check: 0-1}). Score = the mean over the asked-for categories (instruments incl. drums / solo, key,
-    levels incl. energy, genre, mood) of the mean of their checks, so a long instrument list doesn't outweigh the mood;
-    1.0 when nothing is checkable. Levels: 1 on the asked level, 0.5 one step off (the middle), 0 on the opposite
+def match(wants, a, categories=False):
+    """(score 0-1, {check: 0-1}), with categories=True also {category: {check: 0-1}} (instruments, key, levels,
+    genre, mood: what the caption asked for). Score = the mean over the asked-for categories (instruments incl. drums
+    / solo, key, levels incl. energy, genre, mood) of the mean of their checks, so a long instrument list doesn't
+    outweigh the mood; 1.0 when nothing is checkable. Levels: 1 on the asked level, 0.5 one step off (the middle), 0 on the opposite
     one; key: half for the mode, half for the tonic, halved when the estimate is unsure (confidence under the caption
     builder's median). Genres and moods only when attrs has labels (FileAttributes with caps): 1 a match (a compound
     genre: all its parts, 'pop' + 'rock' for 'pop rock'), 0.5 a related genre or no labels of the kind, 0 another."""
-    checks, cats = {}, {}
+    checks, cats, named = {}, {}, {}
 
     def put(cat, name, value):
         checks[name] = float(value)
         cats.setdefault(cat, []).append(float(value))
+        named.setdefault(cat, {})[name] = float(value)
 
     for label, progs in wants['instruments']:
         put('instruments', label, bool(progs & a['present']))
@@ -356,9 +358,8 @@ def match(wants, a):
             put('genre', '/'.join(sorted(ids)), 1.0 if full else 0.5 if near or not a['genres'] else 0.0)
         for ids in wants['moods']:
             put('mood', '/'.join(sorted(ids)), 1.0 if ids & a['moods'] else 0.5 if not a['moods'] else 0.0)
-    if not cats:
-        return 1.0, checks
-    return float(np.mean([np.mean(v) for v in cats.values()])), checks
+    score = float(np.mean([np.mean(v) for v in cats.values()])) if cats else 1.0
+    return (score, checks, named) if categories else (score, checks)
 
 
 def allowed_programs(wants, base=None):

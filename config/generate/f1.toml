@@ -3,7 +3,7 @@
 # length input; eos-ramp / length-stop end rows that run over (not tuned: gen_search's length axis has not run);
 # eos-floor 0.85: no end before 85% of the length (2026-10-28: 1 in 6 rows of 120 s ended at ~45 s on its own).
 # Usage: generate.py --config f1 --text "..." --length-seconds 60 --output x.mid
-checkpoint = "checkpoints/f1"
+checkpoint = "checkpoints/f1_cap"
 sample-instruments = true
 cfg-scale = 2.5
 temperature = 1.1

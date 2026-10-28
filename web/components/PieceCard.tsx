@@ -90,7 +90,8 @@ export default function PieceCard({ piece, onVariation, onEdit }: Props) {
       : piece.status === 'streaming' ? `writing · ${piece.notes.length} notes`
         : piece.status === 'done' ? `done${piece.elapsedS != null ? ` in ${piece.elapsedS.toFixed(1)} s` : ''}`
           : 'stopped';
-  const settings = [piece.model, piece.seed != null && `seed ${piece.seed}`, preset?.label, length, `${piece.notes.length} notes`]
+  const settings = [piece.model, piece.seed != null && `seed ${piece.seed}`, preset?.label,
+    piece.opening && 'real opening', length, `${piece.notes.length} notes`]
     .filter(Boolean).join(' · ');
 
   return (

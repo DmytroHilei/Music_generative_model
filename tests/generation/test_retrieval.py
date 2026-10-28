@@ -78,7 +78,6 @@ def test_index_search_and_cache():
         assert index.search('a piece', k=12, only=[40]) == []
         tok, prog = index.opening(7, 10)
         assert tok.shape == (10, 4) and set(prog.tolist()) == {128, 27, 33}
-
         enc2 = WordEncoder()
         again = CaptionIndex(store, **{**kw, 'encoder': enc2})
         assert enc2.n == 0 and np.array_equal(again.emb, index.emb), 'loaded from the cache'
@@ -88,6 +87,25 @@ def test_index_search_and_cache():
         enc3 = WordEncoder()
         CaptionIndex(store, **{**kw, 'encoder': enc3, 'max_files': 5})  # another subset size: rebuilt
         assert enc3.n == 5 * 4
+
+
+def test_strict_genre_mood():
+    """strict: only files whose labels name the asked genre / mood (the odd files have no labels at all, so the
+    soft ranking lets them in); no effect when the caption asks for neither; each asked check on its own: one no file
+    meets stays soft, the others still hold."""
+    with tempfile.TemporaryDirectory() as d:
+        store, labels = toy_store(Path(d))
+        index = CaptionIndex(store, labels_dir=labels, captions_dir=Path(d) / 'none', min_notes=64,
+                             encoder=WordEncoder())
+        soft = index.search('an energetic rock song', k=12)
+        assert any(h['file'] % 2 for h in soft[:6]), 'unlabeled files rank among the soft hits'
+        hard = index.search('an energetic rock song', k=12, strict=('genre', 'mood'))
+        assert sorted(h['file'] for h in hard) == [6, 8, 10] and all(h['strict'] for h in hard)
+        assert len(index.search('a solo piano piece', k=12, strict=('genre', 'mood'))) == 12  # asks neither
+        jazz = index.search('a jazz piece', k=12, strict=('genre',))  # no file is jazz: soft, flagged
+        assert len(jazz) == 12 and not any(h['strict'] for h in jazz)
+        mixed = index.search('an energetic jazz piece', k=12, strict=('genre', 'mood'))  # jazz soft, energetic held
+        assert sorted(h['file'] for h in mixed) == [6, 8, 10] and mixed[0]['strict'] == ('energetic/p_energetic',)
 
 
 def test_min_notes():

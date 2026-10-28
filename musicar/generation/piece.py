@@ -142,6 +142,9 @@ def build_parser():
     parser.add_argument("--retrieve-min-notes", type=int, default=512,
                         help="--retrieve: only files with at least this many notes are indexed")
     parser.add_argument("--labels-dir", type=str, default="data/labels", help="--retrieve: the store's label tables")
+    parser.add_argument("--retrieve-strict", type=str, default="",
+                        help="--retrieve: caption_match categories an opening must fully meet when --text asks for "
+                             "them, e.g. 'genre,mood' (its labels name the asked genre / mood); default: soft ranking")
     parser.add_argument("--best-of", type=int, default=1,
                         help="generate this many candidates per sample and keep the --num-samples best by caption "
                              "match (what --text asks for that the notes show: instruments, drums, solo, key, pace, "
@@ -401,17 +404,15 @@ def caption_input(config, args, device):
 def retrieved_pieces(args, device):
     """--retrieve: the openings of the --retrieve-top files best matching --text, as (label, loader) pieces in a
     seeded random order (row i of the run takes piece i, so the rows get distinct files)."""
-    from musicar.generation.retrieval import CaptionIndex
     store = Path(args.retrieve) if Path(args.retrieve).is_dir() else Path("data/cache") / args.retrieve
-    index = CaptionIndex(store, labels_dir=args.labels_dir, max_files=args.retrieve_files,
-                         min_notes=args.retrieve_min_notes, device=device)
-    hits = index.search(args.text, k=args.retrieve_top, only=args.caption_allowed)
+    index = caption_index(str(store), args.labels_dir, args.retrieve_files, args.retrieve_min_notes, device)
+    strict = tuple(c.strip() for c in args.retrieve_strict.split(',') if c.strip())
+    hits = index.search(args.text, k=args.retrieve_top, only=args.caption_allowed, strict=strict)
     if not hits:
         raise GenerationError(f"no file of {store.name} uses only the caption's instruments")
-    index.encoder = None  # LaBSE off the GPU
-    if device == "cuda":
-        torch.cuda.empty_cache()
-    print(f"Retrieval from {store.name} ({len(index.files):,} files indexed), best matches:")
+    print(f"Retrieval from {store.name} ({len(index.files):,} files indexed"
+          + (f", strict {'/'.join(strict)}: {'met' if hits[0]['strict'] else 'no file meets it, soft'}" if strict
+             else "") + "), best matches:")
     rng = random.Random(0)
     for h in hits[:8]:
         print(f"  #{h['file']:<7d} similarity {h['sim']:.2f}, match {h['match']:.2f}: "
@@ -636,6 +637,15 @@ def text_vector(config, prompt, device):
     if not config.text_dim:
         raise GenerationError("this checkpoint was trained without text")
     return text_encoder(device).encode([prompt], tokens=config.text_prefix > 0)
+
+
+@functools.cache
+def caption_index(store, labels_dir, max_files, min_notes, device):
+    """The retrieval index of a store, loaded once per process; built (when its cache file is stale) and searched
+    with the cached full-precision LaBSE (text_encoder)."""
+    from musicar.generation.retrieval import CaptionIndex
+    return CaptionIndex(store, labels_dir=labels_dir, max_files=max_files, min_notes=min_notes, device=device,
+                        encoder=text_encoder(device))
 
 
 @functools.cache

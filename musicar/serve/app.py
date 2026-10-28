@@ -50,6 +50,7 @@ class GenerateRequest(BaseModel):
     preset: str | None = Field(None, description='an engine preset (GET /v1/presets); null = the default')
     seed: int | None = Field(None, ge=0, lt=2 ** 31, description='null = random')
     best_of: int = Field(1, ge=BEST_OF[0], le=BEST_OF[1])
+    opening: bool = Field(False, description='start from a caption-matched real opening (not in the result)')
     overrides: dict[str, float | int | str | bool] = {}
 
 
@@ -119,10 +120,16 @@ def create_app(config=None):
             raise HTTPException(422, f"no preset {preset!r} (presets: {', '.join(config.presets)})")
         seed = req.seed if req.seed is not None else random.randrange(2 ** 31)
         try:
+            if req.opening and not (req.prompt.strip() and config.opening_store):
+                raise GenerationError('a real opening needs a caption' if config.opening_store
+                                      else 'this engine has no opening store (opening_store)')
+            # the store is the engine's (engine.toml), never a request's: retrieve is a path
+            opening = dict(retrieve=config.opening_store, retrieve_strict=','.join(config.opening_strict)) \
+                if req.opening else {}
             args = settings(config.base, **{**config.presets[preset], **req.overrides}, text=req.prompt.strip() or None,
                             length_seconds=req.length_s, seed=seed, best_of=req.best_of, num_samples=1,
                             batch_size=min(req.best_of, config.batch_candidates),
-                            max_new_tokens=min(MAX_NOTES, int(req.length_s * NOTES_PER_S)))
+                            max_new_tokens=min(MAX_NOTES, int(req.length_s * NOTES_PER_S)), **opening)
         except GenerationError as e:
             raise HTTPException(422, str(e))
         try:

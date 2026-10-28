@@ -27,6 +27,8 @@ class EngineConfig:
     per_token_jobs: int = 2  # unfinished jobs per token at most
     cors_origins: list = field(default_factory=lambda: ["http://localhost:3000"])  # pages allowed to call the engine
     admin_key_file: str = "data/serve/admin.key"  # the page's server key for /v1/admin/invites; missing = route off
+    opening_store: str = ""  # captioned token store for real openings (request opening: true); "" = none
+    opening_strict: list = field(default_factory=lambda: ["genre", "mood"])  # categories an opening must meet
 
     @property
     def tokens_path(self):

@@ -56,7 +56,7 @@ export default function ChatPage() {
           {chat?.pieces.map((p) => (
             <div key={p.id} className="turn">
               <div className="bubble">{p.prompt}</div>
-              <PieceCard piece={p} onVariation={() => compose(chat.id, p.prompt)} onEdit={() => setText(p.prompt)} />
+              <PieceCard piece={p} onVariation={() => compose(chat.id, p.prompt, p)} onEdit={() => setText(p.prompt)} />
             </div>
           ))}
           <div ref={end} />

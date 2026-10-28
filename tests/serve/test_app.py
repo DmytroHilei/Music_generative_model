@@ -5,6 +5,7 @@ import json
 import sys
 import tempfile
 import time
+import types
 from collections import defaultdict
 from pathlib import Path
 
@@ -282,6 +283,27 @@ def test_tokens_cli():
         key = cli('admin-key').stdout.strip()
         assert key.startswith('adm_') and (Path(d) / 'admin.key').read_text().strip() == key
         assert cli('admin-key', check=False).returncode != 0  # never overwrites a key the page uses
+
+
+def test_opening_request():
+    """opening: true -> the engine's own store and strictness in the job's options (a request can't name a store);
+    422 without a caption or without an opening store."""
+    with tempfile.TemporaryDirectory() as d:
+        app = engine_app(d, opening_store='toy_store', opening_strict=['genre', 'mood'])
+        engine, client = app.state.engine, TestClient(app)
+        seen = []
+        engine.submit = lambda args, owner=None: seen.append(args) or types.SimpleNamespace(
+            id='x', events=[('queued', {'position': 0})])
+        assert client.post('/v1/generate', json=dict(prompt='a jazz trio', opening=True)).status_code == 202
+        assert (seen[-1].retrieve, seen[-1].retrieve_strict) == ('toy_store', 'genre,mood')
+        assert client.post('/v1/generate', json=dict(prompt='a jazz trio')).status_code == 202
+        assert seen[-1].retrieve is None
+        r = client.post('/v1/generate', json=dict(prompt='', opening=True))
+        assert r.status_code == 422 and 'caption' in r.json()['detail']
+        assert client.post('/v1/generate', json=dict(overrides=dict(retrieve='/etc'))).status_code == 422
+    with tempfile.TemporaryDirectory() as d:
+        r = TestClient(engine_app(d)).post('/v1/generate', json=dict(prompt='a jazz trio', opening=True))
+        assert r.status_code == 422 and 'opening store' in r.json()['detail']
 
 
 def test_config_file():

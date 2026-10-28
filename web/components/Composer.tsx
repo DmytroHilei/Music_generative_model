@@ -165,6 +165,13 @@ export default function Composer({ variant, text, setText, onSubmit, typeRef, st
             <button key={p.id} type="button" aria-pressed={settings.preset === p.id} onClick={() => setSettings({ preset: p.id })}>{p.label}</button>
           ))}
         </div>
+        {model.captions && (
+          <button type="button" className="ctl" aria-pressed={settings.opening}
+            onClick={() => setSettings({ opening: !settings.opening })}
+            title="Start from the first notes of a real song that fits the caption (same genre and mood); they are not in the result. Variation picks another song.">
+            Real opening
+          </button>
+        )}
         <div className="grow" />
         {home && empty && <span className="tabhint"><kbd>Tab</kbd>use this one</span>}
         {home ? (
