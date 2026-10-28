@@ -8,6 +8,8 @@ The engine's HTTP API, the contract in context/claude/app_2026-10-27.md §2:
     GET    /v1/jobs/{id}/events     server-sent events of the job from its start (jobs.py), ': ping' when quiet
     GET    /v1/jobs/{id}/midi       the job's MIDI (?candidate=k), also while it runs
     DELETE /v1/jobs/{id}            cancel
+    POST   /v1/admin/invites        {name: gh-<login>} -> 201 {token}: the page's GitHub sign-in (server to server,
+                                    X-Admin-Key = the admin key file; off without the file)
 
 Every route but /v1/health needs "Authorization: Bearer <token>" (tokens.py) unless auth = false; a job is seen only
 by its token. Browsers may call the engine from the cors_origins pages. Run: python -m musicar.serve (settings:
@@ -15,12 +17,13 @@ config/serve/engine.toml).
 """
 
 import asyncio
+import hmac
 import io
 import json
 import random
 import time
 
-from fastapi import Depends, FastAPI, HTTPException, Response
+from fastapi import Depends, FastAPI, Header, HTTPException, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
@@ -29,7 +32,7 @@ from pydantic import BaseModel, Field
 from musicar.generation.piece import GenerationError, settings
 from musicar.serve.config import EngineConfig
 from musicar.serve.jobs import Engine, QueueFull
-from musicar.serve.tokens import TokenStore
+from musicar.serve.tokens import Revoked, TokenStore
 
 # decoding options a request (or an engine preset) may change (generate.py names); the rest comes from config.base
 OVERRIDES = {'temperature', 'top_k', 'top_p', 'min_p', 'cfg_scale', 'cfg_notes', 'cfg_end', 'cfg_linear',
@@ -48,6 +51,10 @@ class GenerateRequest(BaseModel):
     seed: int | None = Field(None, ge=0, lt=2 ** 31, description='null = random')
     best_of: int = Field(1, ge=BEST_OF[0], le=BEST_OF[1])
     overrides: dict[str, float | int | str | bool] = {}
+
+
+class InviteRequest(BaseModel):
+    name: str = Field(..., max_length=64, description='gh-<GitHub login, lowercase>')
 
 
 def sse(name, data):
@@ -166,5 +173,23 @@ def create_app(config=None):
         if not engine.cancel(job):
             raise HTTPException(409, f'job already {job.state}')
         return {'job_id': job.id, 'state': 'cancelled' if job.finished else 'cancelling'}
+
+    @app.post('/v1/admin/invites', status_code=201, include_in_schema=False)
+    def invite(req: InviteRequest, x_admin_key: str | None = Header(None)):
+        """A token for a GitHub user the page's server has checked (an approved access request): only gh- names, so
+        the key can't mint the hand-made invites' names."""
+        path = config.admin_key_path
+        if tokens is None or not path.exists():
+            raise HTTPException(404, 'Not Found')
+        if not x_admin_key or not hmac.compare_digest(x_admin_key.strip().encode(), path.read_text().strip().encode()):
+            raise HTTPException(403, 'wrong admin key')
+        if not req.name.startswith('gh-'):
+            raise HTTPException(422, 'only gh-<login> names are made here')
+        try:
+            return {'name': req.name, 'token': tokens.issue(req.name)}
+        except Revoked:
+            raise HTTPException(403, f'access for {req.name} was revoked')
+        except ValueError as e:
+            raise HTTPException(422, str(e))
 
     return app

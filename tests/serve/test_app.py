@@ -204,7 +204,7 @@ def test_tokens_owners_cors():
         assert client.delete(f'/v1/jobs/{b}', headers=auth(bob)).status_code == 200
         assert client.delete(f'/v1/jobs/{a}', headers=auth(anna)).status_code == 200
         assert store.revoke('bob') and client.get('/v1/presets', headers=auth(bob)).status_code == 401
-        assert {name: jobs for name, _, _, jobs, _ in store.list()} == {'anna': 1, 'bob': 1}
+        assert {name: jobs for name, _, _, jobs, _, _ in store.list()} == {'anna': 1, 'bob': 1}
         pre = dict(Origin='http://localhost:3000', **{'Access-Control-Request-Method': 'POST',
                                                       'Access-Control-Request-Headers': 'authorization,content-type'})
         r = client.options('/v1/generate', headers=pre)
@@ -217,20 +217,71 @@ def test_tokens_owners_cors():
         assert 'retry-after' in r.headers['access-control-expose-headers'].lower()
 
 
+def test_admin_invites():
+    """/v1/admin/invites (the page's GitHub sign-in): off without the key file, 403 with a wrong key, gh- names only;
+    every sign-in gets its own working token; after a revoke no new one until tokens add allows the name again."""
+    from musicar.serve.tokens import make_admin_key
+    with tempfile.TemporaryDirectory() as d:
+        app = engine_app(d, auth=True, admin_key_file=str(Path(d) / 'admin.key'))
+        store, client = app.state.tokens, TestClient(app)
+        mint = lambda name, key: client.post('/v1/admin/invites', json={'name': name},  # noqa: E731
+                                             headers={'X-Admin-Key': key} if key else {})
+        assert mint('gh-anna', 'x').status_code == 404  # no key file: the route is off
+        key = make_admin_key(Path(d) / 'admin.key')
+        assert oct((Path(d) / 'admin.key').stat().st_mode)[-3:] == '600'
+        assert mint('gh-anna', None).status_code == 403 and mint('gh-anna', key + 'x').status_code == 403
+        assert mint('anna', key).status_code == 422 and mint('gh-Anna Smith', key).status_code == 422
+        t1, t2 = (mint('gh-anna', key) for _ in range(2))
+        assert t1.status_code == t2.status_code == 201 and t1.json()['token'] != t2.json()['token']
+        bearer = lambda t: {'Authorization': f"Bearer {t.json()['token']}"}  # noqa: E731
+        for t in (t1, t2):  # two browsers, both signed in
+            assert client.get('/v1/presets', headers=bearer(t)).status_code == 200
+        assert store.revoke('gh-anna')
+        assert client.get('/v1/presets', headers=bearer(t1)).status_code == 401
+        r = mint('gh-anna', key)
+        assert r.status_code == 403 and 'revoked' in r.json()['detail']
+        store.add('gh-anna')  # the owner allows anna again
+        assert mint('gh-anna', key).status_code == 201
+        assert '/v1/admin/invites' not in client.get('/openapi.json').text
+
+
+def test_token_migration():
+    # a tokens.sqlite of the first layout (one token per name, name the key) keeps its tokens after the change
+    import sqlite3
+    from musicar.serve.tokens import TokenStore, digest
+    with tempfile.TemporaryDirectory() as d:
+        path = Path(d) / 'tokens.sqlite'
+        db = sqlite3.connect(path)
+        db.execute('CREATE TABLE tokens (name TEXT PRIMARY KEY, hash TEXT UNIQUE NOT NULL, created REAL NOT NULL, '
+                   'last_used REAL, jobs INTEGER NOT NULL DEFAULT 0, revoked INTEGER NOT NULL DEFAULT 0)')
+        db.execute("INSERT INTO tokens VALUES ('anna', ?, 1.0, NULL, 3, 0), ('bob', ?, 2.0, NULL, 0, 1)",
+                   (digest('mus_anna'), digest('mus_bob')))
+        db.commit()
+        db.close()
+        store = TokenStore(path)
+        assert store.check('mus_anna') == 'anna' and store.check('mus_bob') is None
+        assert [(n, jobs, active) for n, _, _, jobs, active, _ in store.list()] == [('anna', 3, 1), ('bob', 0, 0)]
+        assert TokenStore(path).check('mus_anna') == 'anna'  # a second open finds the new layout
+
+
 def test_tokens_cli():
-    # python -m musicar.serve.tokens add / list / revoke on the tokens_db of a given engine.toml
+    # python -m musicar.serve.tokens add / list / revoke / admin-key on the files of a given engine.toml
     import subprocess
     with tempfile.TemporaryDirectory() as d:
         cfg = Path(d) / 'engine.toml'
-        cfg.write_text(f'tokens_db = "{Path(d) / "t.sqlite"}"\n')
+        cfg.write_text(f'tokens_db = "{Path(d) / "t.sqlite"}"\nadmin_key_file = "{Path(d) / "admin.key"}"\n')
         root = str(Path(__file__).parents[2])
-        cli = lambda *a: subprocess.run(  # noqa: E731
+        cli = lambda *a, check=True: subprocess.run(  # noqa: E731
             [sys.executable, '-m', 'musicar.serve.tokens', *a, '--config', str(cfg)], capture_output=True, text=True,
-            check=True, cwd=root)
+            check=check, cwd=root)
         token = cli('add', 'guest').stdout.strip()
         assert token.startswith('mus_') and len(token) > 30
         assert 'guest' in cli('list').stdout and 'REVOKED' not in cli('list').stdout
         assert cli('revoke', 'guest').stdout.strip() == 'revoked' and 'REVOKED' in cli('list').stdout
+        assert cli('add', 'Bad Name', check=False).returncode != 0
+        key = cli('admin-key').stdout.strip()
+        assert key.startswith('adm_') and (Path(d) / 'admin.key').read_text().strip() == key
+        assert cli('admin-key', check=False).returncode != 0  # never overwrites a key the page uses
 
 
 def test_config_file():
