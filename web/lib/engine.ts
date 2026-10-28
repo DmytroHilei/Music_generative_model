@@ -18,6 +18,7 @@ export type GenerateRequest = {
   length_s: number;
   seed: number | null;
   best_of: number;
+  opening?: boolean; // start from a caption-matched real opening (left out of the result)
   overrides: Record<string, number | string | boolean>;
 };
 

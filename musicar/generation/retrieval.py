@@ -41,8 +41,9 @@ class CaptionIndex:
         self.encoder, self.device, self.batch_size = encoder, device, batch_size
         sources = [self.store / 'offsets.npy', Path(labels_dir) / f'{name}.jsonl',
                    Path(labels_dir) / f'{name}.features.npz', Path(captions_dir) / f'{name}.uk.fixed.jsonl']
+        # sources by file name, so the cache holds whether the paths were given relative or absolute
         self.meta = dict(version=VERSION, n_caps=n_caps, min_notes=min_notes, max_files=max_files, seed=seed,
-                         sources={str(p): [p.stat().st_size, p.stat().st_mtime_ns] for p in sources if p.exists()})
+                         sources={p.name: [p.stat().st_size, p.stat().st_mtime_ns] for p in sources if p.exists()})
         self.path = Path(labels_dir) / f'{name}.retrieval.npz'
         if not self._load():
             self._build()
@@ -97,24 +98,36 @@ class CaptionIndex:
         np.savez(self.path, files=self.files, emb=self.emb, meta=json.dumps(self.meta))
         print(f'  {len(self.files):,} files indexed in {time.time() - t0:.0f} s', flush=True)
 
-    def search(self, query, k=32, attr_weight=1.0, only=None):
-        """The k best files for a caption: [dict(file, sim, match, score)], best first. score = cosine similarity
-        + attr_weight x caption_match score of the file. only: GM programs (0-128) a file may use (its instruments
-        with >= 2% of the notes), e.g. the caption's hard limits; files with others are left out."""
+    def search(self, query, k=32, attr_weight=1.0, only=None, strict=()):
+        """The k best files for a caption: [dict(file, sim, match, score, strict)], best first. score = cosine
+        similarity + attr_weight x caption_match score of the file. only: GM programs (0-128) a file may use (its
+        instruments with >= 2% of the notes), e.g. the caption's hard limits; files with others are left out.
+        strict: caption_match categories (e.g. ('genre', 'mood')) whose checks a file must fully meet (its labels name
+        the asked genre / mood), each asked check on its own and searched over a wider pool; a check no file meets
+        stays soft. strict on the hits = the checks enforced (empty: soft ranking only)."""
         wants = parse_caption(query)
         q = self._encode([query])[0]
         sims = self.emb.astype(np.float32) @ q
         if only is not None:
             outside = self.attrs.bits[self.files] & ~np.isin(np.arange(129), list(only))[None]
             sims = np.where(outside.any(1), -np.inf, sims)
-        pool = [j for j in np.argsort(-sims)[:max(50 * k, 1000)] if np.isfinite(sims[j])]
-        hits = []
+        pool = [j for j in np.argsort(-sims)[:max((200 if strict else 50) * k, 1000)] if np.isfinite(sims[j])]
+        hits, named = [], []
         for j in pool:
-            m = match(wants, self.attrs(int(self.files[j])))[0]
+            m, _, cats = match(wants, self.attrs(int(self.files[j])), categories=True)
             sim = float(sims[j])
             hits.append(dict(file=int(self.files[j]), sim=sim, match=m, score=sim + attr_weight * m))
-        hits.sort(key=lambda h: -h['score'])
-        return hits[:k]
+            named.append(cats)
+        order = sorted(range(len(hits)), key=lambda i: -hits[i]['score'])
+        enforced = []
+        for cat in strict:
+            for name in (named[0].get(cat, {}) if named else {}):
+                keep = [i for i in order if named[i][cat][name] >= 1]
+                if keep:  # some file carries it: only those
+                    order, enforced = keep, enforced + [name]
+        for h in hits:
+            h['strict'] = tuple(enforced)
+        return [hits[i] for i in order[:k]]
 
     def opening(self, i, notes):
         """(tokens (n, 4), programs (n,)) of the first `notes` notes of file i (programs 0 for piano stores)."""

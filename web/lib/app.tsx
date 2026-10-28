@@ -32,7 +32,10 @@ export const MODELS = [
 export type Theme = 'dark' | 'light';
 // token: the engine token (an invite link https://…/?invite=mus_… sets it once, GitHub sign-in sets it, Settings can
 // paste it); account: '@login' after a GitHub sign-in, '' otherwise
-export type Settings = { engine: string; model: string; length: number; preset: string; token: string; account: string };
+// opening: start pieces from a caption-matched real opening (the composer's switch)
+export type Settings = {
+  engine: string; model: string; length: number; preset: string; token: string; account: string; opening: boolean;
+};
 export type EngineStatus = 'checking' | 'online' | 'busy' | 'offline' | 'mock';
 export type Notice = { kind: 'ok' | 'info' | 'error'; text: string; link?: { href: string; label: string } };
 
@@ -42,7 +45,7 @@ const SETTINGS_KEY = 'musicar.settings';
 const THEME_KEY = 'musicar.theme';
 const SIGNIN_COOKIE = 'musicar_signin'; // set by app/api/auth/github/callback (lib/github.ts), read once here
 const DEFAULTS: Settings = {
-  engine: DEFAULT_ENGINE, model: 'musicar-L', length: 60, preset: 'balanced', token: '', account: '',
+  engine: DEFAULT_ENGINE, model: 'musicar-L', length: 60, preset: 'balanced', token: '', account: '', opening: false,
 };
 
 // an invite link's token, taken out of the address bar (so it isn't shared on by copying the URL), else null
@@ -95,7 +98,8 @@ type AppState = {
   statusDetail: string;
   notice: Notice | null;
   dismissNotice: () => void;
-  compose: (chatId: string | null, prompt: string) => string;
+  // like: a piece whose length, preset and opening a Variation keeps (default: the current settings)
+  compose: (chatId: string | null, prompt: string, like?: Piece) => string;
   deleteChat: (id: string) => void;
 };
 
@@ -162,7 +166,8 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     try {
       const preset = PRESETS.find((p) => p.id === piece.preset) ?? PRESETS[1];
       const { job_id, position } = await engine.generate({
-        prompt: piece.prompt, length_s: piece.lengthS, seed: null, best_of: 1, overrides: preset.overrides,
+        prompt: piece.prompt, length_s: piece.lengthS, seed: null, best_of: 1, opening: !!piece.opening,
+        overrides: preset.overrides,
       });
       patch(chatId, piece.id, () => ({ jobId: job_id, position }), true);
       await follow(engine, chatId, piece.id, job_id);
@@ -175,11 +180,12 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     }
   }, [follow, patch]);
 
-  const compose = useCallback((chatId: string | null, prompt: string) => {
+  const compose = useCallback((chatId: string | null, prompt: string, like?: Piece) => {
     const now = Date.now();
     const s = settingsRef.current;
     const piece: Piece = {
-      id: newId(), prompt, lengthS: s.length, preset: s.preset, model: s.model, notes: [], status: 'queued', createdAt: now,
+      id: newId(), prompt, lengthS: like?.lengthS ?? s.length, preset: like?.preset ?? s.preset, model: s.model,
+      opening: like ? !!like.opening : s.opening, notes: [], status: 'queued', createdAt: now,
     };
     const old = chatId ? chatsRef.current.find((c) => c.id === chatId) : undefined;
     const chat: Chat = old

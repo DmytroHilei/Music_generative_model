@@ -23,13 +23,13 @@ from pathlib import Path
 import torch
 
 from musicar.data.midi_io import notes_to_midi
-from musicar.generation.piece import GenerationError, Generator, text_encoder
+from musicar.generation.piece import GenerationError, Generator, caption_index, text_encoder
 from musicar.model.checkpoint import resolve_checkpoint
 
 # the options reported in 'started' (the rest are generate.py defaults or don't apply to the engine)
 SHOWN = ('text', 'length_seconds', 'seed', 'best_of', 'max_new_tokens', 'temperature', 'top_k', 'top_p', 'min_p',
          'cfg_scale', 'cfg_notes', 'cfg_end', 'cfg_linear', 'instrument_temperature', 'dry_multiplier', 'dry_allowed',
-         'dry_base', 'dry_key', 'eos_ramp', 'length_stop', 'eos_floor', 'min_notes')
+         'dry_base', 'dry_key', 'eos_ramp', 'length_stop', 'eos_floor', 'min_notes', 'retrieve')
 FINISHED = ('done', 'error', 'cancelled')
 TICK_S = 1.0  # how often an idle worker checks the unload and cleanup timers
 OTHER_MB = 256  # GPU memory of other processes that counts as "busy with other work"
@@ -160,6 +160,7 @@ class Engine:
     def unload(self):
         """Free the model and the caption encoder (the next job loads them again)."""
         self.generator = None
+        caption_index.cache_clear()  # holds the same LaBSE
         text_encoder.cache_clear()
         gc.collect()
         if torch.cuda.is_available():
@@ -235,7 +236,8 @@ class Engine:
             candidates.append(dict(candidate=p.index, n_notes=len(notes),
                                    duration_s=round(max((n[0] + n[3] for n in notes), default=0.0), 3),
                                    eos=p.eos, stopped=p.stopped,
-                                   score=None if p.score is None else round(p.score['score'], 3)))
+                                   score=None if p.score is None else round(p.score['score'], 3),
+                                   opening=p.label if args.retrieve else None))
         job.pieces = pieces
         best = candidates[0]
         job.finish('done', 'done', dict(best=best['candidate'], n_notes=best['n_notes'],

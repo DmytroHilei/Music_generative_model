@@ -10,6 +10,7 @@ export type Piece = {
   lengthS: number;
   preset: string;
   model: string;
+  opening?: boolean; // started from a caption-matched real opening (the engine's retrieval)
   jobId?: string;
   seed?: number;
   position?: number;

@@ -49,5 +49,28 @@ def test_stream_matches_pieces():
                 assert all(p.tokens[0][:20] == pieces[0].tokens[0][:20] for p in pieces), 'kept prompt first'
 
 
+def test_length_after_prompt():
+    """--length-after-prompt: with a prompt left out of the result, every row gets the length plus its own prompt's
+    seconds (the length counts from where the result starts); without it, or with --keep-prompt, the plain length."""
+    from musicar.generation import piece
+    with tempfile.TemporaryDirectory() as d:
+        m = tiny(n_programs=129, pitch_size=BOS_PITCH + 2)
+        args = {k: v for k, v in vars(m.config).items() if k != 'dropout'}
+        torch.save(dict(model=m.state_dict(), model_args=args, iter_num=0), Path(d) / 'ckpt.pt')
+        prompt_file(Path(d) / 'prompt.mid')  # onsets 0.25 s apart: the 24-note prompt starts its last note at 1.75 s
+        gen = Generator(str(Path(d) / 'ckpt.pt'), device='cpu')
+        seen, original = [], piece.generate
+        piece.generate = lambda *a, **kw: seen.append(kw['length_seconds']) or original(*a, **kw)
+        try:
+            for after, keep in ((False, False), (True, False), (True, True)):
+                gen.run(settings(prompt=str(Path(d) / 'prompt.mid'), prompt_notes=24, length_seconds=3.0,
+                                 length_stop=1.2, max_new_tokens=20, num_samples=2, length_after_prompt=after,
+                                 keep_prompt=keep))
+        finally:
+            piece.generate = original
+        assert seen[0] == 3.0 and seen[2] == 3.0, seen
+        assert all(abs(x - (3.0 + 1.75)) < 0.1 for x in seen[1]), seen  # 1.75 s on the 20 ms grid: 1.68
+
+
 if __name__ == '__main__':
     run(globals())

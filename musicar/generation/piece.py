@@ -142,6 +142,9 @@ def build_parser():
     parser.add_argument("--retrieve-min-notes", type=int, default=512,
                         help="--retrieve: only files with at least this many notes are indexed")
     parser.add_argument("--labels-dir", type=str, default="data/labels", help="--retrieve: the store's label tables")
+    parser.add_argument("--retrieve-strict", type=str, default="",
+                        help="--retrieve: caption_match categories an opening must fully meet when --text asks for "
+                             "them, e.g. 'genre,mood' (its labels name the asked genre / mood); default: soft ranking")
     parser.add_argument("--best-of", type=int, default=1,
                         help="generate this many candidates per sample and keep the --num-samples best by caption "
                              "match (what --text asks for that the notes show: instruments, drums, solo, key, pace, "
@@ -179,6 +182,10 @@ def build_parser():
     parser.add_argument("--length-seconds", type=float, default=None,
                         help="models with the length input (n_remain): the piece's length in seconds from the prompt's "
                              "first note, so it ends there with EOS (default: none)")
+    parser.add_argument("--length-after-prompt", action="store_true",
+                        help="with a prompt left out of the result (no --keep-prompt): --length-seconds counts from "
+                             "the prompt's end, where the result starts (per row: the length + that row's prompt "
+                             "seconds)")
     parser.add_argument("--min-notes", type=int, default=0,
                         help="models with BOS/EOS: don't allow the end token before this many new notes")
     parser.add_argument("--density", type=str, default=None,
@@ -401,17 +408,15 @@ def caption_input(config, args, device):
 def retrieved_pieces(args, device):
     """--retrieve: the openings of the --retrieve-top files best matching --text, as (label, loader) pieces in a
     seeded random order (row i of the run takes piece i, so the rows get distinct files)."""
-    from musicar.generation.retrieval import CaptionIndex
     store = Path(args.retrieve) if Path(args.retrieve).is_dir() else Path("data/cache") / args.retrieve
-    index = CaptionIndex(store, labels_dir=args.labels_dir, max_files=args.retrieve_files,
-                         min_notes=args.retrieve_min_notes, device=device)
-    hits = index.search(args.text, k=args.retrieve_top, only=args.caption_allowed)
+    index = caption_index(str(store), args.labels_dir, args.retrieve_files, args.retrieve_min_notes, device)
+    strict = tuple(c.strip() for c in args.retrieve_strict.split(',') if c.strip())
+    hits = index.search(args.text, k=args.retrieve_top, only=args.caption_allowed, strict=strict)
     if not hits:
         raise GenerationError(f"no file of {store.name} uses only the caption's instruments")
-    index.encoder = None  # LaBSE off the GPU
-    if device == "cuda":
-        torch.cuda.empty_cache()
-    print(f"Retrieval from {store.name} ({len(index.files):,} files indexed), best matches:")
+    print(f"Retrieval from {store.name} ({len(index.files):,} files indexed"
+          + (f", strict {'/'.join(strict)}: {'met' if hits[0]['strict'] else 'no file meets it, soft'}" if strict
+             else "") + "), best matches:")
     rng = random.Random(0)
     for h in hits[:8]:
         print(f"  #{h['file']:<7d} similarity {h['sim']:.2f}, match {h['match']:.2f}: "
@@ -542,7 +547,8 @@ def _prompt_rows(config, args, pieces, seed, n_rows, device, first=0):
 def generate_batch(model, config, args, pieces, seed, n_rows, device, progress=None, text=None, first=0,
                    on_notes=None):
     """One batch of n_rows rows: dict(streams = (pitch, velocity, duration, delta_time, programs) on the CPU, prompt
-    included; labels = the prompt of each row; n_prompt = prompt notes left out of the saved MIDI; seed)."""
+    included; labels = the prompt of each row; n_prompt = prompt notes left out of the saved MIDI; seed; length = the
+    length the rows were given: --length-seconds, or one per row with --length-after-prompt)."""
     torch.manual_seed(seed)
     (pitch, velocity, duration, delta_time), labels, prompt_programs = prompt_rows(config, args, pieces, seed,
                                                                                   n_rows, device, first)
@@ -578,6 +584,10 @@ def generate_batch(model, config, args, pieces, seed, n_rows, device, progress=N
     elif args.density:
         target_nps = float(args.density)
     n_prompt = 0 if args.keep_prompt and has_prompt else pitch.size(1)
+    length = args.length_seconds
+    if length is not None and args.length_after_prompt and has_prompt and n_prompt:
+        # the length counts from the first prompt note, the result starts after the prompt: add each row's prompt
+        length = [length + float(s) * 0.02 for s in delta_time.sum(dim=1).tolist()]
     cond = window_cond(config, args, pitch, delta_time, prompt_programs, has_prompt)
     stream = NoteStream(on_notes, first, n_prompt, args.max_delta) if on_notes is not None else None
     steps = [0]  # notes generated per row (fewer than --max-new-tokens when the stream stops early)
@@ -612,7 +622,7 @@ def generate_batch(model, config, args, pieces, seed, n_rows, device, progress=N
             text=text,
             cfg_scale=args.cfg_scale,
             cfg_notes=args.cfg_notes, cfg_end=args.cfg_end, cfg_linear=args.cfg_linear, min_p=args.min_p,
-            length_seconds=args.length_seconds,
+            length_seconds=length,
             eos_ramp=args.eos_ramp,
             length_stop=args.length_stop,
             eos_floor=args.eos_floor,
@@ -626,7 +636,7 @@ def generate_batch(model, config, args, pieces, seed, n_rows, device, progress=N
     print(f"  {n_rows * steps[0] / (time.time() - t0):.0f} notes/s"
           + (f" (stopped after {steps[0]} notes: every row ended)" if steps[0] < args.max_new_tokens else ""))
     return dict(streams=[t.cpu() for t in (pitch, velocity, duration, delta_time, programs)], labels=labels,
-                n_prompt=n_prompt, seed=seed)
+                n_prompt=n_prompt, seed=seed, length=length)
 
 
 def text_vector(config, prompt, device):
@@ -636,6 +646,15 @@ def text_vector(config, prompt, device):
     if not config.text_dim:
         raise GenerationError("this checkpoint was trained without text")
     return text_encoder(device).encode([prompt], tokens=config.text_prefix > 0)
+
+
+@functools.cache
+def caption_index(store, labels_dir, max_files, min_notes, device):
+    """The retrieval index of a store, loaded once per process; built (when its cache file is stale) and searched
+    with the cached full-precision LaBSE (text_encoder)."""
+    from musicar.generation.retrieval import CaptionIndex
+    return CaptionIndex(store, labels_dir=labels_dir, max_files=max_files, min_notes=min_notes, device=device,
+                        encoder=text_encoder(device))
 
 
 @functools.cache
@@ -707,8 +726,8 @@ def finish_row(res, r, index, score, args):
     n_new = new.index(EOS_PITCH) if eos else len(new)
     rows = [x[:len(x) - (len(new) - n_new)] for x in rows]
     seconds = sum(streams[3][r, :start + n_new].tolist()) * 0.02  # from the first prompt note, as --length-seconds
-    stopped = eos and bool(args.length_stop and args.length_seconds) and \
-        seconds >= args.length_stop * args.length_seconds
+    length = res['length'][r] if isinstance(res.get('length'), list) else args.length_seconds
+    stopped = eos and bool(args.length_stop and length) and seconds >= args.length_stop * length
     keep = [i for i, p in enumerate(rows[0]) if p < BOS_PITCH]
     rows = [[x[i] for i in keep] for x in rows]
     if stopped and args.fade_seconds:
