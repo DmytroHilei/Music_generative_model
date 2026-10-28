@@ -4,7 +4,7 @@
 // the root layout, so a piece keeps streaming while the person moves between home and chats.
 
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
-import { DEFAULT_ENGINE, engineFor, type Engine } from './engine';
+import { DEFAULT_ENGINE, EngineError, engineFor, type Engine } from './engine';
 import { loadBank } from './sound';
 import { loadChats, newId, removeChat, saveChat, type Chat, type Piece } from './store';
 import { titleOf } from './vocab';
@@ -43,6 +43,7 @@ export const REQUEST_ACCESS_URL =
   'https://github.com/DmytroHilei/Music_generative_model/issues/new?template=access-request.yml';
 const SETTINGS_KEY = 'musicar.settings';
 const THEME_KEY = 'musicar.theme';
+const RECONNECTS = 3; // a broken event stream is opened again this many times (after 1, 2, 4 s)
 const SIGNIN_COOKIE = 'musicar_signin'; // set by app/api/auth/github/callback (lib/github.ts), read once here
 const DEFAULTS: Settings = {
   engine: DEFAULT_ENGINE, model: 'musicar-L', length: 60, preset: 'balanced', token: '', account: '', opening: false,
@@ -147,17 +148,51 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     }
   }, [commit]);
 
+  // a job's event stream; a stream that breaks (a network error, or the end before done / error / cancelled) is opened
+  // again up to RECONNECTS times: the engine replays the job's events from the start in the same order, so the ones
+  // already handled are skipped and the piece continues where it was
   const follow = useCallback(async (engine: Engine, chatId: string, pieceId: string, jobId: string) => {
-    try {
-      await engine.events(jobId, (e) => {
-        if (e.type === 'queued') patch(chatId, pieceId, () => ({ status: 'queued', position: e.position }));
-        else if (e.type === 'started') patch(chatId, pieceId, () => ({ status: 'streaming', seed: e.seed, notes: [] }));
-        else if (e.type === 'notes' && e.candidate === 0) patch(chatId, pieceId, (p) => ({ notes: p.notes.concat(e.notes) }));
-        else if (e.type === 'done') patch(chatId, pieceId, () => ({ status: 'done', elapsedS: e.elapsed_s, seed: e.seed }), true);
-        else if (e.type === 'error') patch(chatId, pieceId, () => ({ status: 'error', error: e.message }), true);
-      });
-    } catch (err) {
-      patch(chatId, pieceId, () => ({ status: 'error', error: `Lost the engine: ${(err as Error).message}` }), true);
+    let handled = 0;
+    let finished = false;
+    for (let attempt = 0; ; attempt++) {
+      let i = 0;
+      try {
+        await engine.events(jobId, (e) => {
+          if (i++ < handled) return; // replayed: already handled
+          handled++;
+          if (e.type === 'queued') patch(chatId, pieceId, () => ({ status: 'queued', position: e.position }));
+          else if (e.type === 'started') patch(chatId, pieceId, () => ({ status: 'streaming', seed: e.seed, notes: [] }));
+          else if (e.type === 'notes' && e.candidate === 0) patch(chatId, pieceId, (p) => ({ notes: p.notes.concat(e.notes) }));
+          else if (e.type === 'done') {
+            finished = true;
+            patch(chatId, pieceId, () => ({ status: 'done', elapsedS: e.elapsed_s, seed: e.seed }), true);
+          } else if (e.type === 'error' || e.type === 'cancelled') {
+            finished = true;
+            patch(chatId, pieceId, () => ({ status: 'error', error: e.type === 'error' ? e.message : 'Cancelled.' }), true);
+          }
+        });
+        if (finished) return;
+      } catch (err) {
+        const msg = (err as Error).message;
+        if ((err as Error).name === 'AbortError') return;
+        if (/no such job/.test(msg)) {
+          patch(chatId, pieceId, () => ({
+            status: 'error', error: 'The engine no longer has this piece (it restarted, or the piece is more than an hour '
+              + 'old). Use Variation to write it again.',
+          }), true);
+          return;
+        }
+        const access = err instanceof EngineError && /invite|access code/.test(msg); // 401: retrying can't help
+        if (access || attempt >= RECONNECTS) {
+          patch(chatId, pieceId, () => ({ status: 'error', error: `Lost the engine: ${msg}` }), true);
+          return;
+        }
+      }
+      if (attempt >= RECONNECTS) {
+        patch(chatId, pieceId, () => ({ status: 'error', error: 'Lost the engine: the stream kept breaking.' }), true);
+        return;
+      }
+      await new Promise((r) => setTimeout(r, 1000 * 2 ** attempt)); // 1, 2, 4 s
     }
   }, [patch]);
 
