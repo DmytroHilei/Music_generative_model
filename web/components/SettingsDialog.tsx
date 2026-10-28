@@ -1,6 +1,7 @@
 'use client';
 
-// Where the page finds the engine: the mock, the laptop through this site's /v1 (next dev forwards it), or a URL.
+// Where the page finds the engine: the mock, the laptop through this site's /v1 (next dev forwards it), or a URL; and
+// the invite code the engine asks for (an invite link fills it in).
 
 import { useEffect, useRef, useState } from 'react';
 import { useApp } from '@/lib/app';
@@ -11,6 +12,7 @@ export default function SettingsDialog({ open, onClose }: { open: boolean; onClo
   const kind = settings.engine === 'mock' ? 'mock' : settings.engine === '' ? 'local' : 'url';
   const [choice, setChoice] = useState(kind);
   const [url, setUrl] = useState(kind === 'url' ? settings.engine : '');
+  const [code, setCode] = useState(settings.token);
 
   useEffect(() => {
     const d = ref.current;
@@ -18,13 +20,14 @@ export default function SettingsDialog({ open, onClose }: { open: boolean; onClo
     if (open && !d.open) {
       setChoice(kind);
       setUrl(kind === 'url' ? settings.engine : '');
+      setCode(settings.token);
       d.showModal();
     }
     if (!open && d.open) d.close();
-  }, [open, kind, settings.engine]);
+  }, [open, kind, settings.engine, settings.token]);
 
   const save = () => {
-    setSettings({ engine: choice === 'mock' ? 'mock' : choice === 'local' ? '' : url.trim() });
+    setSettings({ engine: choice === 'mock' ? 'mock' : choice === 'local' ? '' : url.trim(), token: code.trim() });
     onClose();
   };
 
@@ -46,6 +49,12 @@ export default function SettingsDialog({ open, onClose }: { open: boolean; onClo
       <label className="radio">
         <input type="radio" name="engine" checked={choice === 'mock'} onChange={() => setChoice('mock')} />
         <span>Mock engine<small>replays the docs/listen pieces at the laptop’s speed; no GPU needed</small></span>
+      </label>
+      <label className="radio">
+        <span style={{ flex: 1 }}>Invite code<small>from your invite link (set by opening it); the engine writes pieces only with one</small>
+          <input className="field mono" type="password" value={code} placeholder="mus_…" aria-label="Invite code"
+            autoComplete="off" spellCheck={false} onChange={(e) => setCode(e.target.value)} />
+        </span>
       </label>
       <div className="dialog-foot">
         <button type="button" className="act" onClick={onClose}>Cancel</button>

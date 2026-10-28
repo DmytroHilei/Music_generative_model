@@ -30,12 +30,23 @@ export const MODELS = [
 ];
 
 export type Theme = 'dark' | 'light';
-export type Settings = { engine: string; model: string; length: number; preset: string };
+// token: the invite token (an invite link https://…/?invite=mus_… sets it once; Settings can paste it)
+export type Settings = { engine: string; model: string; length: number; preset: string; token: string };
 export type EngineStatus = 'checking' | 'online' | 'busy' | 'offline' | 'mock';
 
 const SETTINGS_KEY = 'musicar.settings';
 const THEME_KEY = 'musicar.theme';
-const DEFAULTS: Settings = { engine: DEFAULT_ENGINE, model: 'musicar-L', length: 60, preset: 'balanced' };
+const DEFAULTS: Settings = { engine: DEFAULT_ENGINE, model: 'musicar-L', length: 60, preset: 'balanced', token: '' };
+
+// an invite link's token, taken out of the address bar (so it isn't shared on by copying the URL), else null
+function takeInvite(): string | null {
+  const url = new URL(window.location.href);
+  const token = url.searchParams.get('invite')?.trim();
+  if (!token) return null;
+  url.searchParams.delete('invite');
+  window.history.replaceState(window.history.state, '', url.pathname + url.search + url.hash);
+  return token;
+}
 
 type AppState = {
   ready: boolean;
@@ -107,7 +118,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   }, [patch]);
 
   const run = useCallback(async (chatId: string, piece: Piece) => {
-    const engine = engineFor(settingsRef.current.engine);
+    const engine = engineFor(settingsRef.current.engine, settingsRef.current.token);
     try {
       const preset = PRESETS.find((p) => p.id === piece.preset) ?? PRESETS[1];
       const { job_id, position } = await engine.generate({
@@ -167,9 +178,19 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     }
   }, []);
 
-  // first load: settings, theme, chats; pieces left mid-stream reattach to their job (the engine keeps its events)
+  // first load: settings (and an invite link's token), theme, chats; pieces left mid-stream reattach to their job (the
+  // engine keeps its events)
   useEffect(() => {
-    const s = readJSON(SETTINGS_KEY, DEFAULTS);
+    let s = readJSON(SETTINGS_KEY, DEFAULTS);
+    const invite = takeInvite();
+    if (invite) {
+      s = { ...s, token: invite };
+      try {
+        localStorage.setItem(SETTINGS_KEY, JSON.stringify(s));
+      } catch {
+        // storage blocked: the invite lasts for this visit
+      }
+    }
     settingsRef.current = s;
     setSettingsState(s);
     const t = document.documentElement.dataset.theme;
@@ -177,7 +198,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     void loadChats().then((loaded) => {
       commit(loaded);
       setReady(true);
-      const engine = engineFor(s.engine);
+      const engine = engineFor(s.engine, s.token);
       for (const c of loaded) for (const p of c.pieces) {
         if (p.status === 'done' || p.status === 'error') continue;
         if (p.jobId) void follow(engine, c.id, p.id, p.jobId);
@@ -198,7 +219,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         const h = await engineFor(settings.engine).health();
         if (!live) return;
         setStatus(h.busy ? 'busy' : 'online');
-        setStatusDetail(`${h.engine} · ${h.model}${h.loaded ? '' : ' (loads on the first piece)'}${h.queue_len ? ` · ${h.queue_len} waiting` : ''}`);
+        setStatusDetail(`${h.engine} · ${h.model}${h.loaded ? '' : ' (loads on the first piece)'}${h.queue_len ? ` · ${h.queue_len} waiting` : ''}${settings.token ? '' : ' · no invite code'}`);
       } catch {
         if (!live) return;
         setStatus('offline');
@@ -212,7 +233,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       live = false;
       window.clearInterval(id);
     };
-  }, [settings.engine]);
+  }, [settings.engine, settings.token]);
 
   const value = useMemo(() => ({
     ready, chats, settings, setSettings, theme, setTheme, status, statusDetail, compose, deleteChat,

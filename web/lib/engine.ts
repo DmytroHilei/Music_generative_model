@@ -46,8 +46,13 @@ export interface Engine {
 
 export class EngineError extends Error {}
 
-async function check(res: Response): Promise<Response> {
+// the engine answers 401 to calls without a valid invite token (musicar/serve/tokens.py)
+const NO_INVITE = 'Writing pieces needs an invite: open the invite link you were sent, or paste its code in Settings.';
+const BAD_INVITE = 'This invite code is not valid (any more): ask for a new invite link.';
+
+async function check(res: Response, token = ''): Promise<Response> {
   if (res.ok) return res;
+  if (res.status === 401) throw new EngineError(token ? BAD_INVITE : NO_INVITE);
   let detail = `${res.status} ${res.statusText}`;
   try {
     const body = await res.json();
@@ -58,7 +63,7 @@ async function check(res: Response): Promise<Response> {
   throw new EngineError(detail);
 }
 
-// server-sent events read with fetch, so a bearer token header can be added later (EventSource can't send headers)
+// server-sent events read with fetch, so the bearer token header can be sent (EventSource can't send headers)
 async function readSSE(res: Response, onEvent: (name: string, data: unknown) => void) {
   if (!res.body) throw new EngineError('the engine sent no event stream');
   const reader = res.body.pipeThrough(new TextDecoderStream()).getReader();
@@ -82,8 +87,10 @@ async function readSSE(res: Response, onEvent: (name: string, data: unknown) => 
   }
 }
 
-export function httpEngine(base: string): Engine {
+// token: the invite token, sent on every call but /health (which stays open so the page can show online / offline)
+export function httpEngine(base: string, token = ''): Engine {
   const url = (path: string) => `${base.replace(/\/$/, '')}/v1${path}`;
+  const auth: Record<string, string> = token ? { Authorization: `Bearer ${token}` } : {};
   return {
     async health() {
       return (await check(await fetch(url('/health'), { cache: 'no-store' }))).json();
@@ -91,13 +98,14 @@ export function httpEngine(base: string): Engine {
     async generate(req) {
       const res = await fetch(url('/generate'), {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { ...auth, 'Content-Type': 'application/json' },
         body: JSON.stringify(req),
       });
-      return (await check(res)).json();
+      return (await check(res, token)).json();
     },
     async events(jobId, onEvent, signal) {
-      const res = await check(await fetch(url(`/jobs/${jobId}/events`), { signal, cache: 'no-store' }));
+      const res = await check(await fetch(url(`/jobs/${jobId}/events`), { headers: auth, signal, cache: 'no-store' }),
+        token);
       await readSSE(res, (name, data) => onEvent({ type: name, ...(data as object) } as EngineEvent));
     },
   };
@@ -106,6 +114,6 @@ export function httpEngine(base: string): Engine {
 // '' = this site's /v1 (the dev server forwards it to the laptop engine, next.config.ts), 'mock', or an engine URL
 export const DEFAULT_ENGINE = process.env.NEXT_PUBLIC_ENGINE ?? 'mock';
 
-export function engineFor(setting: string): Engine {
-  return setting === 'mock' ? mockEngine() : httpEngine(setting);
+export function engineFor(setting: string, token = ''): Engine {
+  return setting === 'mock' ? mockEngine() : httpEngine(setting, token);
 }
