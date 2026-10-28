@@ -107,6 +107,21 @@ def test_eos_ramp_and_length_stop():
             assert last >= length > before, (kw, last, before)
 
 
+def test_eos_floor():
+    """A model that would end at once: without eos_floor the rows end within their first notes; with it, no row
+    ends before eos_floor x its length (and each still ends soon after)."""
+    m = tiny(pitch_size=130, pos_emb='rope')
+    boost = 50 * torch.nn.functional.one_hot(torch.tensor(EOS_PITCH), 130).float()  # EOS by far the likeliest pitch
+    m.cascade.heads['pitch'].out.register_forward_hook(lambda mod, inp, out: out + boost)
+    streams, _ = with_bos([torch.zeros(3, 0, dtype=torch.long)] * 4)
+    lengths = [0.5, 1.0, 2.0]
+    early = first_eos_onsets(generate(m, *streams, max_new_tokens=200, top_k=1, length_seconds=lengths, **KW))
+    assert all(e is not None and e[0] < 0.4 * L for e, L in zip(early, lengths)), early
+    out = generate(m, *streams, max_new_tokens=200, top_k=1, length_seconds=lengths, eos_floor=0.85, **KW)
+    for e, L in zip(first_eos_onsets(out), lengths):
+        assert e is not None and e[0] >= 0.85 * L > e[1], (e, L)
+
+
 def test_past_block_size_refills():
     m = tiny(block_size=32)
     streams, _, _ = batch(B=2, T=4)

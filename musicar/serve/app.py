@@ -37,7 +37,7 @@ from musicar.serve.tokens import Revoked, TokenStore
 # decoding options a request (or an engine preset) may change (generate.py names); the rest comes from config.base
 OVERRIDES = {'temperature', 'top_k', 'top_p', 'min_p', 'cfg_scale', 'cfg_notes', 'cfg_end', 'cfg_linear',
              'instrument_temperature', 'dry_multiplier', 'dry_allowed', 'dry_base', 'dry_key', 'eos_ramp',
-             'length_stop', 'min_notes'}
+             'length_stop', 'eos_floor', 'min_notes'}
 LENGTH_S, BEST_OF = (5, 300), (1, 8)
 NOTES_PER_S = 30  # note budget per second of the asked length (with the length-stop margin); dense bands run ~15-25
 MAX_NOTES = 8192
