@@ -63,7 +63,7 @@ def generate(model, pitch, velocity, duration, delta_time, max_new_tokens, tempe
              cuda_graph=True, style=None, min_new=0, program=0, top_p=None, cfg_scale=1.0,
              eos_t1=False, programs=None, allowed_programs=None, return_programs=False, program_temperature=None,
              cond=None, text=None, sections=None, text_neg=None, sections_neg=None, cfg_section=None,
-             cfg_boost=0.0, cfg_boost_notes=32, length_seconds=None, eos_ramp=0.0, length_stop=0.0,
+             cfg_boost=0.0, cfg_boost_notes=32, length_seconds=None, eos_ramp=0.0, length_stop=0.0, eos_floor=0.0,
              dry_multiplier=0.0, dry_base=1.15, dry_allowed=16, dry_key='notes', cfg_notes=0, cfg_end=1.0,
              cfg_linear=False, min_p=None, on_notes=None, notes_every=16):
     """
@@ -128,6 +128,8 @@ def generate(model, pitch, velocity, duration, delta_time, max_new_tokens, tempe
       Any model with BOS/EOS: the time limit for eos_ramp / length_stop.
     eos_ramp: models with EOS and length_seconds: + eos_ramp x (seconds past length_seconds at the latest note) on the
       EOS logit (before temperature), so a row that runs over ends soon after its length.
+    eos_floor: > 0, models with EOS and length_seconds: no EOS while the latest note's onset is below eos_floor x
+      length_seconds, so a row can't end far too early (F1 ends ~1 in 6 rows of 120 s before half the length).
     length_stop: > 0: rows still going at length_stop x length_seconds (the latest note's onset) get EOS (a hard limit;
       generate.py fades such rows out).
     eos_t1: EOS keeps its probability at temperature 1 (and outside top-k/top-p); the other pitches use the
@@ -291,6 +293,10 @@ def generate(model, pitch, velocity, duration, delta_time, max_new_tokens, tempe
         if name == 'pitch' and specials and eos_ramp and length is not None:  # running over: EOS ever more likely
             over = (step_onset[:Bo] - length[:Bo]).clamp(min=0)  # (Bo, 1) seconds past the length
             logits = logits + eos_ramp * over * F.one_hot(torch.tensor(EOS_PITCH, device=device), logits.size(-1))
+        if name == 'pitch' and specials and eos_floor and length is not None:  # too early: no EOS yet
+            early = step_onset[:Bo] < eos_floor * length[:Bo]  # (Bo, 1)
+            eos = F.one_hot(torch.tensor(EOS_PITCH, device=device), logits.size(-1)).bool()
+            logits = logits.masked_fill(early & eos, -float('Inf'))
         p_eos = None
         if name == 'pitch' and specials and eos_t1 and step_i[0] >= min_new:
             p_eos = F.softmax(logits, dim=-1)[:, [EOS_PITCH]]  # the model's own chance of ending here

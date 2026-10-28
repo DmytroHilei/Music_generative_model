@@ -1,6 +1,7 @@
 # F1 from captions (2026-10-28, the app engine's default): the 450M with caption, section and length inputs, from BOS,
 # with the gen_search winner b19 (guidance 2.5, T 1.1, DRY 3 on pitch-class chords). --length-seconds is the model's
-# length input; eos-ramp / length-stop end rows that run over (not tuned: gen_search's length axis has not run).
+# length input; eos-ramp / length-stop end rows that run over (not tuned: gen_search's length axis has not run);
+# eos-floor 0.85: no end before 85% of the length (2026-10-28: 1 in 6 rows of 120 s ended at ~45 s on its own).
 # Usage: generate.py --config f1 --text "..." --length-seconds 60 --output x.mid
 checkpoint = "checkpoints/f1"
 sample-instruments = true
@@ -12,4 +13,5 @@ dry-allowed = 16
 dry-base = 1.15
 eos-ramp = 0.5
 length-stop = 1.2
+eos-floor = 0.85
 max-new-tokens = 2048
