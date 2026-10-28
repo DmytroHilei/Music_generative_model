@@ -97,9 +97,11 @@ def render_mp3(midi_path: Path, soundfont: str) -> None:
             break
         time.sleep(0.05)
     proc.wait()
+    # loudnorm: every MP3 at the same loudness (-16 LUFS, peaks under -1.5 dBFS), so dense pieces don't clip and quiet
+    # ones aren't faint
     subprocess.run(
         ["ffmpeg", "-y", "-f", "s16le", "-ar", str(rate), "-ac", "2", "-i", str(raw_path), "-t", f"{seconds:.2f}",
-         "-q:a", "2", str(mp3_path)],
+         "-af", "loudnorm=I=-16:TP=-1.5:LRA=11", "-ar", str(rate), "-q:a", "2", str(mp3_path)],
         check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
     )
     raw_path.unlink()

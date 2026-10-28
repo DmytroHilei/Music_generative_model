@@ -1,7 +1,7 @@
 // Puts the two runtime files the sound needs into public/ (both gitignored), before `next dev` and `next build`:
 // - spessasynth's AudioWorklet processor, copied from node_modules (it must be served as its own file)
-// - the FluidR3 GM soundfont as SF3 (MuseScore 3's compressed FluidR3Mono_GM, MIT), the same instruments as the
-//   FluidSynth MP3s in docs/listen; downloaded once and checked against its SHA-256
+// - the MuseScore_General GM soundfont v0.2 as SF3 (S. Christian Collins, MIT; FluidR3Mono with the weakest
+//   instruments replaced), 39.9 MB; downloaded once and checked against its SHA-256
 
 import { createHash } from 'node:crypto';
 import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
@@ -10,9 +10,9 @@ import { fileURLToPath } from 'node:url';
 
 const web = join(dirname(fileURLToPath(import.meta.url)), '..');
 const SF = {
-  url: 'https://github.com/musescore/MuseScore/raw/v3.6.2/share/sound/FluidR3Mono_GM.sf3',
-  path: join(web, 'public/soundfont/FluidR3Mono_GM.sf3'),
-  sha256: '2aacd036d7058d40a371846ef2f5dc5f130d648ab3837fe2626591ba49a71254',
+  url: 'https://ftp.osuosl.org/pub/musescore/soundfont/MuseScore_General/MuseScore_General.sf3',
+  path: join(web, 'public/soundfont/MuseScore_General.sf3'),
+  sha256: '5b85b6c2c61d10b2b91cddd41efcce7b25cd31c8271d511c73afafbef20b6fa3',
 };
 
 const sha = (buf) => createHash('sha256').update(buf).digest('hex');

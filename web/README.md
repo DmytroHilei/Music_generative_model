@@ -22,15 +22,16 @@ Settings (sidebar) picks the engine:
 
 ## Sound
 
-Pieces play with the FluidR3 GM SoundFont (MuseScore 3's compressed `FluidR3Mono_GM.sf3`, 23.7 MB, MIT), the same
-instruments as the FluidSynth MP3s, through spessasynth_lib in an AudioWorklet. `scripts/assets.mjs` runs before
+Pieces play with the MuseScore_General GM SoundFont v0.2 (`MuseScore_General.sf3`, 39.9 MB, MIT; FluidR3Mono with
+the weakest instruments replaced) through spessasynth_lib in an AudioWorklet, then a gentle compressor
+(`master` in `lib/sound.ts`) so dense passages don't clip. FluidR3 in stereo (the laptop's MP3s) sounded best in a
+side-by-side test (2026-10-28) but is 148 MB. `scripts/assets.mjs` runs before
 `dev` and `build`: it copies spessasynth's worklet processor into `public/` and downloads the soundfont into
 `public/soundfont/` (checked against its SHA-256); both are gitignored. The browser fetches the soundfont once, on
 the first play or Compose. If it can't load, playback falls back to a small built-in synth.
 
-**MP3**: rendered in the browser with the same soundfont in an OfflineAudioContext, then encoded with LAME
-(wasm-media-encoders, VBR quality 2). A 1-minute piece takes about 2 s. Same instruments as the FluidSynth MP3s, not
-identical audio (reverb and interpolation differ).
+**MP3**: rendered in the browser with the same soundfont and compressor in an OfflineAudioContext, the peak
+normalised to -1 dBFS, then encoded with LAME (wasm-media-encoders, VBR quality 2). A 1-minute piece takes about 2 s.
 
 Versions are pinned (`spessasynth_lib` 4.3.14 with `spessasynth_core` 4.3.20 through `overrides`, as the lib asks for
 `latest`).
