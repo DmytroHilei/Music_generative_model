@@ -171,6 +171,9 @@ def build_parser():
     parser.add_argument("--length-stop", type=float, default=0.0,
                         help="with --length-seconds: rows still going at this x the length end there (hard limit, "
                              "e.g. 1.2; any model with BOS/EOS)")
+    parser.add_argument("--eos-floor", type=float, default=0.0,
+                        help="with --length-seconds: no end before this x the length (e.g. 0.85), so a row can't end "
+                             "far too early (any model with BOS/EOS)")
     parser.add_argument("--fade-seconds", type=float, default=3.0,
                         help="rows ended by --length-stop: velocities faded out over their last this many seconds")
     parser.add_argument("--length-seconds", type=float, default=None,
@@ -563,6 +566,8 @@ def generate_batch(model, config, args, pieces, seed, n_rows, device, progress=N
     if args.length_seconds is not None and not config.n_remain and not (args.eos_ramp or args.length_stop):
         raise GenerationError("this checkpoint was trained without the length input (n_remain): --length-seconds "
                               "only works as a time limit here (--eos-ramp / --length-stop)")
+    if args.eos_floor and args.length_stop and args.eos_floor >= args.length_stop:
+        raise GenerationError(f"--eos-floor {args.eos_floor} must stay below --length-stop {args.length_stop}")
     target_nps = None
     if args.density == "prompt":
         if not has_prompt or pitch.size(1) < 2:
@@ -610,6 +615,7 @@ def generate_batch(model, config, args, pieces, seed, n_rows, device, progress=N
             length_seconds=args.length_seconds,
             eos_ramp=args.eos_ramp,
             length_stop=args.length_stop,
+            eos_floor=args.eos_floor,
             dry_multiplier=args.dry_multiplier,
             dry_base=args.dry_base,
             dry_allowed=args.dry_allowed,
