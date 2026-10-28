@@ -32,11 +32,13 @@ from musicar.data.midi_io import note_events, tokens_to_midi
 from musicar.generation.caption_match import allowed_programs, describe, match, note_attributes, parse_caption
 from musicar.generation.repetition import copy_share
 from musicar.generation.sampling import generate, with_bos
+from musicar.text.captions import hold_caption
 
 
 COPY_MIN, COPY_FREE = 16, 0.25  # best-of: copies of >= 16 chords; real GigaMIDI band songs: 0-74% of notes, median ~13%
 PRESETS = Path(__file__).resolve().parents[2] / "config" / "generate"
 NOTES_EVERY = 16  # on_notes: notes per call
+SECTION_TOKENS = 48  # encoder tokens per section caption (train.py section_max_length)
 
 
 class GenerationError(ValueError):
@@ -196,6 +198,14 @@ def build_parser():
     parser.add_argument("--block-size", type=int, default=None,
                         help="the generation window in notes (default: the checkpoint's block_size, which is its last "
                              "training phase's window: 512 for f1_cap); RoPE models take any value")
+    parser.add_argument("--keep-style", action="store_true",
+                        help="section-caption models: once the first section (section_len notes from the start) is "
+                             "written, its own description (pace, loudness, register, texture, drums, up to 3 "
+                             "instruments) becomes the section caption of every later section, so the piece keeps "
+                             "the opening's character instead of drifting")
+    parser.add_argument("--lock-instruments", action="store_true",
+                        help="with --sample-instruments: after the first section, only its instruments (>= 4 notes "
+                             "and 2%% of them) and those the --text names")
     parser.add_argument("--slide", type=int, default=None,
                         help="notes dropped per KV-cache rebuild past the window (default block_size // 4)")
     parser.add_argument("--max-polyphony", type=int, default=None,
@@ -640,6 +650,7 @@ def generate_batch(model, config, args, pieces, seed, n_rows, device, progress=N
             dry_key=args.dry_key,
             on_notes=stream,
             notes_every=NOTES_EVERY,
+            hold=style_hold(config, args, device),
         )
     print(f"  {n_rows * steps[0] / (time.time() - t0):.0f} notes/s"
           + (f" (stopped after {steps[0]} notes: every row ended)" if steps[0] < args.max_new_tokens else ""))
@@ -663,6 +674,42 @@ def caption_index(store, labels_dir, max_files, min_notes, device):
     from musicar.generation.retrieval import CaptionIndex
     return CaptionIndex(store, labels_dir=labels_dir, max_files=max_files, min_notes=min_notes, device=device,
                         encoder=text_encoder(device))
+
+
+def style_hold(config, args, device):
+    """generate's hold for --keep-style / --lock-instruments (the first section's description as the section caption
+    of the rest, its instruments + the caption's as the only ones left), or None."""
+    keep = args.keep_style and bool(config.section_len)
+    lock = args.lock_instruments and bool(config.n_programs) and args.sample_instruments
+    if args.keep_style and not keep:
+        raise GenerationError("--keep-style needs a checkpoint trained with section captions (section_len)")
+    if not (keep or lock):
+        return None
+    named = set()
+    wants = parse_caption(args.text) if args.text else None
+    if wants is not None:
+        for _, progs in wants['instruments']:
+            named |= set(progs)
+        if wants['drums']:
+            named.add(DRUM_PROGRAM)
+
+    def hold(notes):
+        pitch, velocity, duration, delta_time, programs = (t.numpy() for t in notes)
+        caps, allowed = [], []
+        for r in range(pitch.shape[0]):
+            ends = np.flatnonzero(pitch[r] == EOS_PITCH)
+            ix = np.flatnonzero(pitch[r][:ends[0] if len(ends) else None] < BOS_PITCH)  # real notes before the EOS
+            tok = np.stack([pitch[r], velocity[r], duration[r], delta_time[r]], 1)[ix]
+            prog = programs[r][ix]
+            caps.append(hold_caption(tok, prog) if keep else '')
+            counts = np.bincount(prog, minlength=129)
+            present = set(np.flatnonzero((counts >= 4) & (counts >= 0.02 * len(prog))).tolist())
+            allowed.append(sorted(present | named) if lock and present else None)
+            print(f"  style hold, row {r}: " + (f"{caps[-1]!r}" if keep else "")
+                  + (f" instruments {instrument_names(allowed[-1])}" if allowed[-1] else ""))
+        states = text_encoder(device).encode(caps, tokens=True, max_length=SECTION_TOKENS) if keep else None
+        return states, allowed if lock else None
+    return hold
 
 
 @functools.cache

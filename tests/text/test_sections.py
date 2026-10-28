@@ -16,7 +16,8 @@ from musicar.data.loader import NoteWindowDataset, collate_windows  # noqa: E402
 from musicar.generation.sampling import generate  # noqa: E402
 from musicar.model.checkpoint import merge_model_args  # noqa: E402
 from musicar.model.gpt import STREAM_ORDER, KVCache, section_layout, section_query_index  # noqa: E402
-from musicar.text.captions import section_attributes, section_caption, section_change, section_changed  # noqa: E402
+from musicar.text.captions import (hold_caption, section_attributes, section_caption, section_change,  # noqa: E402
+                                   section_changed)
 from test_text import TINY, batch, make_store, tiny  # noqa: E402
 
 D = 8  # text_dim of the tiny models
@@ -528,6 +529,42 @@ def test_merge_model_args_adds_sections():
     args = merge_model_args(saved, wanted, True, 64)
     assert (args['section_len'], args['section_lead'], args['section_mode']) == (256, 128, 'xattn')
     assert merge_model_args(saved, wanted, False, 64)['section_len'] == 0
+
+
+
+def test_hold():
+    """generate's hold: a section caption returned at note hold_at is what every later section gets (the same notes as
+    passing it up front, greedy, with guidance and past block_size), and the returned instruments are the only ones
+    sampled after it."""
+    start = [torch.full((2, 1), 128)] + [torch.zeros(2, 1, dtype=torch.long)] * 3
+    for mode in ('prefix', 'xattn'):
+        m = section_model(mode, n_programs=12)
+        X = torch.randn(2, 5, D)
+        kw = dict(max_new_tokens=100, top_k=1, text=torch.randn(5, D), cfg_scale=2.0, slide=16, program=None,
+                  cuda_graph=False, return_programs=True)
+        seen = []
+
+        def hold(notes):
+            seen.append(notes[0].shape)
+            return X, None
+        got = generate(m, *start, hold=hold, **kw)
+        want = generate(m, *start, sections=torch.stack([torch.zeros(2, 5, D), X]), **kw)
+        assert seen == [(2, 8)], seen  # once, at the first section's end (section_len 8, BOS included)
+        assert all(torch.equal(g, w) for g, w in zip(got, want)), mode
+        torch.manual_seed(3)
+        out = generate(m, *start, hold=lambda notes: (None, [[2, 5], None]), **{**kw, 'top_k': None})
+        assert set(out[4][0, 8:].tolist()) <= {2, 5} and len(set(out[4][1, 8:].tolist())) > 2, mode
+
+
+def test_hold_caption():
+    rng = np.random.default_rng(0)
+    tok = np.stack([rng.integers(40, 80, 256), rng.integers(24, 30, 256), rng.integers(5, 20, 256),
+                    rng.choice([0, 0, 5, 10], 256)], 1)
+    prog = rng.choice([0, 33, 128, 25, 48], 256, p=[.4, .2, .25, .1, .05])
+    cap = hold_caption(tok, prog)
+    assert cap == hold_caption(tok, prog) and 'piano' in cap and 'drums' in cap, cap  # the same words every time
+    assert 'string' not in cap  # 5 instruments: the 3 with the most notes
+    assert hold_caption(tok[:0], prog[:0]) == ''
 
 
 if __name__ == '__main__':

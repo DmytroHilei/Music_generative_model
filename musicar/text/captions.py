@@ -442,6 +442,22 @@ def section_caption(tok, prog, rng=random, uk_share=UK_SHARE, lang=None, prev=No
     return render_en(keep, rng) if lang == 'en' else render_uk(keep, rng)
 
 
+def hold_caption(tok, prog, version='v2'):
+    """An English section caption of a stretch of notes with every attribute section_attributes finds, worded the
+    same way every time: generation's style hold (sampling.generate hold), where the opening's description is the
+    section caption of the rest of the piece. More than 3 instruments: the 3 with the most notes. '' for no notes."""
+    attrs = section_attributes(tok, prog, version)
+    ids = attrs.get('instruments')
+    if ids and len(ids) > 3:
+        counts = {}
+        for p in prog.tolist():
+            i = V.GM_TO_ID[int(p)]
+            if i in ids:
+                counts[i] = counts.get(i, 0) + 1
+        attrs['instruments'] = sorted(ids, key=lambda i: -counts.get(i, 0))[:3]
+    return render_en(attrs, random.Random(0), tags_all=True) if attrs else ''
+
+
 def _change_caption(attrs, changed, rng, uk_share, lang):
     """section_caption with what changed (section_changed) always kept: entering instruments lead the named ones (a
     list of at most 3 unless more entered), the other attributes subsampled with SECTION_P_CHANGE; the tags form names

@@ -29,7 +29,8 @@ from musicar.model.checkpoint import resolve_checkpoint
 # the options reported in 'started' (the rest are generate.py defaults or don't apply to the engine)
 SHOWN = ('text', 'length_seconds', 'seed', 'best_of', 'max_new_tokens', 'temperature', 'top_k', 'top_p', 'min_p',
          'cfg_scale', 'cfg_notes', 'cfg_end', 'cfg_linear', 'instrument_temperature', 'dry_multiplier', 'dry_allowed',
-         'dry_base', 'dry_key', 'eos_ramp', 'length_stop', 'eos_floor', 'min_notes', 'retrieve', 'block_size')
+         'dry_base', 'dry_key', 'eos_ramp', 'length_stop', 'eos_floor', 'min_notes', 'retrieve', 'block_size',
+         'keep_style', 'lock_instruments')
 FINISHED = ('done', 'error', 'cancelled')
 TICK_S = 1.0  # how often an idle worker checks the unload and cleanup timers
 OTHER_MB = 256  # GPU memory of other processes that counts as "busy with other work"
