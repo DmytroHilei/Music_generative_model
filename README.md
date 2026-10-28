@@ -8,6 +8,17 @@ Each position is one note made of compound tokens (pitch, velocity, duration and
 output heads predict these, plus the instrument. The window can be conditioned on the instrument set, density and
 style.
 
+## Try it online
+
+[musicar-ivory.vercel.app](https://musicar-ivory.vercel.app) writes a piece from a caption in English or Ukrainian
+and plays it while the notes arrive (piano roll, SoundFont playback, MIDI and MP3 download). The model runs on my
+laptop GPU, so the page writes new pieces only while the laptop is on; it plays the sample pieces otherwise.
+
+Writing pieces needs a personal invite link. To ask for one, open a
+[Request access](https://github.com/DmytroHilei/Music_generative_model/issues/new?template=access-request.yml) issue.
+The link works like a password, so it is sent privately, never in the issue. Open it once in each browser you use:
+the page keeps the code and removes it from the address bar. One link can have two pieces in progress at a time.
+
 ## Overview
 
 - **Data built:**
@@ -97,11 +108,14 @@ musicar/              core package
                       midi_io.py (tokens -> MIDI, MIDI -> MP3)
   text/               encoder.py (frozen LaBSE), vocab.py (EN + UK caption vocabulary), captions.py (per-file captions)
   generation/         sampling.py (KV-cache decoding, CUDA graph, density / instrument / EOS / guidance controls),
-                      settings_router.py (generation settings from the seed song)
+                      piece.py (generate.py as a library: Generator, note stream), settings_router.py (generation
+                      settings from the seed song)
+  serve/              the app engine (python -m musicar.serve): app.py (/v1 HTTP API), jobs.py (queue, event streams),
+                      tokens.py (invite tokens: python -m musicar.serve.tokens add / list / revoke)
   eval/               evaluations used during training and by the eval/ scripts
   jobstatus.py        progress files for the dashboard
 config/               run configs: pretrain/, finetune/, pilots/, f1/, smoke.py (stacks on any of them);
-                      generate/ = generation presets (TOML)
+                      generate/ = generation presets (TOML); serve/engine.toml = the app engine's settings
 data/                 datasets, token stores and their metadata (see data/README.md); skryabin/ = the hand-picked songs
 data_prep/            datasets/ (downloads, tokenization into stores, store splits), songs/ (song search, download,
                       audio -> MIDI, fine-tune CSVs), labels/ (features, labels, pseudo-labels, caption text)
@@ -114,6 +128,7 @@ tools/                status.py (dashboard), sweeps/ (fine-tune sweeps), bench/ 
 cloud/                rented-GPU pipeline: setup/ (instance setup, preflight), run/ (launch, auto-resume, stop),
                       sync/ (Hugging Face Hub checkpoints and data), status/
 tests/                CPU tests per package area: python tests/run.py [filter]  (or pytest tests/)
+web/                  the chat page (Next.js, deployed on Vercel); lib/engine.ts is its only engine client
 legacy/               earlier LSTM and transformer versions
 ```
 
