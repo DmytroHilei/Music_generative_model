@@ -65,7 +65,7 @@ def generate(model, pitch, velocity, duration, delta_time, max_new_tokens, tempe
              cond=None, text=None, sections=None, text_neg=None, sections_neg=None, cfg_section=None,
              cfg_boost=0.0, cfg_boost_notes=32, length_seconds=None, eos_ramp=0.0, length_stop=0.0,
              dry_multiplier=0.0, dry_base=1.15, dry_allowed=16, dry_key='notes', cfg_notes=0, cfg_end=1.0,
-             cfg_linear=False, min_p=None):
+             cfg_linear=False, min_p=None, on_notes=None, notes_every=16):
     """
     Batched sampling (B rows, same prompt length) with a preallocated KV cache: each new note costs one position
     through the model, not a full re-run. On CUDA the one-note transformer step is captured once as a CUDA graph
@@ -76,6 +76,10 @@ def generate(model, pitch, velocity, duration, delta_time, max_new_tokens, tempe
     anchor > 0 (optional, off by default): the first `anchor` notes of the sequence (e.g. the prompt's theme)
     stay pinned at the start of every refilled window, in front of the most recent notes.
     progress: optional callback(n_generated) after every note (e.g. a jobstatus.JobStatus update).
+    on_notes: optional callback(a, notes) every notes_every new notes and after the last one: notes a..n-1 of the asked
+      rows (prompt included, so the first call starts at 0) as CPU tensors (pitch, velocity, duration, delta_time,
+      program), each (B, n - a); notes after a row's EOS are junk, as in the output. Each call waits for the GPU once;
+      an exception raised in it stops the generation (a cancel).
     Density control (no retraining; only the delta_time head is touched, every other choice stays the model's):
       dt_bias: fixed logit bias b * log(max(bin, 1)) on delta_time; b > 0 favours longer gaps = fewer notes/s.
       target_nps: notes per second to track (a float, or one per row). A controller nudges each row's bias after
@@ -418,6 +422,7 @@ def generate(model, pitch, velocity, duration, delta_time, max_new_tokens, tempe
                             sections=step_sec, remain=step_remain)
 
     h, filled = prefill(n0)
+    sent = 0  # on_notes: notes handed over so far
     for i in range(max_new_tokens):
         set_scale(n0 + i)
         nxt = model.cascade.sample(h, sample)
@@ -439,6 +444,10 @@ def generate(model, pitch, velocity, duration, delta_time, max_new_tokens, tempe
         step_i[0] = i + 1
         if progress is not None:
             progress(i + 1)
+        if on_notes is not None and ((i + 1) % notes_every == 0 or i == max_new_tokens - 1):
+            prog = prog_out[:Bo, sent:n] if prog_out is not None else torch.zeros_like(out[0][:Bo, sent:n])
+            on_notes(sent, [o[:Bo, sent:n].cpu() for o in out] + [prog.cpu()])
+            sent = n
         if i == max_new_tokens - 1:
             break
         if filled < L:
