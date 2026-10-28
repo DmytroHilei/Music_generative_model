@@ -22,11 +22,13 @@ from musicar.serve.jobs import wire  # noqa: E402
 
 
 def engine_app(d, **kw):
-    """An app on a tiny multi-instrument checkpoint (BOS / EOS, no text input) with a length-stop base preset."""
+    """An app on a tiny multi-instrument checkpoint (BOS / EOS, no text input) with a length-stop base preset; no
+    auth unless asked, tokens in d."""
     m = tiny(n_programs=129, pitch_size=BOS_PITCH + 2)
     args = {k: v for k, v in vars(m.config).items() if k != 'dropout'}
     torch.save(dict(model=m.state_dict(), model_args=args, iter_num=0), Path(d) / 'ckpt.pt')
     (Path(d) / 'test.toml').write_text('sample-instruments = true\nlength-stop = 1.2\ntemperature = 1.0\n')
+    kw = {'auth': False, 'tokens_db': str(Path(d) / 'tokens.sqlite'), **kw}
     config = EngineConfig(checkpoint=str(Path(d) / 'ckpt.pt'), base=[str(Path(d) / 'test.toml')], device='cpu',
                           name='test', presets={'balanced': {}, 'hot': {'temperature': 1.3}}, **kw)
     return create_app(config)
@@ -171,6 +173,64 @@ def test_errors_gpu_busy_unload_cleanup():
         job_id = client.post('/v1/generate', json=dict(length_s=5)).json()['job_id']
         events = read_events(client, job_id)
         assert events[-1][0] == 'error' and 'busy with other work' in events[-1][1]['message'], events
+
+
+def test_tokens_owners_cors():
+    """auth: 401 without / with a bad or revoked token, health stays open; a job is seen only by its token; a token
+    may have per_token_jobs unfinished jobs; CORS answers the listed origins only."""
+    with tempfile.TemporaryDirectory() as d:
+        app = engine_app(d, auth=True, per_token_jobs=1, max_queue=4)
+        engine, store, client = app.state.engine, app.state.tokens, TestClient(app)
+        anna, bob = store.add('anna'), store.add('bob')
+        try:
+            store.add('anna')
+            raise AssertionError('a second active token for anna')
+        except ValueError:
+            pass
+        auth = lambda token: {'Authorization': f'Bearer {token}'}  # noqa: E731
+        assert client.get('/v1/health').status_code == 200
+        for headers in ({}, auth('mus_wrong'), {'Authorization': f'Basic {anna}'}):
+            r = client.get('/v1/presets', headers=headers)
+            assert r.status_code == 401 and r.headers['www-authenticate'] == 'Bearer', headers
+        assert client.get('/v1/presets', headers=auth(anna)).status_code == 200
+        engine.generator = SlowGenerator()
+        a = client.post('/v1/generate', json=dict(length_s=5), headers=auth(anna)).json()['job_id']
+        r = client.post('/v1/generate', json=dict(length_s=5), headers=auth(anna))
+        assert r.status_code == 429 and 'your jobs' in r.json()['detail']
+        b = client.post('/v1/generate', json=dict(length_s=5), headers=auth(bob)).json()['job_id']
+        for method, url in (('GET', f'/v1/jobs/{a}/events'), ('GET', f'/v1/jobs/{a}/midi'),
+                            ('DELETE', f'/v1/jobs/{a}')):
+            assert client.request(method, url, headers=auth(bob)).status_code == 404, url
+        assert client.delete(f'/v1/jobs/{b}', headers=auth(bob)).status_code == 200
+        assert client.delete(f'/v1/jobs/{a}', headers=auth(anna)).status_code == 200
+        assert store.revoke('bob') and client.get('/v1/presets', headers=auth(bob)).status_code == 401
+        assert {name: jobs for name, _, _, jobs, _ in store.list()} == {'anna': 1, 'bob': 1}
+        pre = dict(Origin='http://localhost:3000', **{'Access-Control-Request-Method': 'POST',
+                                                      'Access-Control-Request-Headers': 'authorization,content-type'})
+        r = client.options('/v1/generate', headers=pre)
+        assert r.status_code == 200 and r.headers['access-control-allow-origin'] == 'http://localhost:3000'
+        assert 'authorization' in r.headers['access-control-allow-headers'].lower()
+        r = client.options('/v1/generate', headers={**pre, 'Origin': 'https://evil.example'})
+        assert 'access-control-allow-origin' not in r.headers
+        r = client.get('/v1/presets', headers={'Origin': 'http://localhost:3000', **auth(anna)})
+        assert r.headers['access-control-allow-origin'] == 'http://localhost:3000'
+        assert 'retry-after' in r.headers['access-control-expose-headers'].lower()
+
+
+def test_tokens_cli():
+    # python -m musicar.serve.tokens add / list / revoke on the tokens_db of a given engine.toml
+    import subprocess
+    with tempfile.TemporaryDirectory() as d:
+        cfg = Path(d) / 'engine.toml'
+        cfg.write_text(f'tokens_db = "{Path(d) / "t.sqlite"}"\n')
+        root = str(Path(__file__).parents[2])
+        cli = lambda *a: subprocess.run(  # noqa: E731
+            [sys.executable, '-m', 'musicar.serve.tokens', *a, '--config', str(cfg)], capture_output=True, text=True,
+            check=True, cwd=root)
+        token = cli('add', 'guest').stdout.strip()
+        assert token.startswith('mus_') and len(token) > 30
+        assert 'guest' in cli('list').stdout and 'REVOKED' not in cli('list').stdout
+        assert cli('revoke', 'guest').stdout.strip() == 'revoked' and 'REVOKED' in cli('list').stdout
 
 
 def test_config_file():

@@ -4,7 +4,8 @@ import tomllib
 from dataclasses import dataclass, field, fields
 from pathlib import Path
 
-CONFIG = Path(__file__).resolve().parents[2] / "config" / "serve" / "engine.toml"
+ROOT = Path(__file__).resolve().parents[2]
+CONFIG = ROOT / "config" / "serve" / "engine.toml"
 
 
 @dataclass
@@ -21,7 +22,14 @@ class EngineConfig:
     batch_candidates: int = 4  # best-of candidates per batch (GPU memory)
     default_preset: str = "balanced"
     presets: dict = field(default_factory=lambda: {"balanced": {}})  # name -> decoding options on top of `base`
+    auth: bool = True  # False: no token needed (local development only)
+    tokens_db: str = "data/serve/tokens.sqlite"  # relative to the repository
+    per_token_jobs: int = 2  # unfinished jobs per token at most
+    cors_origins: list = field(default_factory=lambda: ["http://localhost:3000"])  # pages allowed to call the engine
 
+    @property
+    def tokens_path(self):
+        return ROOT / self.tokens_db
     @classmethod
     def load(cls, path=CONFIG, **overrides):
         """The TOML file's values, then `overrides` (None = keep the file's)."""

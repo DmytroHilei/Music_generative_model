@@ -58,8 +58,8 @@ def gpu_status():
 
 
 class QueueFull(Exception):
-    def __init__(self, retry_after):
-        super().__init__(f'the queue is full, try again in ~{retry_after} s')
+    def __init__(self, retry_after, message='the queue is full'):
+        super().__init__(f'{message}, try again in ~{retry_after} s')
         self.retry_after = retry_after
 
 
@@ -71,6 +71,7 @@ class Cancelled(Exception):
 class Job:
     id: str
     args: object  # the generate.py options (argparse.Namespace)
+    owner: str = None  # the token's name; only its owner sees the job
     events: list = field(default_factory=list)  # (name, data); only appended to
     state: str = 'queued'  # queued -> running -> done | error | cancelled, set after the job's last event
     pieces: list = field(default_factory=list)  # the finished candidates, best first
@@ -111,12 +112,16 @@ class Engine:
         self.notes_per_s, self.job_s = None, 10.0  # of the last job (job_s: the Retry-After estimate)
         threading.Thread(target=self._work, name='musicar-engine', daemon=True).start()
 
-    def submit(self, args):
+    def submit(self, args, owner=None):
         with self.cond:
             ahead = len(self.waiting) + (self.running is not None)
             if len(self.waiting) >= self.config.max_queue:
                 raise QueueFull(max(1, round(ahead * self.job_s)))
-            job = Job(secrets.token_urlsafe(9), args)
+            mine = sum(1 for j in self.jobs.values() if j.owner == owner and not j.finished)
+            if owner is not None and mine >= self.config.per_token_jobs:
+                raise QueueFull(max(1, round(ahead * self.job_s)), f'{mine} of your jobs are still queued or '
+                                                                   f'running (at most {self.config.per_token_jobs})')
+            job = Job(secrets.token_urlsafe(9), args, owner)
             self.jobs[job.id] = job
             job.emit('queued', {'position': ahead})
             self.waiting.append(job)
