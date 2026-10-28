@@ -1,5 +1,5 @@
 // Plays a note list as it grows: notes (and their note-offs) are scheduled a little ahead of the playhead, so
-// playback can start while the engine is still writing. Sound: the FluidR3 SoundFont (sound.ts); if it can't load,
+// playback can start while the engine is still writing. Sound: the MuseScore_General SoundFont (sound.ts); if it can't load,
 // a small built-in synth. One player sounds at a time.
 
 import { familyOf, type Note } from './notes';

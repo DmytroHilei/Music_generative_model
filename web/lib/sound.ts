@@ -1,12 +1,13 @@
 'use client';
 
-// The SoundFont: FluidR3 GM (SF3, public/soundfont, put there by scripts/assets.mjs) played by spessasynth_lib in an
-// AudioWorklet. Loaded once, on the first play or Compose, and shared by every player on the page.
+// The SoundFont: MuseScore_General GM (SF3, public/soundfont, put there by scripts/assets.mjs) played by
+// spessasynth_lib in an AudioWorklet. Loaded once, on the first play or Compose, and shared by every player on the
+// page. Playback and the MP3 both pass the same compressor (master), so dense passages don't clip.
 
 import { useSyncExternalStore } from 'react';
 import type { WorkletSynthesizer } from 'spessasynth_lib';
 
-export const SOUNDFONT_URL = '/soundfont/FluidR3Mono_GM.sf3';
+export const SOUNDFONT_URL = '/soundfont/MuseScore_General.sf3';
 export const PROCESSOR_URL = '/spessasynth_processor.min.js';
 
 export type SoundStatus = { state: 'idle' | 'loading' | 'ready' | 'failed'; progress: number };
@@ -35,7 +36,7 @@ export function loadBank(): Promise<ArrayBuffer> {
     set({ state: 'loading', progress: 0 });
     const res = await fetch(SOUNDFONT_URL);
     if (!res.ok || !res.body) throw new Error(`soundfont: ${res.status}`);
-    const total = Number(res.headers.get('Content-Length')) || 23712790;
+    const total = Number(res.headers.get('Content-Length')) || 39900972;
     const reader = res.body.getReader();
     const parts: Uint8Array[] = [];
     let got = 0;
@@ -55,6 +56,12 @@ export function loadBank(): Promise<ArrayBuffer> {
   return bank;
 }
 
+// the synth's output stage: a gentle compressor that holds the peaks of dense passages (the model's many-instrument
+// sections) without changing quiet ones
+export function master(ctx: BaseAudioContext): DynamicsCompressorNode {
+  return new DynamicsCompressorNode(ctx, { threshold: -18, knee: 12, ratio: 4, attack: 0.005, release: 0.25 });
+}
+
 export type Live = { ctx: AudioContext; synth: WorkletSynthesizer; out: GainNode };
 let live: Promise<Live> | null = null;
 let quietUntil = 0; // context time until which notes queued before a stop may still arrive (see silence)
@@ -69,7 +76,9 @@ export function liveSynth(): Promise<Live> {
     await ctx.audioWorklet.addModule(PROCESSOR_URL);
     const synth = new WorkletSynthesizer(ctx);
     const out = ctx.createGain();
-    synth.connect(out);
+    const comp = master(ctx);
+    synth.connect(comp);
+    comp.connect(out);
     out.connect(ctx.destination);
     await synth.soundBankManager.addSoundBank(buf.slice(0), 'main');
     await synth.isReady;
