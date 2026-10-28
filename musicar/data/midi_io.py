@@ -10,6 +10,22 @@ import pretty_midi
 from musicar.data.loader import DRUM_PROGRAM
 
 
+def note_events(pitches, velocities, durations, delta_times, velocity_bins=32, time_resolution=0.02,
+                max_delta=None, programs=None, start=0.0):
+    """(onset s, program, pitch, duration s, MIDI velocity) of every note, as tokens_to_midi writes them; onsets count
+    from `start` (a stream of notes continues from its last onset and gets the same floats as the whole file)."""
+    programs = programs if programs is not None else [0] * len(pitches)
+    current_time = start
+    for p, v, d, dt, prog in zip(pitches, velocities, durations, delta_times, programs):
+        delta = dt * time_resolution
+        if max_delta is not None:
+            delta = min(delta, max_delta)  # cap runaway gaps
+        if delta > 0:
+            current_time += delta
+        duration = 0.1 if prog == DRUM_PROGRAM else max(0.08, d * time_resolution)
+        yield current_time, int(prog), int(p), duration, min(127, int(v * 128 / velocity_bins) + 2)
+
+
 def tokens_to_midi(pitches, velocities, durations, delta_times,
                    velocity_bins=32, time_resolution=0.02,
                    max_polyphony=None, max_delta=None, programs=None):
@@ -24,7 +40,6 @@ def tokens_to_midi(pitches, velocities, durations, delta_times,
             name = 'Drums' if drum else pretty_midi.program_to_instrument_name(program)
             tracks[program] = pretty_midi.Instrument(program=0 if drum else program, is_drum=drum, name=name)
         return tracks[program]
-    programs = programs if programs is not None else [0] * len(pitches)
 
     current_time = 0.0
     pending = []  # notes at the current time slot, flushed when time advances
@@ -34,24 +49,13 @@ def tokens_to_midi(pitches, velocities, durations, delta_times,
         for prog, note in pending[:max_polyphony] if max_polyphony else pending:
             track(prog).notes.append(note)
 
-    for p, v, d, dt, prog in zip(pitches, velocities, durations, delta_times, programs):
-        delta = dt * time_resolution
-        if max_delta is not None:
-            delta = min(delta, max_delta)  # cap runaway gaps
-
-        if delta > 0:
+    for onset, prog, pitch, duration, velocity in note_events(pitches, velocities, durations, delta_times,
+                                                              velocity_bins, time_resolution, max_delta, programs):
+        if onset != current_time:
             flush(pending)
             pending = []
-            current_time += delta
-
-        velocity = min(127, int(v * 128 / velocity_bins) + 2)
-        duration = 0.1 if prog == DRUM_PROGRAM else max(0.08, d * time_resolution)
-        pending.append((int(prog), pretty_midi.Note(
-            velocity=velocity,
-            pitch=int(p),
-            start=current_time,
-            end=current_time + duration,
-        )))
+            current_time = onset
+        pending.append((prog, pretty_midi.Note(velocity=velocity, pitch=pitch, start=onset, end=onset + duration)))
 
     flush(pending)
     midi.instruments.extend(tracks[k] for k in sorted(tracks))

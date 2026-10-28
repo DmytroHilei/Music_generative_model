@@ -5,6 +5,7 @@
 #   cp cloud/secrets.env.example cloud/secrets.env && nano cloud/secrets.env      # HF_TOKEN, WANDB_API_KEY
 #   bash cloud/setup/setup_instance.sh
 # Then: .venv/bin/python cloud/setup/preflight.py --hours <GPU hours>   and   cloud/run/launch.sh
+# DATA_STORES=a,b,c: download / verify only those stores (default: all in cloud/sync/hub.py)
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 ROOT=$(pwd)
@@ -60,8 +61,8 @@ EOF
 
 step "5/6 data: download + verify (sha256 of every file)"
 if [ ! -f data/cache/.verified ]; then
-    .venv/bin/python cloud/sync/data.py download
-    .venv/bin/python cloud/sync/data.py verify
+    .venv/bin/python cloud/sync/data.py download ${DATA_STORES:+--stores "$DATA_STORES"}
+    .venv/bin/python cloud/sync/data.py verify ${DATA_STORES:+--stores "$DATA_STORES"}
     touch data/cache/.verified
 else
     echo "already verified ($(date -r data/cache/.verified '+%F %T'))"

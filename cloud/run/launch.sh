@@ -6,6 +6,8 @@
 # Needs checkpoints/<run>/run.env from cloud/setup/preflight.py (or pulled from the Hub with `cloud/sync/ckpt.py pull`).
 #   cloud/run/launch.sh [run name]            # default long_450m
 # Extra train.py arguments: EXTRA_ARGS="--learning_rate=2e-3" cloud/run/launch.sh
+# Another command after the run (instead of the settings sweep), its folder uploaded to <user>/<run>-results:
+#   POST_RUN="bash cloud/run/f1_post.sh" POST_RUN_DIR=results/f1_post POST_RUN_LIMIT_MIN=150 cloud/run/launch.sh f1
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 RUN=${1:-long_450m}
@@ -36,6 +38,10 @@ POST=()
 if [ "${POST_SWEEP:-1}" = 1 ]; then
     POST=(--post-run ".venv/bin/python eval/settings/style_search.py --checkpoint $OUT/model_bf16.pt --out results/${RUN}_sweep"
           --post-run-dir "results/${RUN}_sweep")
+fi
+if [ -n "${POST_RUN:-}" ]; then
+    POST=(--post-run "$POST_RUN" --post-run-dir "${POST_RUN_DIR:?POST_RUN needs POST_RUN_DIR}"
+          --post-run-limit-min "${POST_RUN_LIMIT_MIN:-75}")
 fi
 setsid nohup .venv/bin/python cloud/sync/ckpt.py loop --run "$RUN" --every-min "${SYNC_EVERY_MIN:-60}" "${STOP_FLAG[@]}" \
     "${POST[@]}" >> "logs/$RUN.sync.log" 2>&1 < /dev/null &

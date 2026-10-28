@@ -1,6 +1,8 @@
 # Exact package set of the training venv (2026-10-03). Installed by cloud/setup/setup_instance.sh with uv:
 #   uv pip install -r cloud/setup/requirements-lock.txt --extra-index-url https://download.pytorch.org/whl/cu130 --index-strategy unsafe-best-match
 # torch's CUDA 13.0 wheels bundle the CUDA libraries; the host only needs an NVIDIA driver for CUDA >= 13.0 (>= 580).
+# 2026-10-27: + transformers and its dependencies (the LaBSE text encoder of the F1 run), the laptop venv's versions.
+annotated-doc==0.0.5
 annotated-types==0.8.0
 anyio==4.15.1
 certifi==2026.7.22
@@ -61,16 +63,22 @@ pydantic-core==2.46.5
 pygments==2.21.0
 python-dateutil==2.9.0.post0
 pyyaml==6.0.3
+regex==2026.9.29
 requests==2.34.2
 rich==15.0.0
+safetensors==0.8.0
 setuptools==84.0.0
+shellingham==1.5.4
 six==1.17.0
 sympy==1.14.0
+tokenizers==0.23.3
 torch==2.14.0+cu130
 torchao==0.18.0
 tqdm==4.70.1
+transformers==5.19.0
 triton==3.8.0
 truststore==0.10.4
+typer==0.27.3
 typing-extensions==4.16.0
 typing-inspection==0.4.4
 urllib3==2.8.0

@@ -1,4 +1,5 @@
-"""generate.py prompt rows (CPU, no model): python tests/generation/test_generate_prompt.py  (or pytest tests/)."""
+"""generate.py and its library (musicar/generation/piece.py): prompt rows, caption masks, presets (CPU). Run: python
+tests/generation/test_generate_prompt.py  (or pytest tests/)."""
 
 import sys
 import tempfile
@@ -12,6 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from helpers import run, tiny  # noqa: E402
 import torch  # noqa: E402
 import generate  # noqa: E402
+from musicar.generation import piece  # noqa: E402
 from musicar.data.loader import BOS_PITCH, DRUM_PROGRAM  # noqa: E402
 
 
@@ -33,12 +35,12 @@ def test_midi_prompt_keeps_instruments():
         cfg = types.SimpleNamespace(n_programs=129, velocity_size=32, duration_size=512, delta_time_size=512,
                                     pitch_size=BOS_PITCH + 2)
         args = types.SimpleNamespace(prompt=str(path), prompt_start=0, prompt_notes=24)
-        streams, labels, programs = generate.prompt_rows(cfg, args, None, 0, 2, 'cpu')
+        streams, labels, programs = piece.prompt_rows(cfg, args, None, 0, 2, 'cpu')
         assert streams[0].shape == (2, 25) and streams[0][0, 0] == BOS_PITCH and programs[0, 0] == 0
         assert programs[0, 1:4].tolist() == [0, 33, DRUM_PROGRAM]  # (onset, program, pitch) order
         assert streams[0][0, 1:4].tolist() == [60, 36, 42] and 'Drums' in labels[0]
         cfg.n_programs = 0
-        streams, _, programs = generate.prompt_rows(cfg, args, None, 0, 2, 'cpu')
+        streams, _, programs = piece.prompt_rows(cfg, args, None, 0, 2, 'cpu')
         assert streams[0].shape == (2, 17) and DRUM_PROGRAM not in programs.tolist()[0]
 
 

@@ -4,6 +4,7 @@ Move the token stores between the laptop and the rented GPU through a private Hu
   laptop:   python cloud/sync/data.py upload       # once, before renting: hashes, then a resumable upload (~41 GB)
   instance: python cloud/sync/data.py download     # cloud/setup/setup_instance.sh runs this and then `verify`
             python cloud/sync/data.py verify       # every file present, right size, right sha256
+  --stores on download / verify: only those stores (+ the label / caption tables), e.g. the ones a run reads
 
 The repo holds data/cache/<store>/... for the stores in cloud/sync/hub.py, their label / caption tables (labels/,
 captions/ from --labels-dir / --captions-dir; on the instance data/labels and data/captions link to them) plus
@@ -91,12 +92,21 @@ def upload(args):
     print(f'upload verified: all {len(manifest)} files on {repo}')
 
 
+def selected(manifest, stores):
+    """The manifest entries of these stores and of the label / caption tables."""
+    keep = set(stores) | {'labels', 'captions'}
+    return {rel: e for rel, e in manifest.items() if rel.split('/')[0] in keep}
+
+
 def download(args):
     from huggingface_hub import snapshot_download
     hf = hub.api()
     repo = hub.data_repo(hf, args.repo)
-    print(f'downloading {repo} -> {args.cache_dir}', flush=True)
-    snapshot_download(repo, repo_type='dataset', local_dir=args.cache_dir, max_workers=args.workers)
+    stores = args.stores.split(',')
+    print(f'downloading {repo} -> {args.cache_dir} ({", ".join(stores)})', flush=True)
+    patterns = [f'{s}/*' for s in stores] + ['labels/*', 'captions/*', hub.MANIFEST]
+    snapshot_download(repo, repo_type='dataset', local_dir=args.cache_dir, max_workers=args.workers,
+                      allow_patterns=patterns)
     link_tables(args.cache_dir)
     print('download done')
 
@@ -120,7 +130,7 @@ def verify(args):
     manifest_path = Path(args.cache_dir) / hub.MANIFEST
     if not manifest_path.exists():
         raise SystemExit(f'{manifest_path} missing: run `python cloud/sync/data.py download` first')
-    manifest = json.loads(manifest_path.read_text())
+    manifest = selected(json.loads(manifest_path.read_text()), args.stores.split(','))
     problems = hub.verify(args.cache_dir, manifest, workers=args.workers, full=not args.quick)
     total = sum(e['size'] for e in manifest.values())
     if problems:

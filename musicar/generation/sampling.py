@@ -37,6 +37,26 @@ def prompt_inputs(model, tokens, programs, band=False, density=False):
     return streams, programs, (inst if band else torch.zeros_like(inst), dens if density else torch.zeros_like(dens))
 
 
+def guidance_scale(i, cfg_scale, cfg_notes=0, cfg_end=1.0, cfg_linear=False):
+    """The guidance scale for new note i (0 = the first generated note) under the schedule: cfg_notes 0 = cfg_scale
+    throughout; else cfg_scale for the first cfg_notes notes and cfg_end after (a step: guidance on the opening only,
+    TokenSynth), or with cfg_linear a straight line from cfg_scale at note 0 to cfg_end at note cfg_notes (an anneal
+    like MAGNeT's, or a warm-up like Aria's when cfg_end > cfg_scale)."""
+    if not cfg_notes:
+        return cfg_scale
+    if cfg_linear:
+        return cfg_scale + (cfg_end - cfg_scale) * min(1.0, i / cfg_notes)
+    return cfg_scale if i < cfg_notes else cfg_end
+
+
+def min_p_filter(logits, min_p):
+    """min-p truncation (Nguyen et al. 2024): values whose probability is below min_p x the largest one are dropped
+    (-inf), on tempered logits before the softmax."""
+    probs = F.softmax(logits, dim=-1)
+    keep = probs >= min_p * probs.max(dim=-1, keepdim=True).values
+    return logits.masked_fill(~keep, -float('Inf'))
+
+
 @torch.no_grad()
 def generate(model, pitch, velocity, duration, delta_time, max_new_tokens, temperature=0.85, top_k=None,
              anchor=0, slide=None, progress=None, dt_bias=0.0, target_nps=None, dt_seconds=0.02,
@@ -44,7 +64,8 @@ def generate(model, pitch, velocity, duration, delta_time, max_new_tokens, tempe
              eos_t1=False, programs=None, allowed_programs=None, return_programs=False, program_temperature=None,
              cond=None, text=None, sections=None, text_neg=None, sections_neg=None, cfg_section=None,
              cfg_boost=0.0, cfg_boost_notes=32, length_seconds=None, eos_ramp=0.0, length_stop=0.0,
-             dry_multiplier=0.0, dry_base=1.15, dry_allowed=16, dry_key='notes'):
+             dry_multiplier=0.0, dry_base=1.15, dry_allowed=16, dry_key='notes', cfg_notes=0, cfg_end=1.0,
+             cfg_linear=False, min_p=None, on_notes=None, notes_every=16):
     """
     Batched sampling (B rows, same prompt length) with a preallocated KV cache: each new note costs one position
     through the model, not a full re-run. On CUDA the one-note transformer step is captured once as a CUDA graph
@@ -55,6 +76,10 @@ def generate(model, pitch, velocity, duration, delta_time, max_new_tokens, tempe
     anchor > 0 (optional, off by default): the first `anchor` notes of the sequence (e.g. the prompt's theme)
     stay pinned at the start of every refilled window, in front of the most recent notes.
     progress: optional callback(n_generated) after every note (e.g. a jobstatus.JobStatus update).
+    on_notes: optional callback(a, notes) every notes_every new notes and after the last one: notes a..n-1 of the asked
+      rows (prompt included, so the first call starts at 0) as CPU tensors (pitch, velocity, duration, delta_time,
+      program), each (B, n - a); notes after a row's EOS are junk, as in the output. Each call waits for the GPU once;
+      an exception raised in it stops the generation (a cancel).
     Density control (no retraining; only the delta_time head is touched, every other choice stays the model's):
       dt_bias: fixed logit bias b * log(max(bin, 1)) on delta_time; b > 0 favours longer gaps = fewer notes/s.
       target_nps: notes per second to track (a float, or one per row). A controller nudges each row's bias after
@@ -90,6 +115,12 @@ def generate(model, pitch, velocity, duration, delta_time, max_new_tokens, tempe
       given), and every head samples from u + cfg_scale * (f - u) + cfg_section * (c - f).
     cfg_boost: a guidance schedule (YuE: higher at a section start): the section scale (cfg_section, else cfg_scale)
       is raised by cfg_boost at each section's first note, falling linearly to its base over cfg_boost_notes notes.
+    cfg_notes / cfg_end / cfg_linear: a guidance schedule over the generated notes (guidance_scale): the (section)
+      scale is cfg_scale for the first cfg_notes new notes and cfg_end (default 1 = off) after; cfg_linear: a line
+      from cfg_scale to cfg_end over cfg_notes notes (anneal, or warm-up with cfg_end > cfg_scale). Guidance runs
+      when either end of the schedule is not 1. cfg_boost adds to the scheduled scale.
+    min_p: values below min_p x the most likely one are dropped (after temperature and top_k, before top_p; Aria uses
+      0.035). A truncation that adapts to how peaked the distribution is, unlike top_p.
     length_seconds: the length of the piece in seconds (a float, or one per row), counted from the first prompt note.
       n_remain models: every note gets the level of length_seconds minus its onset (0 s past the end), as the
       seconds-to-the-end input was trained (n_progress: and the level of onset / length_seconds). None = 'none'.
@@ -116,7 +147,7 @@ def generate(model, pitch, velocity, duration, delta_time, max_new_tokens, tempe
     Bo = pitch.size(0)  # rows asked for; with guidance the model runs 2 * Bo (conditional, then unconditional)
     double = cfg_section is not None
     assert not double or (text is not None and model.config.section_len), 'cfg_section needs text and sections'
-    guided = double or ((cfg_scale != 1.0 or cfg_boost) and
+    guided = double or ((cfg_scale != 1.0 or cfg_boost or (cfg_notes and cfg_end != 1.0)) and
                         (style is not None or text is not None or sections is not None))
     n_br = 3 if double else 2 if guided else 1  # batch copies: conditional, (file only,) unconditional
     assert not (guided and target_nps is not None), "guidance with a density target isn't supported"
@@ -234,11 +265,13 @@ def generate(model, pitch, velocity, duration, delta_time, max_new_tokens, tempe
     scale = [base_scale]  # the section (or only) guidance scale for the note being decided (cfg_boost schedule)
 
     def set_scale(n):
-        """The guidance scale for predicting note n: + cfg_boost at a section's first note, linearly back to the
-        base over cfg_boost_notes notes."""
+        """The guidance scale for predicting note n: the schedule's scale for new note n - n0 (guidance_scale),
+        + cfg_boost at a section's first note, linearly back to the base over cfg_boost_notes notes."""
+        base = guidance_scale(n - n0, base_scale, cfg_notes, cfg_end, cfg_linear)
         if cfg_boost and S:
             since = n - sec_at(sec_now(n))
-            scale[0] = base_scale + cfg_boost * max(0.0, 1.0 - since / cfg_boost_notes)
+            base += cfg_boost * max(0.0, 1.0 - since / cfg_boost_notes)
+        scale[0] = base
 
     def sample(logits, name=None):  # (B, 1, vocab) → (B, 1)
         if name == 'program' and not sample_programs:
@@ -270,6 +303,8 @@ def generate(model, pitch, velocity, duration, delta_time, max_new_tokens, tempe
         if top_k is not None:
             v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
             logits[logits < v[:, [-1]]] = -float('Inf')
+        if min_p:
+            logits = min_p_filter(logits, min_p)
         probs = F.softmax(logits, dim=-1)
         if top_p is not None:
             sorted_p, order = torch.sort(probs, dim=-1, descending=True)
@@ -387,6 +422,7 @@ def generate(model, pitch, velocity, duration, delta_time, max_new_tokens, tempe
                             sections=step_sec, remain=step_remain)
 
     h, filled = prefill(n0)
+    sent = 0  # on_notes: notes handed over so far
     for i in range(max_new_tokens):
         set_scale(n0 + i)
         nxt = model.cascade.sample(h, sample)
@@ -408,6 +444,10 @@ def generate(model, pitch, velocity, duration, delta_time, max_new_tokens, tempe
         step_i[0] = i + 1
         if progress is not None:
             progress(i + 1)
+        if on_notes is not None and ((i + 1) % notes_every == 0 or i == max_new_tokens - 1):
+            prog = prog_out[:Bo, sent:n] if prog_out is not None else torch.zeros_like(out[0][:Bo, sent:n])
+            on_notes(sent, [o[:Bo, sent:n].cpu() for o in out] + [prog.cpu()])
+            sent = n
         if i == max_new_tokens - 1:
             break
         if filled < L:

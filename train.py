@@ -37,6 +37,7 @@ from musicar.training.memory import spill_to_cpu
 from musicar.model.gpt import MusicConfig, GPT, STREAM_ORDER
 from musicar.training.optim import build_optimizer, cooldown_start, freeze_params, lr_at, set_lr
 from musicar.training.profile import Phases, kernel_report
+from hypotheses import load as load_hypothesis
 
 # -----------------------------------------------------------------------------
 # I/O
@@ -199,6 +200,8 @@ early_notes = 128         # validation with captions: also the CE over the first
 # read captions when that share was large (block 512 at piece starts, 2026-10-25); this raises the share in place
 open_weight = 1.0
 open_notes = 128
+# an experimental change in hypotheses/<name>.py (hypotheses/README.md), switched on here and nowhere else
+hypothesis = ''           # 'name' or 'name:key=value:key=value'; '' = none
 
 # wandb logging
 wandb_log = True
@@ -252,6 +255,9 @@ if styles:
 if special_tokens:
     pitch_size = max(pitch_size, 130)
 config = {k: globals()[k] for k in config_keys}  # logged to wandb and saved in checkpoints
+hyp = load_hypothesis(hypothesis) if hypothesis else None
+if hyp:
+    print(f"hypothesis: {hyp} (hypotheses/{hyp.name}.py)")
 sys.stdout.reconfigure(line_buffering=True)  # eval lines reach a redirected log at once, not when an 8 KB buffer fills
 
 
@@ -297,6 +303,8 @@ train_dataset = NoteWindowDataset(csv_path, split='train', block_size=block_size
                                change_frac=section_change_frac, change_min=section_change_min,
                                counterfactual=section_cf_weight > 0, splice_frac=section_splice_frac,
                                aug_stores=as_list(aug_stores, int), source_weights=as_list(source_weights, float))
+if hyp:
+    train_dataset = hyp.dataset(train_dataset)
 train_names = tuple(extra_names + cf_names + remain_names)
 train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=num_workers, drop_last=True,
                           collate_fn=partial(collate_windows, extra_names=train_names),
@@ -388,6 +396,8 @@ if fake_quant:
 if block_size < model.config.block_size:
     model.crop_block_size(block_size)
     model_args['block_size'] = block_size
+if hyp:
+    hyp.model(model)
 model.to(device)
 model.act_ckpt = act_ckpt
 model.act_ckpt_save = act_ckpt_save
@@ -431,6 +441,8 @@ optimizer = build_optimizer(optimizer_name, model, weight_decay, learning_rate, 
                             compile_ns=compile, text_lr_mult=text_lr_mult, linear_lr_mult=linear_lr_mult,
                             muon_ns=muon_ns, muon_normuon=muon_normuon, muon_cautious=muon_cautious,
                             muon_rms=muon_rms, remain_lr_mult=remain_lr_mult)
+if hyp:
+    hyp.optimizer(optimizer)
 encoder = None
 if text_encoder:
     from musicar.text.encoder import TextEncoder
@@ -511,7 +523,8 @@ def prepare(X, Y, cond_drop_p, remain_drop_p=None, length_noise=False, captioned
 def infinite_batches(loader):
     while True:
         for X, Y in loader:
-            yield prepare(X, Y, cond_dropout, remain_dropout, length_noise=True, captioned_p=cond_dropout_captioned)
+            X, Y = prepare(X, Y, cond_dropout, remain_dropout, length_noise=True, captioned_p=cond_dropout_captioned)
+            yield hyp.batch(X, Y, iter_num) if hyp else (X, Y)
 
 
 def val_loss(loader, conditioned=None):
@@ -678,7 +691,8 @@ def accumulate(X, Y, net):
     sums = {}
     for micro_step in range(gradient_accumulation_steps):
         with phases('forward'), ctx:
-            parts, loss = net(*X[0], **X[1], targets=Y, **train_kw)
+            parts, loss = hyp.forward(net, X, Y, train_kw, iter_num) if hyp \
+                else net(*X[0], **X[1], targets=Y, **train_kw)
         # kept as GPU tensors to avoid a CPU sync per micro step
         sums['loss'] = sums.get('loss', 0.0) + loss.detach() / gradient_accumulation_steps
         for name, v in parts.items():

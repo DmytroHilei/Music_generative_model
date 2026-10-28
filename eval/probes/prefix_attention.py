@@ -77,13 +77,18 @@ def main():
     p.add_argument('--notes', type=int, default=512)
     p.add_argument('--front', type=int, default=1, help='models without a prefix: the first N positions = "front"')
     p.add_argument('--threads', type=int, default=8)
+    p.add_argument('--starts', action='store_true', help='only windows at a piece start (BOS first), spread over the files')
     args = p.parse_args()
     global REC
     torch.set_num_threads(args.threads)
     ds = NoteWindowDataset(args.store, root_dir='.', split='validation', block_size=args.notes,
                            eval_stride=args.notes, programs=True, special_tokens=True, pad_short=True,
                            captions='data/labels')
-    idx = torch.linspace(0, len(ds) - 1, args.windows).long().tolist()
+    if args.starts:  # the windows at offset 0 (BOS at the first position), spread over the files
+        idx = [i for i, (_, v) in enumerate(ds.windows.tolist()) if v == 0]
+        idx = idx[::max(1, len(idx) // args.windows)][:args.windows]
+    else:
+        idx = torch.linspace(0, len(ds) - 1, args.windows).long().tolist()
     (X, extra), _ = collate_windows([ds[i] for i in idx], extra_names=('program', 'text'))
     encoder, states = None, None
     gpt.F.scaled_dot_product_attention = recording_sdpa

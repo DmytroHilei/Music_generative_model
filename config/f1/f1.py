@@ -1,8 +1,8 @@
 # F1: the caption run of the 450M on a rented RTX 5090 (context/claude/plan_5h_2026-10-23.md "Path to F1",
 # text_control.md "Runs"). Continues long_450m_final with everything the 107M pilots settled, in one run:
 #   - T2 text prefix (16 vectors from frozen LaBSE), EN + UK captions, adapter at 10x LR (text_pilot.py)
-#   - section captions: prefix slots at section starts, lead 0, change-aware, change oversampling 0.5, section
-#     attributes v2 (section_pilot.py, section_long.py, section_v2.py, section_forget.py)
+#   - section captions: prefix slots at section starts, lead 0, change-aware, section attributes v2 (section_pilot.py,
+#     section_long.py, section_v2.py, section_forget.py); change oversampling off since 2026-10-27 (below)
 #   - section recipe s50_v2 (2026-10-23, logs/sections/forget.md): splice 0.5 + caption repeat every 64 notes, no
 #     counterfactual loss (switch mean 0.98 vs 0.94 for all_v2 with cf, at ~half the step cost)
 #   - length control v2 (len2): seconds-to-the-end + progress levels, +-10% target jitter, length tables at 10x LR
@@ -12,18 +12,25 @@
 #     own step after F1 (config/f1/f1_gqa_s1.py)
 # Open until their pilots report (set here to the planned choice): remain_jitter vs remain_slack and length_words
 # (len2 / len2_slack / len2_words).
+# 2026-10-27 (context/claude/block512_plan_2026-10-26.md): starts from f1_plain512_long (plain T2 at block 512 with
+# half the windows at piece starts: the caption is read there) instead of long_450m_final; change oversampling off
+# and half the windows at piece starts (C10: 13.8 captioned openings per step vs 7.6), so the long run keeps most of
+# the reading; window conditions off on captioned windows and evals without them, as in every arm since pilot C. After
+# the cooldown the caption phase (config/f1/f1_cap.py, run by cloud/run/f1_post.sh) rebuilds the reading.
 # Data = the cloud stores (cloud/sync/hub.py) in the text_control.md tiers: GigaMIDI labeled (MidiCaps, XMIDI,
 # GigaMIDI metadata, artists) 0.55, Aria labeled (genre / composer) 0.15, GigaMIDI unlabeled (feature captions) 0.30.
-# Needs on the instance: data/labels/gigamidi_train.features.npz (data_prep/labels/song_features.py; not on the Hub
-# yet: without it the GigaMIDI captions have no instruments / pace / length words and the unlabeled tier none) and
-# checkpoints/long_450m_final/model_bf16.pt.
+# Needs on the instance: data/labels/gigamidi_train.features.npz (data_prep/labels/song_features.py; on the Hub since
+# 2026-10-25: without it the GigaMIDI captions have no instruments / pace / length words and the unlabeled tier none)
+# and checkpoints/f1_plain512_long/model_bf16.pt (from the laptop: cloud/run/f1_ship.sh).
 # Length: ~3B notes (~46k steps; F1 length rule: extend the constant phase only for captions, at the cooldown start
 # from pre_cooldown.pt). On the instance (cloud/README.md), the LR stays (no LR probe: the probe is for pretraining):
 #   python cloud/setup/preflight.py --run f1 --config config/f1/f1.py --hours H --skip-lr-probe
-#   POST_SWEEP=0 cloud/run/launch.sh f1
+#   bash cloud/run/f1_checks.sh
+#   POST_SWEEP=0 POST_RUN="bash cloud/run/f1_post.sh" POST_RUN_DIR=results/f1_post POST_RUN_LIMIT_MIN=150 \
+#       cloud/run/launch.sh f1
 # Laptop (rehearsal, profile): + config/f1/f1_local.py
 init_from = 'finetune'
-init_ckpt = 'checkpoints/long_450m_final/model_bf16.pt'
+init_ckpt = 'checkpoints/f1_plain512_long/model_bf16.pt'   # long_450m_final + 1,500 it of plain T2 at block 512
 out_dir = 'checkpoints/f1'
 wandb_run_name = 'f1'
 
@@ -50,8 +57,10 @@ qk_norm = True
 cond_inst = True
 n_density = 16
 cond_dropout = 0.15
+cond_dropout_captioned = 1.0    # captioned windows without the instrument-set / density conditions (pilot C)
 special_tokens = True
-boundary_frac = 0.5             # 25% of the windows at a piece start, 25% at its end (BOS / EOS, length input)
+boundary_start = 0.5            # half the windows at a piece start (BOS: where the caption is read)
+boundary_end = 0.25             # a quarter at its end (EOS, length input)
 pad_short = True                # short files as one padded window (no packing: one caption per window)
 dropout = 0.0
 label_smoothing = 0.0
@@ -69,7 +78,7 @@ section_mode = 'prefix'
 section_dropout = 0.2
 section_style = 'change'
 section_attrs = 'v2'
-section_change_frac = 0.5
+section_change_frac = 0.0       # 2026-10-27: off (C10); the change windows took half the batch from the openings
 section_change_min = 2
 section_splice_frac = 0.5
 section_repeat = 64
@@ -101,6 +110,7 @@ num_workers = 8
 
 eval_interval = 1000
 eval_iters = 50
+eval_cond = False               # evals with the window conditions 'none', like the 2026-10-26 / 27 arms
 style_eval_songs = 0
 checkpoint_format = 'bf16'
 always_save_checkpoint = True   # the last weights (val CE alone doesn't pick a text model)

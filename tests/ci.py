@@ -666,6 +666,29 @@ def generate_text(s):
     s.generate('text', s.work / 'train-text', '--text', 'a sad rock song with piano, bass and drums', '--cfg-scale', 2)
 
 
+@test('text-eval', gpu=True, needs=('train-text',))
+def text_eval(s):
+    """eval/compare/text_eval.py --setting on train-text: guidance schedule, negative branch, min-p, DRY and best-of
+    paths over 3 prompts x 2 rows x 24 notes; then tools/sweeps/gen_search.py --smoke (stage A, two stage B rungs,
+    the length axis) from the same checkpoint."""
+    out = s.work / 'text_eval'
+    s.run([PY, 'eval/compare/text_eval.py', '--checkpoints', s.work / 'train-text', '--out', out, '--prompts', 3,
+           '--rows', 2, '--notes', 24, '--midi', 1, '--setting', 'base', '--setting', 'open:cfg=3,cfg_notes=8,neg=pair',
+           '--setting', 'warm:cfg=1,cfg_notes=8,cfg_end=2,cfg_linear=1,top_p=none,min_p=0.05',
+           '--setting', 'dry_best:dry=3,dry_key=pitch_class,dry_allowed=4,best_of=2'])
+    if not (out / 'scores.json').exists() or len(json.loads((out / 'scores.json').read_text())) != 4:
+        raise Fail('scores.json without the 4 settings')
+    again = s.run([PY, 'eval/compare/text_eval.py', '--checkpoints', s.work / 'train-text', '--out', out,
+                   '--prompts', 3, '--rows', 2, '--notes', 24, '--setting', 'base'])
+    if 'base' in again.split('## Scoreboard')[0]:
+        raise Fail('a re-run should skip the settings in rows.csv')
+    gs = s.work / 'gen_search'
+    s.run([PY, 'tools/sweeps/gen_search.py', '--checkpoint', s.work / 'train-text', '--out', gs, '--smoke', '--no-mp3'])
+    if not (gs / 'summary.md').exists() or 'Winner' not in (gs / 'summary.md').read_text():
+        raise Fail('gen_search summary without a winner')
+    return 'text_eval settings + gen_search smoke'
+
+
 @test('export-bf16', gpu=True, needs=('generate-gpu',))
 def export_bf16(s):
     """tools/checkpoints/export_bf16.py on train-gpu's best.pt, then generate.py from the export."""
