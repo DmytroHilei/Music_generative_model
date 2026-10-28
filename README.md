@@ -8,6 +8,10 @@ Each position is one note made of compound tokens (pitch, velocity, duration and
 output heads predict these, plus the instrument. The window can be conditioned on the instrument set, density and
 style.
 
+**Contents:** [Try it online](#try-it-online) · [Overview](#overview) · [Architecture](#architecture) ·
+[Pretrained models](#pretrained-models) · [Layout](#layout) · [Setup](#setup) · [Usage](#usage) ·
+[Data and licenses](#data-and-licenses)
+
 ## Try it online
 
 [musicar-ivory.vercel.app](https://musicar-ivory.vercel.app) writes a piece from a caption in English or Ukrainian
@@ -79,11 +83,15 @@ The three pretrained models are on Hugging Face under CC BY-NC-SA 4.0, one repos
 (`model_bf16.pt` for the scripts here; `model.safetensors` + `config.json` without pickle), an architecture diagram
 and a model card:
 
-| Model | Parameters | What it is | Validation (nats / note) | Diagram |
+| Model | Parameters | Context | Validation (nats / note) | Diagram |
 |---|---|---|---|---|
-| [musicar-L](https://huggingface.co/Dimitri-206265/musicar-L) | 464M | multi-instrument (129 instruments), 2,048-note context, window conditions; the base of the planned captioned model | clean GigaMIDI 1.679 | [png](docs/figures/base_450m.png) |
-| [musicar-S](https://huggingface.co/Dimitri-206265/musicar-S) | 108M | the piano model grown to 129 instruments and RoPE; the base of the 107M caption pilots | GigaMIDI 2.232 (original split) | [png](docs/figures/base_107m_band.png) |
-| [musicar-S-piano](https://huggingface.co/Dimitri-206265/musicar-S-piano) | 107M | solo piano, 512-note context; the earlier model | Aria-MIDI 5.706 | [png](docs/figures/base_107m_piano.png) |
+| [musicar-L](https://huggingface.co/Dimitri-206265/musicar-L) | 464M | 2,048 notes, 129 instruments | clean GigaMIDI 1.679 | [png](docs/figures/base_450m.png) |
+| [musicar-S](https://huggingface.co/Dimitri-206265/musicar-S) | 108M | 129 instruments, RoPE | GigaMIDI 2.232 (original split) | [png](docs/figures/base_107m_band.png) |
+| [musicar-S-piano](https://huggingface.co/Dimitri-206265/musicar-S-piano) | 107M | 512 notes, solo piano | Aria-MIDI 5.706 | [png](docs/figures/base_107m_piano.png) |
+
+- **musicar-L:** multi-instrument with window conditions; the base of the planned captioned model.
+- **musicar-S:** the piano model grown to 129 instruments and RoPE; the base of the 107M caption pilots.
+- **musicar-S-piano:** solo piano; the earlier model.
 
 ```bash
 hf download Dimitri-206265/musicar-L --local-dir checkpoints/musicar-L
@@ -96,41 +104,38 @@ The diagrams are [`docs/figures/base_*.tex`](docs/figures) (`figstyle.tex` is th
 
 ## Layout
 
-```
-train.py              training (nanoGPT-style configs: python train.py config/<group>/<run>.py --key=value)
-generate.py           sampling: MIDI + MP3, prompts from files, validation sets or caption retrieval; --config presets
-musicar/              core package
-  model/              gpt.py (transformer, embeddings, cascade heads, KV cache), checkpoint.py (paths, loading into
-                      a grown model, saving), rejected.py (tested-and-rejected options: MoE, future heads, ...)
-  training/           optim.py (AdamW, AdamW8bit, Muon, LR schedule), fp8.py (torchao float8), memory.py (selective
-                      activation checkpointing, spilling to RAM), configurator.py (overrides for train.py)
-  data/               loader.py (tokenization, memory-mapped token stores, the dataset, window conditions),
-                      midi_io.py (tokens -> MIDI, MIDI -> MP3)
-  text/               encoder.py (frozen LaBSE), vocab.py (EN + UK caption vocabulary), captions.py (per-file captions)
-  generation/         sampling.py (KV-cache decoding, CUDA graph, density / instrument / EOS / guidance controls),
-                      piece.py (generate.py as a library: Generator, note stream), settings_router.py (generation
-                      settings from the seed song)
-  serve/              the app engine (python -m musicar.serve): app.py (/v1 HTTP API), jobs.py (queue, event streams),
-                      tokens.py (invite tokens: python -m musicar.serve.tokens add / list / revoke)
-  eval/               evaluations used during training and by the eval/ scripts
-  jobstatus.py        progress files for the dashboard
-config/               run configs: pretrain/, finetune/, pilots/, f1/, smoke.py (stacks on any of them);
-                      generate/ = generation presets (TOML); serve/engine.toml = the app engine's settings
-data/                 datasets, token stores and their metadata (see data/README.md); skryabin/ = the hand-picked songs
-data_prep/            datasets/ (downloads, tokenization into stores, store splits), songs/ (song search, download,
-                      audio -> MIDI, fine-tune CSVs), labels/ (features, labels, pseudo-labels, caption text)
-docs/                 experiment results (experiments.md), figures/ (architecture figure, per-model diagrams, curve
-                      data), model_cards/ (the Hugging Face model cards)
-eval/                 settings/ (sampling sweeps, settings search), compare/ (seeded comparisons, text control,
-                      sample statistics), probes/ (hidden-state probes, label coverage)
-tools/                status.py (dashboard), sweeps/ (fine-tune sweeps), bench/ (GPU / CPU throughput),
-                      checkpoints/ (bf16 export, weight interpolation, checkpoint averaging)
-cloud/                rented-GPU pipeline: setup/ (instance setup, preflight), run/ (launch, auto-resume, stop),
-                      sync/ (Hugging Face Hub checkpoints and data), status/
-tests/                CPU tests per package area: python tests/run.py [filter]  (or pytest tests/)
-web/                  the chat page (Next.js, deployed on Vercel); lib/engine.ts is its only engine client
-legacy/               earlier LSTM and transformer versions
-```
+Entry points at the root:
+
+- `train.py` — training (nanoGPT-style configs: `python train.py config/<group>/<run>.py --key=value`)
+- `generate.py` — sampling: MIDI + MP3, prompts from files, validation sets or caption retrieval; `--config` presets
+
+`musicar/` — the core package:
+
+| Folder | Contents |
+|---|---|
+| `model/` | `gpt.py` (transformer, embeddings, cascade heads, KV cache), `checkpoint.py` (paths, loading into a grown model, saving), `rejected.py` (tested-and-rejected options: MoE, future heads, ...) |
+| `training/` | `optim.py` (AdamW, AdamW8bit, Muon, LR schedule), `fp8.py` (torchao float8), `memory.py` (selective activation checkpointing, spilling to RAM), `configurator.py` (overrides for train.py) |
+| `data/` | `loader.py` (tokenization, memory-mapped token stores, the dataset, window conditions), `midi_io.py` (tokens → MIDI, MIDI → MP3) |
+| `text/` | `encoder.py` (frozen LaBSE), `vocab.py` (EN + UK caption vocabulary), `captions.py` (per-file captions) |
+| `generation/` | `sampling.py` (KV-cache decoding, CUDA graph, density / instrument / EOS / guidance controls), `piece.py` (generate.py as a library: Generator, note stream), `settings_router.py` (generation settings from the seed song) |
+| `serve/` | the app engine (`python -m musicar.serve`): `app.py` (/v1 HTTP API), `jobs.py` (queue, event streams), `tokens.py` (invite tokens: `python -m musicar.serve.tokens add / list / revoke`) |
+| `eval/` | evaluations used during training and by the `eval/` scripts |
+| `jobstatus.py` | progress files for the dashboard |
+
+Other folders:
+
+| Folder | Contents |
+|---|---|
+| `config/` | run configs: `pretrain/`, `finetune/`, `pilots/`, `f1/`, `smoke.py` (stacks on any of them); `generate/` = generation presets (TOML); `serve/engine.toml` = the app engine's settings |
+| `data/` | datasets, token stores and their metadata (see [`data/README.md`](data/README.md)); `skryabin/` = the hand-picked songs |
+| `data_prep/` | `datasets/` (downloads, tokenization into stores, store splits), `songs/` (song search, download, audio → MIDI, fine-tune CSVs), `labels/` (features, labels, pseudo-labels, caption text) |
+| `docs/` | experiment results (`experiments.md`), `figures/` (architecture figure, per-model diagrams, curve data), `model_cards/` (the Hugging Face model cards) |
+| `eval/` | `settings/` (sampling sweeps, settings search), `compare/` (seeded comparisons, text control, sample statistics), `probes/` (hidden-state probes, label coverage) |
+| `tools/` | `status.py` (dashboard), `sweeps/` (fine-tune sweeps), `bench/` (GPU / CPU throughput), `checkpoints/` (bf16 export, weight interpolation, checkpoint averaging) |
+| `cloud/` | rented-GPU pipeline: `setup/` (instance setup, preflight), `run/` (launch, auto-resume, stop), `sync/` (Hugging Face Hub checkpoints and data), `status/` |
+| `tests/` | CPU tests per package area: `python tests/run.py [filter]` (or `pytest tests/`) |
+| `web/` | the chat page (Next.js, deployed on Vercel); `lib/engine.ts` is its only engine client |
+| `legacy/` | earlier LSTM and transformer versions |
 
 `checkpoints/`, `logs/`, `samples/`, `results/` and the data caches are not tracked by git.
 
@@ -147,13 +152,23 @@ MP3 rendering needs `fluidsynth`, `ffmpeg` and a General MIDI soundfont (`fluid-
 ## Usage
 
 ```bash
-.venv/bin/python train.py config/finetune/finetune_ua450.py                       # train / fine-tune
-.venv/bin/python generate.py --config caption --text "A melancholic pop rock song with drums, guitar and bass" \
-    --num-samples 4 --output samples/out.mid                             # sample with a preset
-.venv/bin/python tools/status.py                                         # live dashboard of runs and jobs
+# train / fine-tune
+.venv/bin/python train.py config/finetune/finetune_ua450.py
+
+# sample with a preset
+.venv/bin/python generate.py --config caption \
+    --text "A melancholic pop rock song with drums, guitar and bass" \
+    --num-samples 4 --output samples/out.mid
+
+# live dashboard of runs and jobs
+.venv/bin/python tools/status.py
+
+# continue Ukrainian songs, compare
 .venv/bin/python eval/compare/seed_compare.py --checkpoints checkpoints/a checkpoints/b \
-    --out-dir samples/compare                                            # continue Ukrainian songs, compare
-.venv/bin/python -m musicar.eval.structure_eval --checkpoints checkpoints/a   # whole-song structure metrics
+    --out-dir samples/compare
+
+# whole-song structure metrics
+.venv/bin/python -m musicar.eval.structure_eval --checkpoints checkpoints/a
 ```
 
 ### Generation presets
@@ -162,11 +177,15 @@ MP3 rendering needs `fluidsynth`, `ffmpeg` and a General MIDI soundfont (`fluid-
 so the long sampling settings don't have to be typed each time. Presets stack (`--config a --config b`, the later one
 wins) and any flag given on the command line overrides them, e.g. `--config s50 --cfg-scale 2 --best-of 8`.
 
-| preset | model | settings | typical extra flags |
-|---|---|---|---|
-| `caption` | `multi_control` (band) | the caption picks a real 128-note opening (`--retrieve gigamidi_replay_train`), best 1 of 4 candidates by caption match, DRY repetition penalty on pitch-class chords, 1,500 notes | `--text`, `--num-samples`, `--output` |
-| `s50` | `forget_s50_v2` (107M caption pilot) | from the start token, guidance 3, T 0.9, best of 4, DRY, 1,500 notes | `--text`, `--num-samples`, `--output`; `--retrieve gigamidi_replay_train` to start from a real opening |
-| `piano` | `overfit_adamw8_1e-4` @349 (450M piano fine-tune) | style cover, T 0.9, Δt bias 0.1, density of the prompt | `--prompt song.mid`, `--output` |
+| Preset | Model | Settings |
+|---|---|---|
+| `caption` | `multi_control` (band) | the caption picks a real 128-note opening (`--retrieve gigamidi_replay_train`), best 1 of 4 candidates by caption match, DRY repetition penalty on pitch-class chords, 1,500 notes |
+| `s50` | `forget_s50_v2` (107M caption pilot) | from the start token, guidance 3, T 0.9, best of 4, DRY, 1,500 notes |
+| `piano` | `overfit_adamw8_1e-4` @349 (450M piano fine-tune) | style cover, T 0.9, Δt bias 0.1, density of the prompt |
+
+Typical extra flags: `--text`, `--num-samples` and `--output` for `caption` and `s50` (add
+`--retrieve gigamidi_replay_train` to `s50` to start from a real opening); `--prompt song.mid` and `--output` for
+`piano`.
 
 A new preset is one more `.toml` file in `config/generate/`; unknown option names and invalid values are refused.
 
