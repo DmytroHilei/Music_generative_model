@@ -4,7 +4,7 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react';
 import Roll from './Roll';
-import { Arrow, Download, Pause, Pencil, Play, Redo } from './Icons';
+import { Download, Pause, Pencil, Play, Redo } from './Icons';
 import { LENGTHS, PRESETS } from '@/lib/app';
 import { midiBlob } from '@/lib/midi';
 import { endOf, families, fmtTime, FAMILY_LABEL } from '@/lib/notes';
@@ -129,9 +129,6 @@ export default function PieceCard({ piece, onVariation, onEdit }: Props) {
         <div className="settings-line mono">{settings}</div>
         <div className="actions">
           <button type="button" className="act" onClick={onVariation} disabled={streaming}><Redo />Variation</button>
-          <button type="button" className="act primary" disabled title="Needs section captions (F1); coming after the first version">
-            Continue with the next section<Arrow />
-          </button>
           <button type="button" className="act" onClick={onEdit}><Pencil />Edit prompt</button>
           <div className="grow" />
           <button type="button" className="act quiet" disabled={piece.notes.length === 0}
