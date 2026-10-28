@@ -13,6 +13,7 @@ presets in config/generate/ and keyword overrides. Options the checkpoint can't 
 """
 
 import argparse
+import functools
 import random
 import time
 import tomllib
@@ -289,7 +290,8 @@ class NoteStream:
     """sampling.generate's on_notes for one batch -> callback(candidate, notes) per row with new notes, as
     [onset s, program, pitch, duration s, velocity] lists timed as in the row's MIDI: from its first kept note
     (the prompt's with --keep-prompt), BOS left out, nothing from the first EOS on. The length-stop fade-out and
-    --max-polyphony are applied only to the finished Piece."""
+    --max-polyphony are applied only to the finished Piece. Returns True once every row has ended, which stops the
+    generation early (sampling.generate)."""
 
     def __init__(self, callback, first, n_prompt, max_delta=None):
         self.callback, self.first, self.n_prompt, self.max_delta = callback, first, n_prompt, max_delta
@@ -311,6 +313,7 @@ class NoteStream:
             if out:
                 self.onset[r] = out[-1][0]
                 self.callback(self.first + r, out)
+        return len(self.ended) == notes[0].size(0)
 
 
 class Generator:
@@ -572,6 +575,12 @@ def generate_batch(model, config, args, pieces, seed, n_rows, device, progress=N
     n_prompt = 0 if args.keep_prompt and has_prompt else pitch.size(1)
     cond = window_cond(config, args, pitch, delta_time, prompt_programs, has_prompt)
     stream = NoteStream(on_notes, first, n_prompt, args.max_delta) if on_notes is not None else None
+    steps = [0]  # notes generated per row (fewer than --max-new-tokens when the stream stops early)
+
+    def step(n):
+        steps[0] = n
+        if progress is not None:
+            progress(n)
     print(f"Generating {args.max_new_tokens} notes x {n_rows} rows on {device} (seed {seed})...")
     t0 = time.time()
     with torch.no_grad():
@@ -583,7 +592,7 @@ def generate_batch(model, config, args, pieces, seed, n_rows, device, progress=N
             top_p=args.top_p,
             anchor=args.anchor,
             slide=args.slide,
-            progress=progress,
+            progress=step,
             dt_bias=args.dt_bias,
             target_nps=target_nps,
             cuda_graph=not args.no_cuda_graph,
@@ -608,7 +617,8 @@ def generate_batch(model, config, args, pieces, seed, n_rows, device, progress=N
             on_notes=stream,
             notes_every=NOTES_EVERY,
         )
-    print(f"  {n_rows * args.max_new_tokens / (time.time() - t0):.0f} notes/s")
+    print(f"  {n_rows * steps[0] / (time.time() - t0):.0f} notes/s"
+          + (f" (stopped after {steps[0]} notes: every row ended)" if steps[0] < args.max_new_tokens else ""))
     return dict(streams=[t.cpu() for t in (pitch, velocity, duration, delta_time, programs)], labels=labels,
                 n_prompt=n_prompt, seed=seed)
 
@@ -619,8 +629,14 @@ def text_vector(config, prompt, device):
         return None
     if not config.text_dim:
         raise GenerationError("this checkpoint was trained without text")
+    return text_encoder(device).encode([prompt], tokens=config.text_prefix > 0)
+
+
+@functools.cache
+def text_encoder(device):
+    """LaBSE on `device`, loaded once per process (a server reuses it for every request)."""
     from musicar.text.encoder import TextEncoder
-    return TextEncoder(device=device).encode([prompt], tokens=config.text_prefix > 0)
+    return TextEncoder(device=device)
 
 
 def style_id(config, name):

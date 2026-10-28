@@ -79,7 +79,8 @@ def generate(model, pitch, velocity, duration, delta_time, max_new_tokens, tempe
     on_notes: optional callback(a, notes) every notes_every new notes and after the last one: notes a..n-1 of the asked
       rows (prompt included, so the first call starts at 0) as CPU tensors (pitch, velocity, duration, delta_time,
       program), each (B, n - a); notes after a row's EOS are junk, as in the output. Each call waits for the GPU once;
-      an exception raised in it stops the generation (a cancel).
+      an exception raised in it stops the generation (a cancel). Returning True stops it too, keeping the output
+      (every row has ended): the notes not generated stay 0.
     Density control (no retraining; only the delta_time head is touched, every other choice stays the model's):
       dt_bias: fixed logit bias b * log(max(bin, 1)) on delta_time; b > 0 favours longer gaps = fewer notes/s.
       target_nps: notes per second to track (a float, or one per row). A controller nudges each row's bias after
@@ -446,8 +447,10 @@ def generate(model, pitch, velocity, duration, delta_time, max_new_tokens, tempe
             progress(i + 1)
         if on_notes is not None and ((i + 1) % notes_every == 0 or i == max_new_tokens - 1):
             prog = prog_out[:Bo, sent:n] if prog_out is not None else torch.zeros_like(out[0][:Bo, sent:n])
-            on_notes(sent, [o[:Bo, sent:n].cpu() for o in out] + [prog.cpu()])
+            stop = on_notes(sent, [o[:Bo, sent:n].cpu() for o in out] + [prog.cpu()])
             sent = n
+            if stop:
+                break
         if i == max_new_tokens - 1:
             break
         if filled < L:
