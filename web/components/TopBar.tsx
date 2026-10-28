@@ -6,7 +6,7 @@ import { useEffect, useRef, useState } from 'react';
 import { Chevron, Menu } from './Icons';
 import { MODELS, useApp } from '@/lib/app';
 
-const LABEL = { checking: 'checking the engine…', online: 'laptop engine online', busy: 'engine busy', offline: 'engine offline', mock: 'mock engine' };
+const LABEL = { checking: 'checking the engine…', online: 'laptop engine online', busy: 'writing a piece…', offline: 'engine offline', mock: 'mock engine' };
 
 export default function TopBar({ title, line = false, onMenu }: { title?: string; line?: boolean; onMenu: () => void }) {
   const { settings, setSettings, status, statusDetail } = useApp();
