@@ -1,10 +1,10 @@
 'use client';
 
 // Where the page finds the engine: the mock, the laptop through this site's /v1 (next dev forwards it), or a URL; and
-// the invite code the engine asks for (an invite link fills it in).
+// access: Sign in with GitHub (app/api/auth/github/*) or the code of an invite link.
 
 import { useEffect, useRef, useState } from 'react';
-import { useApp } from '@/lib/app';
+import { REQUEST_ACCESS_URL, useApp } from '@/lib/app';
 
 export default function SettingsDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
   const { settings, setSettings, statusDetail } = useApp();
@@ -27,7 +27,11 @@ export default function SettingsDialog({ open, onClose }: { open: boolean; onClo
   }, [open, kind, settings.engine, settings.token]);
 
   const save = () => {
-    setSettings({ engine: choice === 'mock' ? 'mock' : choice === 'local' ? '' : url.trim(), token: code.trim() });
+    const token = code.trim();
+    setSettings({
+      engine: choice === 'mock' ? 'mock' : choice === 'local' ? '' : url.trim(), token,
+      account: token === settings.token ? settings.account : '', // a pasted code is no GitHub sign-in
+    });
     onClose();
   };
 
@@ -50,8 +54,14 @@ export default function SettingsDialog({ open, onClose }: { open: boolean; onClo
         <input type="radio" name="engine" checked={choice === 'mock'} onChange={() => setChoice('mock')} />
         <span>Mock engine<small>replays the docs/listen pieces at the laptop’s speed; no GPU needed</small></span>
       </label>
+      <div className="signin">
+        <span>Access<small>{settings.account ? `signed in as ${settings.account}`
+          : settings.token ? 'with an invite code' : 'the engine writes pieces only for approved people'}</small></span>
+        <a className="act primary" href="/api/auth/github/login">Sign in with GitHub</a>
+        <a className="act quiet" href={REQUEST_ACCESS_URL} target="_blank" rel="noreferrer">Request access</a>
+      </div>
       <label className="radio">
-        <span style={{ flex: 1 }}>Invite code<small>from your invite link (set by opening it); the engine writes pieces only with one</small>
+        <span style={{ flex: 1 }}>Invite code<small>set by an invite link or a GitHub sign-in; paste one by hand if you have it</small>
           <input className="field mono" type="password" value={code} placeholder="mus_…" aria-label="Invite code"
             autoComplete="off" spellCheck={false} onChange={(e) => setCode(e.target.value)} />
         </span>

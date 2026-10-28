@@ -47,8 +47,10 @@ export interface Engine {
 export class EngineError extends Error {}
 
 // the engine answers 401 to calls without a valid invite token (musicar/serve/tokens.py)
-const NO_INVITE = 'Writing pieces needs an invite: open the invite link you were sent, or paste its code in Settings.';
-const BAD_INVITE = 'This invite code is not valid (any more): ask for a new invite link.';
+const NO_INVITE = 'Writing pieces needs access: sign in with GitHub in Settings (once your access request is approved), '
+  + 'or open the invite link you were sent.';
+const BAD_INVITE = 'Your access code is not valid (any more): sign in with GitHub again in Settings, or ask for a new '
+  + 'invite link.';
 
 async function check(res: Response, token = ''): Promise<Response> {
   if (res.ok) return res;

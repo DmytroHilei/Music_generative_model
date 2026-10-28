@@ -30,13 +30,20 @@ export const MODELS = [
 ];
 
 export type Theme = 'dark' | 'light';
-// token: the invite token (an invite link https://…/?invite=mus_… sets it once; Settings can paste it)
-export type Settings = { engine: string; model: string; length: number; preset: string; token: string };
+// token: the engine token (an invite link https://…/?invite=mus_… sets it once, GitHub sign-in sets it, Settings can
+// paste it); account: '@login' after a GitHub sign-in, '' otherwise
+export type Settings = { engine: string; model: string; length: number; preset: string; token: string; account: string };
 export type EngineStatus = 'checking' | 'online' | 'busy' | 'offline' | 'mock';
+export type Notice = { kind: 'ok' | 'info' | 'error'; text: string; link?: { href: string; label: string } };
 
+export const REQUEST_ACCESS_URL =
+  'https://github.com/DmytroHilei/Music_generative_model/issues/new?template=access-request.yml';
 const SETTINGS_KEY = 'musicar.settings';
 const THEME_KEY = 'musicar.theme';
-const DEFAULTS: Settings = { engine: DEFAULT_ENGINE, model: 'musicar-L', length: 60, preset: 'balanced', token: '' };
+const SIGNIN_COOKIE = 'musicar_signin'; // set by app/api/auth/github/callback (lib/github.ts), read once here
+const DEFAULTS: Settings = {
+  engine: DEFAULT_ENGINE, model: 'musicar-L', length: 60, preset: 'balanced', token: '', account: '',
+};
 
 // an invite link's token, taken out of the address bar (so it isn't shared on by copying the URL), else null
 function takeInvite(): string | null {
@@ -48,6 +55,35 @@ function takeInvite(): string | null {
   return token;
 }
 
+// the GitHub sign-in's result (?signin=…&as=…&reason=…, and the token cookie on success), taken out of the address
+// bar and the cookie jar, else null
+function takeSignin(): { status: string; as: string; reason: string; token: string } | null {
+  const url = new URL(window.location.href);
+  const status = url.searchParams.get('signin');
+  if (!status) return null;
+  const as = url.searchParams.get('as') ?? '';
+  const reason = url.searchParams.get('reason') ?? '';
+  for (const k of ['signin', 'as', 'reason']) url.searchParams.delete(k);
+  window.history.replaceState(window.history.state, '', url.pathname + url.search + url.hash);
+  const m = document.cookie.match(new RegExp(`(?:^|;\\s*)${SIGNIN_COOKIE}=([^;]+)`));
+  if (m) document.cookie = `${SIGNIN_COOKIE}=; Max-Age=0; path=/`;
+  return { status, as, reason, token: m ? decodeURIComponent(m[1]) : '' };
+}
+
+function signinNotice({ status, as, reason, token }: { status: string; as: string; reason: string; token: string }): Notice {
+  const who = as ? `@${as}` : 'Your GitHub account';
+  if (status === 'ok' && token) return { kind: 'ok', text: `Signed in as @${as}: you can write pieces now.` };
+  if (status === 'pending') return { kind: 'info', text: `${who}: the access request is waiting for approval. Sign in again once it is approved.` };
+  if (status === 'none') {
+    return { kind: 'info', text: `${who} has no access request yet.`, link: { href: REQUEST_ACCESS_URL, label: 'Request access' } };
+  }
+  if (status === 'revoked') return { kind: 'error', text: `Access for ${who} was revoked.` };
+  const why = reason === 'off' ? 'GitHub sign-in is not set up on this site yet.'
+    : reason === 'state' ? 'the sign-in took too long or was opened twice. Try again.'
+      : reason === 'offline' ? 'the engine or GitHub did not answer. Try again in a minute.' : `${reason || 'unknown error'}.`;
+  return { kind: 'error', text: reason === 'off' ? why : `Sign-in failed: ${why}` };
+}
+
 type AppState = {
   ready: boolean;
   chats: Chat[];
@@ -57,6 +93,8 @@ type AppState = {
   setTheme: (t: Theme) => void;
   status: EngineStatus;
   statusDetail: string;
+  notice: Notice | null;
+  dismissNotice: () => void;
   compose: (chatId: string | null, prompt: string) => string;
   deleteChat: (id: string) => void;
 };
@@ -87,6 +125,8 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const [theme, setThemeState] = useState<Theme>('dark');
   const [status, setStatus] = useState<EngineStatus>('checking');
   const [statusDetail, setStatusDetail] = useState('');
+  const [notice, setNotice] = useState<Notice | null>(null);
+  const dismissNotice = useCallback(() => setNotice(null), []);
 
   const commit = useCallback((next: Chat[]) => {
     chatsRef.current = next;
@@ -178,17 +218,20 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     }
   }, []);
 
-  // first load: settings (and an invite link's token), theme, chats; pieces left mid-stream reattach to their job (the
-  // engine keeps its events)
+  // first load: settings (and an invite link's or a GitHub sign-in's token), theme, chats; pieces left mid-stream
+  // reattach to their job (the engine keeps its events)
   useEffect(() => {
     let s = readJSON(SETTINGS_KEY, DEFAULTS);
     const invite = takeInvite();
-    if (invite) {
-      s = { ...s, token: invite };
+    const signin = takeSignin();
+    if (invite) s = { ...s, token: invite, account: '' };
+    if (signin?.status === 'ok' && signin.token) s = { ...s, token: signin.token, account: `@${signin.as}` };
+    if (signin) setNotice(signinNotice(signin));
+    if (invite || signin?.token) {
       try {
         localStorage.setItem(SETTINGS_KEY, JSON.stringify(s));
       } catch {
-        // storage blocked: the invite lasts for this visit
+        // storage blocked: the token lasts for this visit
       }
     }
     settingsRef.current = s;
@@ -219,7 +262,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         const h = await engineFor(settings.engine).health();
         if (!live) return;
         setStatus(h.busy ? 'busy' : 'online');
-        setStatusDetail(`${h.engine} · ${h.model}${h.loaded ? '' : ' (loads on the first piece)'}${h.queue_len ? ` · ${h.queue_len} waiting` : ''}${settings.token ? '' : ' · no invite code'}`);
+        setStatusDetail(`${h.engine} · ${h.model}${h.loaded ? '' : ' (loads on the first piece)'}${h.queue_len ? ` · ${h.queue_len} waiting` : ''}${settings.token ? '' : ' · not signed in'}`);
       } catch {
         if (!live) return;
         setStatus('offline');
@@ -236,8 +279,10 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   }, [settings.engine, settings.token]);
 
   const value = useMemo(() => ({
-    ready, chats, settings, setSettings, theme, setTheme, status, statusDetail, compose, deleteChat,
-  }), [ready, chats, settings, setSettings, theme, setTheme, status, statusDetail, compose, deleteChat]);
+    ready, chats, settings, setSettings, theme, setTheme, status, statusDetail, notice, dismissNotice, compose,
+    deleteChat,
+  }), [ready, chats, settings, setSettings, theme, setTheme, status, statusDetail, notice, dismissNotice, compose,
+    deleteChat]);
 
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
 }

@@ -14,10 +14,11 @@ style.
 and plays it while the notes arrive (piano roll, SoundFont playback, MIDI and MP3 download). The model runs on my
 laptop GPU, so the page writes new pieces only while the laptop is on; it plays the sample pieces otherwise.
 
-Writing pieces needs a personal invite link. To ask for one, open a
-[Request access](https://github.com/DmytroHilei/Music_generative_model/issues/new?template=access-request.yml) issue.
-The link works like a password, so it is sent privately, never in the issue. Open it once in each browser you use:
-the page keeps the code and removes it from the address bar. One link can have two pieces in progress at a time.
+Writing pieces needs approval. Open a
+[Request access](https://github.com/DmytroHilei/Music_generative_model/issues/new?template=access-request.yml) issue;
+once it is labeled `approved`, open the page, go to Settings and press **Sign in with GitHub** with the same account.
+Each browser signs in once and keeps its code; one person can have two pieces in progress at a time. Personal invite
+links (`…/?invite=…`) work as well.
 
 ## Overview
 

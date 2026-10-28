@@ -1,22 +1,14 @@
 name: Request access to the live page
-description: Ask for a personal invite link to musicar-ivory.vercel.app
+description: Ask to write pieces on musicar-ivory.vercel.app
 title: "Access request: "
 labels: ["access-request"]
 body:
   - type: markdown
     attributes:
       value: |
-        The page writes pieces with the model on my laptop GPU, so new pieces need a personal invite link.
-        The link works like a password: it is sent privately, never in this issue.
-  - type: input
-    id: contact
-    attributes:
-      label: Where should the link go?
-      description: >-
-        Everyone who can see this issue sees this field, so give a contact you don't mind showing (e.g. a Telegram
-        @handle), or leave it empty and I'll answer here how to get the link.
-    validations:
-      required: false
+        The page writes pieces with the model on my laptop GPU, so writing needs approval.
+        Once this issue is labeled `approved`, open https://musicar-ivory.vercel.app, go to Settings and press
+        **Sign in with GitHub** with the account that opened this issue. Nothing secret is posted here.
   - type: textarea
     id: plans
     attributes:

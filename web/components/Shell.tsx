@@ -2,6 +2,7 @@
 
 import { createContext, useContext, useState } from 'react';
 import Sidebar from './Sidebar';
+import NoticeBar from './NoticeBar';
 import SettingsDialog from './SettingsDialog';
 import { AppProvider } from '@/lib/app';
 
@@ -16,7 +17,7 @@ export default function Shell({ children }: { children: React.ReactNode }) {
       <MenuCtx.Provider value={() => setMenu(true)}>
         <div className="shell">
           <Sidebar open={menu} onClose={() => setMenu(false)} onSettings={() => { setMenu(false); setSettings(true); }} />
-          <main className="main">{children}</main>
+          <main className="main"><NoticeBar />{children}</main>
         </div>
         <SettingsDialog open={settings} onClose={() => setSettings(false)} />
       </MenuCtx.Provider>
