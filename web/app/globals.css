@@ -230,6 +230,8 @@ dialog.settings p { margin: 0 0 14px; font-size: 13px; color: var(--muted); }
   /* the dock sits on the home bar's safe area, not a fixed distance above the screen's edge */
   .composer-dock { padding: 8px 12px calc(8px + env(safe-area-inset-bottom)); }
   .foot-note { display: none; }
+  /* the model menu spans the screen under the top bar: anchored to its button it ran off the left edge */
+  .picker-menu { position: fixed; left: 12px; right: 12px; top: calc(70px + env(safe-area-inset-top)); width: auto; max-width: none; }
   .composer-dock .hints { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; }
   .composer-dock .hints > * { flex: none; white-space: nowrap; }
   .thread { padding-top: 20px; }
