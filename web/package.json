@@ -6,20 +6,28 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "predev": "node scripts/assets.mjs",
+    "prebuild": "node scripts/assets.mjs"
   },
   "dependencies": {
+    "next": "15.5.28",
     "react": "19.1.0",
     "react-dom": "19.1.0",
-    "next": "15.5.28"
+    "spessasynth_core": "4.3.20",
+    "spessasynth_lib": "4.3.14",
+    "wasm-media-encoders": "0.7.0"
   },
   "devDependencies": {
-    "typescript": "^5",
+    "@eslint/eslintrc": "^3",
     "@types/node": "^20",
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "eslint": "^9",
     "eslint-config-next": "15.5.28",
-    "@eslint/eslintrc": "^3"
+    "typescript": "^5"
+  },
+  "overrides": {
+    "spessasynth_core": "4.3.20"
   }
 }

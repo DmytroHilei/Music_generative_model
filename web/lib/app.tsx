@@ -5,6 +5,7 @@
 
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { DEFAULT_ENGINE, engineFor, type Engine } from './engine';
+import { loadBank } from './sound';
 import { loadChats, newId, removeChat, saveChat, type Chat, type Piece } from './store';
 import { titleOf } from './vocab';
 
@@ -136,6 +137,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     commit([chat, ...chatsRef.current.filter((c) => c.id !== chat.id)]);
     void saveChat(chat);
     void run(chat.id, piece);
+    loadBank().catch(() => {}); // the SoundFont downloads while the engine writes
     return chat.id;
   }, [commit, run]);
 
