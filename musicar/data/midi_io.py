@@ -31,33 +31,37 @@ def tokens_to_midi(pitches, velocities, durations, delta_times,
                    max_polyphony=None, max_delta=None, programs=None):
     """programs (optional, one per note, 128 = drums): one MIDI track per instrument, drums on channel 10 with a
     fixed short length (the model's drum durations are untrained: their loss is masked)."""
-    midi = pretty_midi.PrettyMIDI()
-    tracks = {}
-
-    def track(program):
-        if program not in tracks:
-            drum = program == DRUM_PROGRAM
-            name = 'Drums' if drum else pretty_midi.program_to_instrument_name(program)
-            tracks[program] = pretty_midi.Instrument(program=0 if drum else program, is_drum=drum, name=name)
-        return tracks[program]
-
+    notes = []
     current_time = 0.0
     pending = []  # notes at the current time slot, flushed when time advances
 
     def flush(pending):
-        pending.sort(key=lambda n: n[1].velocity, reverse=True)
-        for prog, note in pending[:max_polyphony] if max_polyphony else pending:
-            track(prog).notes.append(note)
+        pending.sort(key=lambda n: n[4], reverse=True)
+        notes.extend(pending[:max_polyphony] if max_polyphony else pending)
 
-    for onset, prog, pitch, duration, velocity in note_events(pitches, velocities, durations, delta_times,
-                                                              velocity_bins, time_resolution, max_delta, programs):
-        if onset != current_time:
+    for note in note_events(pitches, velocities, durations, delta_times, velocity_bins, time_resolution, max_delta,
+                            programs):
+        if note[0] != current_time:
             flush(pending)
             pending = []
-            current_time = onset
-        pending.append((prog, pretty_midi.Note(velocity=velocity, pitch=pitch, start=onset, end=onset + duration)))
+            current_time = note[0]
+        pending.append(note)
 
     flush(pending)
+    return notes_to_midi(notes)
+
+
+def notes_to_midi(notes):
+    """[onset s, program, pitch, duration s, velocity] notes (note_events) -> PrettyMIDI, one track per instrument in
+    program order, drums (program 128) on channel 10."""
+    tracks = {}
+    for onset, prog, pitch, duration, velocity in notes:
+        if prog not in tracks:
+            drum = prog == DRUM_PROGRAM
+            name = 'Drums' if drum else pretty_midi.program_to_instrument_name(prog)
+            tracks[prog] = pretty_midi.Instrument(program=0 if drum else prog, is_drum=drum, name=name)
+        tracks[prog].notes.append(pretty_midi.Note(velocity=velocity, pitch=pitch, start=onset, end=onset + duration))
+    midi = pretty_midi.PrettyMIDI()
     midi.instruments.extend(tracks[k] for k in sorted(tracks))
     return midi
 

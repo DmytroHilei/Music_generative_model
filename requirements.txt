@@ -9,3 +9,7 @@ rich
 torchao
 transformers
 spylls
+# app engine (musicar/serve) and its tests
+fastapi
+uvicorn
+httpx
