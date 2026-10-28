@@ -65,7 +65,7 @@ def generate(model, pitch, velocity, duration, delta_time, max_new_tokens, tempe
              cond=None, text=None, sections=None, text_neg=None, sections_neg=None, cfg_section=None,
              cfg_boost=0.0, cfg_boost_notes=32, length_seconds=None, eos_ramp=0.0, length_stop=0.0, eos_floor=0.0,
              dry_multiplier=0.0, dry_base=1.15, dry_allowed=16, dry_key='notes', cfg_notes=0, cfg_end=1.0,
-             cfg_linear=False, min_p=None, on_notes=None, notes_every=16):
+             cfg_linear=False, min_p=None, on_notes=None, notes_every=16, hold=None, hold_at=None):
     """
     Batched sampling (B rows, same prompt length) with a preallocated KV cache: each new note costs one position
     through the model, not a full re-run. On CUDA the one-note transformer step is captured once as a CUDA graph
@@ -139,9 +139,15 @@ def generate(model, pitch, velocity, duration, delta_time, max_new_tokens, tempe
       'pitch_class'): when the last m >= dry_allowed chords repeat an earlier passage, the pitches that would continue
       it lose dry_multiplier * dry_base^(m - dry_allowed) logits (after guidance, before temperature). Prompt notes
       count as earlier passages.
+    hold: a callable run once, when the sequence reaches hold_at notes (default section_len: the first section is
+      written), with the Bo rows' notes so far on the CPU (pitch, velocity, duration, delta_time, programs; prompt
+      included). It returns (states, allowed): states = token states (Bo, L, text_dim) of a section caption that every
+      later section of each row gets (section_len models; all-zero = null; None = no change), allowed = per row the
+      instruments left for the rest (a list, or None = no change; within allowed_programs; ignored without sampled
+      instruments). Guidance drops the section caption as usual. The call syncs the GPU once.
     Special tokens (pitch vocab 130): BOS is never sampled; EOS (end of piece) not before min_new notes. Rows keep
     running after their EOS (batch shapes stay fixed); cut them at the first EOS when writing MIDI.
-    Nothing here syncs the GPU with the CPU inside the loop.
+    Nothing here syncs the GPU with the CPU inside the loop (except the one hold call).
     """
     L = model.config.block_size
     slide = slide or L // 4
@@ -262,6 +268,31 @@ def generate(model, pitch, velocity, duration, delta_time, max_new_tokens, tempe
     if sample_programs and allowed_programs is not None:
         prog_mask = torch.full((n_prog,), -float('Inf'), device=device)
         prog_mask[torch.as_tensor(list(allowed_programs), device=device)] = 0.0
+
+    hold_at = hold_at or S
+    assert hold is None or hold_at, 'hold needs hold_at (or a section_len model)'
+
+    def held(n):
+        """(sec_vecs, prog_mask) after the hold call at note n: the returned section caption for sections >= 1, the
+        returned instruments as a per-row mask on top of allowed_programs."""
+        notes = [o[:Bo, :n].cpu() for o in out] + [
+            prog_out[:Bo, :n].cpu() if prog_out is not None else torch.zeros_like(out[0][:Bo, :n]).cpu()]
+        states, allowed = hold(notes)
+        vecs, mask = sec_vecs, prog_mask
+        if states is not None and S:
+            st = torch.as_tensor(states, dtype=torch.float32, device=device).reshape(1, Bo, *states.shape[-2:])
+            st = torch.cat([st] + [torch.zeros_like(st)] * (n_br - 1), 1)  # guided halves: null sections
+            vecs = torch.cat([sec_vecs[:1], model.section_vectors(st)])
+        if allowed is not None and sample_programs:
+            base = set(range(n_prog)) if allowed_programs is None else set(allowed_programs)
+            mask = torch.zeros(Bo, n_prog, device=device)
+            for r, a in enumerate(allowed):
+                keep = sorted(set(a) & base) if a is not None else []
+                if keep:  # a row the lock would leave without an instrument keeps the old mask
+                    mask[r] = -float('Inf')
+                    mask[r, keep] = 0.0
+            mask = mask if prog_mask is None else mask + prog_mask
+        return vecs, mask
 
     note_program = [None]  # the instrument just sampled for the note being decided (the cascade samples it first)
     base_scale = cfg_section if double else cfg_scale
@@ -428,6 +459,8 @@ def generate(model, pitch, velocity, duration, delta_time, max_new_tokens, tempe
         return model.encode(*step_in, style=step_style, program=step_prog, cache=cache, cond=cond, text=text,
                             sections=step_sec, remain=step_remain)
 
+    if hold is not None and n0 >= hold_at:  # the prompt covers the first section already
+        sec_vecs, prog_mask = held(n0)
     h, filled = prefill(n0)
     sent = 0  # on_notes: notes handed over so far
     for i in range(max_new_tokens):
@@ -442,6 +475,8 @@ def generate(model, pitch, velocity, duration, delta_time, max_new_tokens, tempe
         if rep is not None:
             rep.push(new[0][:Bo, 0], new[3][:Bo, 0], prog_out[:Bo, n] if prog_out is not None else rep.prog)
         n += 1
+        if hold is not None and n == hold_at:  # before section hold_at's caption arrives (below)
+            sec_vecs, prog_mask = held(n)
         if target is not None:
             # per-row integral controller on log density, bias kept in [-2, 6]; stays on the GPU
             w = min(n, 64)
