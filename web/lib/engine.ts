@@ -36,7 +36,8 @@ export type EngineEvent =
   | { type: 'started'; seed: number; settings: Record<string, unknown> }
   | { type: 'notes'; candidate: number; notes: Note[] }
   | { type: 'done'; best: number; n_notes: number; duration_s: number; seed: number; elapsed_s: number; candidates: Candidate[] }
-  | { type: 'error'; message: string };
+  | { type: 'error'; message: string }
+  | { type: 'cancelled'; notes_streamed: number };
 
 export interface Engine {
   health(): Promise<Health>;
