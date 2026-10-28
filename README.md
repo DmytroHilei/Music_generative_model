@@ -52,7 +52,7 @@ Full results: [`docs/experiments.md`](docs/experiments.md).
 
 ![Captioned music model](docs/figures/architecture.png)
 
-The figure shows the captioned layout of the 450M model as F1 will train it: 477M trainable parameters, the 464M
+The figure shows the captioned layout of the 450M model as F1 trained it: 477M trainable parameters, the 464M
 base with full attention plus the two caption adapters (13M).
 The sections are numbered in reading order:
 
@@ -70,9 +70,11 @@ The sections are numbered in reading order:
 - **8–9: training stages and the audio → MIDI pipeline** that builds the Ukrainian fine-tune set.
 - **10–11: glossary and references.**
 
-Status: the music model without captions is trained. The caption stage at 450M (the F1 run) is still planned, so the
-caption results in the figure come from 107M pilots. F1 will also add a length-control input (roadmap item 11), not
-drawn yet; infilling (item 12) comes in a later fine-tune.
+Status: F1 is trained (rented RTX 5090, 2026-10-27/28): a long run of 31,098 iterations at 2,048 notes (held-out
+1.882 nats / note), then a 600-iteration caption phase at 512 notes, half of the windows at piece starts
+(`checkpoints/f1_cap`, held-out 1.898). The caption phase raises the caption-following score F (text_eval) at
+guidance 2 from 0.82 to 1.03. The caption results in the figure still come from the 107M pilots. F1 also has a
+length-control input (roadmap item 11), not drawn yet; infilling (item 12) comes in a later fine-tune.
 
 The figure is TikZ / pgfplots: [`docs/figures/architecture.tex`](docs/figures/architecture.tex) (PDF and SVG next to
 it). [`docs/figures/curves_data.py`](docs/figures/curves_data.py) rebuilds the curve data from the run logs, then
@@ -90,7 +92,7 @@ and a model card:
 | [musicar-S](https://huggingface.co/Dimitri-206265/musicar-S) | 108M | 129 instruments, RoPE | GigaMIDI 2.232 (original split) | [png](docs/figures/base_107m_band.png) |
 | [musicar-S-piano](https://huggingface.co/Dimitri-206265/musicar-S-piano) | 107M | 512 notes, solo piano | Aria-MIDI 5.706 | [png](docs/figures/base_107m_piano.png) |
 
-- **musicar-L:** multi-instrument with window conditions; the base of the planned captioned model.
+- **musicar-L:** multi-instrument with window conditions; the base of F1, the captioned model (not released yet).
 - **musicar-S:** the piano model grown to 129 instruments and RoPE; the base of the 107M caption pilots.
 - **musicar-S-piano:** solo piano; the earlier model.
 
@@ -178,15 +180,33 @@ MP3 rendering needs `fluidsynth`, `ffmpeg` and a General MIDI soundfont (`fluid-
 so the long sampling settings don't have to be typed each time. Presets stack (`--config a --config b`, the later one
 wins) and any flag given on the command line overrides them, e.g. `--config s50 --cfg-scale 2 --best-of 8`.
 
-| Preset | Model | Settings |
-|---|---|---|
-| `caption` | `multi_control` (band) | the caption picks a real 128-note opening (`--retrieve gigamidi_replay_train`), best 1 of 4 candidates by caption match, DRY repetition penalty on pitch-class chords, 1,500 notes |
-| `s50` | `forget_s50_v2` (107M caption pilot) | from the start token, guidance 3, T 0.9, best of 4, DRY, 1,500 notes |
-| `piano` | `overfit_adamw8_1e-4` @349 (450M piano fine-tune) | style cover, T 0.9, Δt bias 0.1, density of the prompt |
+| | `f1` | `caption` | `s50` | `piano` |
+|---|---|---|---|---|
+| **For** | songs from a caption (the app's default) | songs from a caption, borrowed opening | songs from a caption (older pilot) | piano covers of a song |
+| **Checkpoint** | `checkpoints/f1_cap` | `checkpoints/multi_control` | `checkpoints/forget_s50_v2` | `checkpoints/overfit_adamw8_1e-4`, it 349 |
+| **Model** | F1 after the caption phase, 477M | 450M multi-instrument with instrument-set conditioning, 464M | 107M caption pilot (section arm s50), 119M | 450M piano fine-tune, 464M |
+| **Starts from** | the start token (the app: optionally a real opening) | a real 128-note GigaMIDI opening picked by the caption | the start token | the `--prompt` MIDI |
+| **Caption** | read by the model, guidance 2.5 | picks the opening and ranks the candidates; the model has no text input | read by the model, guidance 3 | — |
+| **Temperature** | 1.1 | 0.85 (default) | 0.9 | 0.9 |
+| **Candidates** | 1 | best 1 of 4 by caption match | best 1 of 4 by caption match | 1 |
+| **Repetition** | DRY 3 on pitch-class chords | DRY 3 on pitch-class chords | DRY 3 on pitch-class chords | — |
+| **Length** | `--length-seconds` (model input), no end before 85% of it, at most 2,048 notes | 1,500 notes | 1,500 notes | 512 notes (default) |
+| **Other** | stops a row at 1.2× the length | instruments sampled | instruments sampled | style cover, Δt bias 0.1, density of the prompt |
+| **Chosen by** | gen_search 2026-10-28: b19, J 0.786 (b20 0.709, b14 0.560; F1 without the caption phase 0.295, gated out) | listening, 2026-10-24 | cfg 1 / 2 / 3 comparison, 2026-10-24 | listening, 2026-10-12 |
 
-Typical extra flags: `--text`, `--num-samples` and `--output` for `caption` and `s50` (add
-`--retrieve gigamidi_replay_train` to `s50` to start from a real opening); `--prompt song.mid` and `--output` for
-`piano`.
+DRY = the repetition penalty of `musicar/generation/repetition.py` (multiplier 3; a passage may repeat 16 chords
+verbatim, then the penalty grows 1.15× per further chord). J = F − 0.25 Q, the decoding-settings search score of
+`tools/sweeps/gen_search.py`: F = caption following, Q = distance to real songs plus runaway and copy penalties
+(results in `results/gen_search/f1/`). Starting `f1` from a retrieved opening (`--retrieve gigamidi_replay_train`) scored J 0.992
+vs 0.805 from the start token in the same check; the app has it as the "Real opening" switch.
+
+```bash
+.venv/bin/python generate.py --config f1 --text "A melancholic pop rock song with drums, guitar and bass" \
+    --length-seconds 60 --output samples/f1.mid
+.venv/bin/python generate.py --config caption --text "..." --num-samples 4 --output samples/caption.mid
+.venv/bin/python generate.py --config s50 --text "..." --num-samples 4 --output samples/s50.mid
+.venv/bin/python generate.py --config piano --prompt song.mid --output samples/cover.mid
+```
 
 A new preset is one more `.toml` file in `config/generate/`; unknown option names and invalid values are refused.
 

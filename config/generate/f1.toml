@@ -1,4 +1,5 @@
-# F1 from captions (2026-10-28, the app engine's default): the 450M with caption, section and length inputs, from BOS,
+# F1 from captions (2026-10-28, the app engine's default): the 450M with caption, section and length inputs after
+# the 600-it caption phase (f1_cap; the long run's final weights in checkpoints/f1 fail the search's gates), from BOS,
 # with the gen_search winner b19 (guidance 2.5, T 1.1, DRY 3 on pitch-class chords). --length-seconds is the model's
 # length input; eos-ramp / length-stop end rows that run over (not tuned: gen_search's length axis has not run);
 # eos-floor 0.85: no end before 85% of the length (2026-10-28: 1 in 6 rows of 120 s ended at ~45 s on its own).
