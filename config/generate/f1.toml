@@ -6,8 +6,13 @@
 # block-size 2048: f1_cap's checkpoint keeps its caption phase's 512 (the long run trained at 2048; RoPE), which kept
 # only the last 512 notes in view past ~40-60 s.
 # Usage: generate.py --config f1 --text "..." --length-seconds 60 --output x.mid
+# keep-style + lock-instruments (2026-10-28, 3 captions x 2 seeds x 120 s): after the first 256 notes their own
+# description is the section caption of the rest and only their instruments (+ named families not yet played) remain:
+# density max / min over the quarters 8.1x -> 4.3x, loudness swing 16 -> 7, instruments in the last quarter 10 -> 4.
 checkpoint = "checkpoints/f1_cap"
 block-size = 2048
+keep-style = true
+lock-instruments = true
 sample-instruments = true
 cfg-scale = 2.5
 temperature = 1.1

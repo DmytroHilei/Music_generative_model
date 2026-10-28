@@ -565,6 +565,10 @@ def test_hold_caption():
     assert cap == hold_caption(tok, prog) and 'piano' in cap and 'drums' in cap, cap  # the same words every time
     assert 'string' not in cap  # 5 instruments: the 3 with the most notes
     assert hold_caption(tok[:0], prog[:0]) == ''
+    fast = tok.copy()
+    fast[:, 3] = rng.choice([0, 0, 1, 2], 256)  # ~50 notes/s: no 'busy' / 'dense' held
+    assert 'busy' in hold_caption(fast, prog, calm_above=1e9), hold_caption(fast, prog, calm_above=1e9)
+    assert not {'busy', 'dense'} & set(hold_caption(fast, prog).lower().split()), hold_caption(fast, prog)
 
 
 if __name__ == '__main__':
