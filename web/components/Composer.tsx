@@ -29,7 +29,8 @@ function usePhone(): boolean {
 }
 
 export default function Composer({ variant, text, setText, onSubmit, typeRef, startOpen = true }: Props) {
-  const { settings, setSettings } = useApp();
+  const { settings, setSettings, lang, t } = useApp();
+  const examples = EXAMPLES[lang];
   const home = variant === 'home';
   const [ph, setPh] = useState('');
   const [turn, setTurn] = useState(0);
@@ -88,18 +89,18 @@ export default function Composer({ variant, text, setText, onSubmit, typeRef, st
     let pos = 0, dir = 1, hold = 8;
     const id = window.setInterval(() => {
       if (hold > 0) { hold--; return; }
-      const full = EXAMPLES[shown.current];
+      const full = examples[shown.current];
       if (dir > 0) {
         pos++;
         if (pos >= full.length) { dir = -1; hold = 48; }
       } else {
         pos -= 3;
-        if (pos <= 0) { pos = 0; dir = 1; hold = 8; shown.current = (shown.current + 1) % EXAMPLES.length; }
+        if (pos <= 0) { pos = 0; dir = 1; hold = 8; shown.current = (shown.current + 1) % examples.length; }
       }
-      setPh(EXAMPLES[shown.current].slice(0, pos) + '▍');
+      setPh(examples[shown.current].slice(0, pos) + '▍');
     }, 45);
     return () => window.clearInterval(id);
-  }, [home, text]);
+  }, [home, text, examples]);
 
   const submit = () => {
     if (empty) return;
@@ -114,7 +115,7 @@ export default function Composer({ variant, text, setText, onSubmit, typeRef, st
   const onKey = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (home && e.key === 'Tab' && !e.shiftKey && !text) {
       e.preventDefault();
-      typeInto(EXAMPLES[shown.current]);
+      typeInto(examples[shown.current]);
     } else if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
       e.preventDefault();
       submit();
@@ -123,61 +124,62 @@ export default function Composer({ variant, text, setText, onSubmit, typeRef, st
 
   const dice = () => {
     setTurn((v) => v + 180 + 90 * Math.floor(Math.random() * 3));
-    typeInto(randomPrompt());
+    typeInto(randomPrompt(lang));
   };
 
   const len = LENGTHS.findIndex((l) => l.s === settings.length);
+  const lenLabel = len >= 0 ? t(LENGTHS[len].label) : t('{n} s', { n: settings.length });
   const checks = !empty && !home ? check(text) : null;
 
   return (
     <div ref={box} className={`composer${home ? ' big' : ''}${collapsed ? ' collapsed' : ''}`}>
-      <label htmlFor={`prompt-${variant}`} className="sr-only">Describe the music</label>
+      <label htmlFor={`prompt-${variant}`} className="sr-only">{t('Describe the music')}</label>
       <textarea
         id={`prompt-${variant}`} ref={area} rows={home ? 3 : collapsed ? 1 : 2} value={text} onKeyDown={onKey}
         onFocus={() => setOpen(true)}
         onChange={(e) => { if (typing.current) window.clearInterval(typing.current); setText(e.target.value); }}
-        placeholder={home ? ph || '▍' : collapsed ? 'Describe the music…' : 'Describe the music… e.g. Повільна сумна мелодія для фортепіано'}
+        placeholder={home ? ph || '▍' : collapsed ? t('Describe the music…') : t('Describe the music… e.g. Повільна сумна мелодія для фортепіано')}
       />
       {!home && empty && (
         <div className="hints">
-          <span style={{ padding: '0 4px' }}>Try</span>
-          {SUGGESTIONS.map((s) => <button key={s} type="button" className="try" onClick={() => typeInto(s)}>{s}</button>)}
+          <span style={{ padding: '0 4px' }}>{t('Try')}</span>
+          {SUGGESTIONS[lang].map((s) => <button key={s} type="button" className="try" onClick={() => typeInto(s)}>{s}</button>)}
         </div>
       )}
       {checks && model.captions && (
         <div className="hints">
-          {checks.fields.map((f) => <span key={f.name} className={`check${f.ok ? ' ok' : ''}`}>{f.ok ? '✓' : '–'} {f.name}</span>)}
-          <span style={{ paddingLeft: 4 }}>{checks.hint}</span>
+          {checks.fields.map((f) => <span key={f.name} className={`check${f.ok ? ' ok' : ''}`}>{f.ok ? '✓' : '–'} {t(f.name)}</span>)}
+          <span style={{ paddingLeft: 4 }}>{t(checks.hint)}</span>
         </div>
       )}
       <div className="controls">
         {home ? (
-          <button type="button" className="ctl dice" onClick={dice}><Dice turn={turn} />Random prompt</button>
+          <button type="button" className="ctl dice" onClick={dice}><Dice turn={turn} />{t('Random prompt')}</button>
         ) : (
-          <button type="button" className="ctl icon dice" onClick={dice} aria-label="Random prompt"><Dice size={18} turn={turn} /></button>
+          <button type="button" className="ctl icon dice" onClick={dice} aria-label={t('Random prompt')}><Dice size={18} turn={turn} /></button>
         )}
         <button type="button" className="ctl" onClick={() => setSettings({ length: LENGTHS[(len + 1) % LENGTHS.length].s })}
-          aria-label={`Length ${LENGTHS[len]?.label ?? ''}, click to change`}>
-          <Clock />{LENGTHS[len]?.label ?? `${settings.length} s`}
+          aria-label={t('Length {len}, click to change', { len: lenLabel })}>
+          <Clock />{lenLabel}
         </button>
-        <div className="seg" role="group" aria-label="Preset">
+        <div className="seg" role="group" aria-label={t('Preset')}>
           {PRESETS.map((p) => (
-            <button key={p.id} type="button" aria-pressed={settings.preset === p.id} onClick={() => setSettings({ preset: p.id })}>{p.label}</button>
+            <button key={p.id} type="button" aria-pressed={settings.preset === p.id} onClick={() => setSettings({ preset: p.id })}>{t(p.label)}</button>
           ))}
         </div>
         {model.captions && (
           <button type="button" className="ctl" aria-pressed={settings.opening}
             onClick={() => setSettings({ opening: !settings.opening })}
-            title="Start from the first notes of a real song that fits the caption (same genre and mood); they are not in the result. Variation picks another song.">
-            Real opening
+            title={t('Start from the first notes of a real song that fits the caption (same genre and mood); they are not in the result. Variation picks another song.')}>
+            {t('Real opening')}
           </button>
         )}
         <div className="grow" />
-        {home && empty && <span className="tabhint"><kbd>Tab</kbd>use this one</span>}
+        {home && empty && <span className="tabhint"><kbd>Tab</kbd>{t('use this one')}</span>}
         {home ? (
-          <button type="button" className="compose-btn" onClick={submit} disabled={empty}><Note />Compose</button>
+          <button type="button" className="compose-btn" onClick={submit} disabled={empty}><Note />{t('Compose')}</button>
         ) : (
-          <button type="button" className="send-btn" onClick={submit} disabled={empty} aria-label="Compose"><Up /></button>
+          <button type="button" className="send-btn" onClick={submit} disabled={empty} aria-label={t('Compose')}><Up /></button>
         )}
       </div>
     </div>

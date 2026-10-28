@@ -5,7 +5,7 @@
 import { useApp } from '@/lib/app';
 
 export default function NoticeBar() {
-  const { notice, dismissNotice } = useApp();
+  const { notice, dismissNotice, t } = useApp();
   if (!notice) return null;
   return (
     <div className={`notice ${notice.kind}`} role="status">
@@ -13,7 +13,7 @@ export default function NoticeBar() {
         {notice.text}
         {notice.link && <> <a href={notice.link.href} target="_blank" rel="noreferrer">{notice.link.label}</a></>}
       </span>
-      <button type="button" className="act quiet" onClick={dismissNotice} aria-label="Dismiss">×</button>
+      <button type="button" className="act quiet" onClick={dismissNotice} aria-label={t('Dismiss')}>×</button>
     </div>
   );
 }

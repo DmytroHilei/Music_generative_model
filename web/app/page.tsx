@@ -12,7 +12,7 @@ import { MODELS, useApp } from '@/lib/app';
 import { INGREDIENTS, parse, toggle } from '@/lib/vocab';
 
 export default function Home() {
-  const { compose, settings } = useApp();
+  const { compose, settings, lang, t } = useApp();
   const router = useRouter();
   const openMenu = useMenu();
   const [text, setText] = useState('');
@@ -32,26 +32,26 @@ export default function Home() {
       <div className="hero">
         <HeroBars samples={samples} />
         <div className="hero-text">
-          <span className="eyebrow mono">text to MIDI · English or Ukrainian</span>
-          <h1>What should it play?</h1>
-          <p>Describe a piece in one sentence. musicar writes it note by note, and you hear it while it is still writing.</p>
+          <span className="eyebrow mono">{t('text to MIDI · English or Ukrainian')}</span>
+          <h1>{t('What should it play?')}</h1>
+          <p>{t('Describe a piece in one sentence. musicar writes it note by note, and you hear it while it is still writing.')}</p>
         </div>
       </div>
       <div className="wrap" style={{ paddingTop: 28 }}>
         <div className="col">
           <Composer variant="home" text={text} setText={setText} onSubmit={submit} typeRef={typeRef} />
           {!model.captions && (
-            <div className="note-box">{model.id} does not read captions yet: it writes freely and ignores the prompt. Pick musicar-L for text control.</div>
+            <div className="note-box">{t('{model} does not read captions yet: it writes freely and ignores the prompt. Pick musicar-L for text control.', { model: model.id })}</div>
           )}
           <div className="ingredients">
             {INGREDIENTS.map((row) => (
               <div key={row.field} className="ing-row">
-                <span>{row.label}</span>
+                <span>{t(row.label)}</span>
                 {row.words.map((w) => {
-                  const on = row.field === 'inst' ? sel.inst.includes(w) : sel[row.field] === w;
+                  const on = row.field === 'inst' ? sel.inst.includes(w.id) : sel[row.field] === w.id;
                   return (
-                    <button key={w} type="button" className={`chip${on ? ' on' : ''}`} aria-pressed={on}
-                      onClick={() => setText(toggle(text, row.field, w))}>{w}</button>
+                    <button key={w.id} type="button" className={`chip${on ? ' on' : ''}`} aria-pressed={on}
+                      onClick={() => setText(toggle(text, row.field, w.id, lang))}>{lang === 'uk' ? w.uk : w.id}</button>
                   );
                 })}
               </div>

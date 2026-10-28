@@ -7,7 +7,7 @@ import { useEffect, useRef, useState } from 'react';
 import { REQUEST_ACCESS_URL, useApp } from '@/lib/app';
 
 export default function SettingsDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
-  const { settings, setSettings, statusDetail } = useApp();
+  const { settings, setSettings, statusDetail, t } = useApp();
   const ref = useRef<HTMLDialogElement>(null);
   const kind = settings.engine === 'mock' ? 'mock' : settings.engine === '' ? 'local' : 'url';
   const [choice, setChoice] = useState(kind);
@@ -37,38 +37,38 @@ export default function SettingsDialog({ open, onClose }: { open: boolean; onClo
 
   return (
     <dialog ref={ref} className="settings" onClose={onClose} aria-labelledby="settings-title">
-      <h2 id="settings-title">Engine</h2>
-      <p>Where pieces are written. Now: {statusDetail || 'checking…'}</p>
+      <h2 id="settings-title">{t('Engine')}</h2>
+      <p>{t('Where pieces are written. Now: {s}', { s: statusDetail || t('checking…') })}</p>
       <label className="radio">
         <input type="radio" name="engine" checked={choice === 'local'} onChange={() => setChoice('local')} />
-        <span>Laptop engine<small>python -m musicar.serve on 127.0.0.1:8000, reached through this site’s /v1</small></span>
+        <span>{t('Laptop engine')}<small>{t('python -m musicar.serve on 127.0.0.1:8000, reached through this site’s /v1')}</small></span>
       </label>
       <label className="radio">
         <input type="radio" name="engine" checked={choice === 'url'} onChange={() => setChoice('url')} />
-        <span style={{ flex: 1 }}>Engine URL<small>an engine on another address (Tailscale later; needs CORS on the engine)</small>
-          <input className="field mono" value={url} placeholder="https://laptop.tailnet.ts.net" aria-label="Engine URL"
+        <span style={{ flex: 1 }}>{t('Engine URL')}<small>{t('an engine on another address (Tailscale later; needs CORS on the engine)')}</small>
+          <input className="field mono" value={url} placeholder="https://laptop.tailnet.ts.net" aria-label={t('Engine URL')}
             onChange={(e) => { setUrl(e.target.value); setChoice('url'); }} />
         </span>
       </label>
       <label className="radio">
         <input type="radio" name="engine" checked={choice === 'mock'} onChange={() => setChoice('mock')} />
-        <span>Mock engine<small>replays the docs/listen pieces at the laptop’s speed; no GPU needed</small></span>
+        <span>{t('Mock engine')}<small>{t('replays the docs/listen pieces at the laptop’s speed; no GPU needed')}</small></span>
       </label>
       <div className="signin">
-        <span>Access<small>{settings.account ? `signed in as ${settings.account}`
-          : settings.token ? 'with an invite code' : 'the engine writes pieces only for approved people'}</small></span>
-        <a className="act primary" href="/api/auth/github/login">Sign in with GitHub</a>
-        <a className="act quiet" href={REQUEST_ACCESS_URL} target="_blank" rel="noreferrer">Request access</a>
+        <span>{t('Access')}<small>{settings.account ? t('signed in as {who}', { who: settings.account })
+          : settings.token ? t('with an invite code') : t('the engine writes pieces only for approved people')}</small></span>
+        <a className="act primary" href="/api/auth/github/login">{t('Sign in with GitHub')}</a>
+        <a className="act quiet" href={REQUEST_ACCESS_URL} target="_blank" rel="noreferrer">{t('Request access')}</a>
       </div>
       <label className="radio">
-        <span style={{ flex: 1 }}>Invite code<small>set by an invite link or a GitHub sign-in; paste one by hand if you have it</small>
-          <input className="field mono" type="password" value={code} placeholder="mus_…" aria-label="Invite code"
+        <span style={{ flex: 1 }}>{t('Invite code')}<small>{t('set by an invite link or a GitHub sign-in; paste one by hand if you have it')}</small>
+          <input className="field mono" type="password" value={code} placeholder="mus_…" aria-label={t('Invite code')}
             autoComplete="off" spellCheck={false} onChange={(e) => setCode(e.target.value)} />
         </span>
       </label>
       <div className="dialog-foot">
-        <button type="button" className="act" onClick={onClose}>Cancel</button>
-        <button type="button" className="act primary" onClick={save} disabled={choice === 'url' && !url.trim()}>Save</button>
+        <button type="button" className="act" onClick={onClose}>{t('Cancel')}</button>
+        <button type="button" className="act primary" onClick={save} disabled={choice === 'url' && !url.trim()}>{t('Save')}</button>
       </div>
     </dialog>
   );
