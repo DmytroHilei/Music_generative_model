@@ -129,7 +129,8 @@ def create_app(config=None):
             args = settings(config.base, **{**config.presets[preset], **req.overrides}, text=req.prompt.strip() or None,
                             length_seconds=req.length_s, seed=seed, best_of=req.best_of, num_samples=1,
                             batch_size=min(req.best_of, config.batch_candidates),
-                            max_new_tokens=min(MAX_NOTES, int(req.length_s * NOTES_PER_S)), **opening)
+                            max_new_tokens=min(MAX_NOTES, int(req.length_s * NOTES_PER_S)), length_after_prompt=True,
+                            **opening)
         except GenerationError as e:
             raise HTTPException(422, str(e))
         try:
