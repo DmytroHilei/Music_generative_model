@@ -24,7 +24,7 @@ export const PRESETS: { id: string; label: string; overrides: Record<string, num
 ];
 
 export const MODELS = [
-  { id: 'musicar-L', size: '464M', desc: 'Multi-instrument, reads English and Ukrainian captions', captions: true, available: true },
+  { id: 'musicar-L', size: '477M', desc: 'Multi-instrument, reads English and Ukrainian captions', captions: true, available: true },
   { id: 'musicar-S', size: '108M', desc: 'Multi-instrument, faster; does not read the prompt yet', captions: false, available: false },
   { id: 'musicar-S-piano', size: '107M', desc: 'Solo piano; does not read the prompt yet', captions: false, available: false },
 ];
