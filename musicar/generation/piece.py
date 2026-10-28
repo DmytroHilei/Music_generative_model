@@ -193,6 +193,9 @@ def build_parser():
                              "match the prompt's own density. Only the delta_time head is biased")
     parser.add_argument("--dt-bias", type=float, default=0.0,
                         help="fixed bias toward longer gaps (> 0 = calmer); with --density it's the starting value")
+    parser.add_argument("--block-size", type=int, default=None,
+                        help="the generation window in notes (default: the checkpoint's block_size, which is its last "
+                             "training phase's window: 512 for f1_cap); RoPE models take any value")
     parser.add_argument("--slide", type=int, default=None,
                         help="notes dropped per KV-cache rebuild past the window (default block_size // 4)")
     parser.add_argument("--max-polyphony", type=int, default=None,
@@ -336,6 +339,7 @@ class Generator:
             dtype, torch.bfloat16 if self.device == "cuda" else torch.float32)
         self.model, self.iter = load_model(checkpoint, self.device, self.dtype)
         self.config = self.model.config
+        self.block_size = self.config.block_size  # the checkpoint's; --block-size sets it per run
         self.checkpoint = resolve_checkpoint(checkpoint)
         print(f"Checkpoint: {self.checkpoint} (iter {self.iter}), "
               f"device {self.device}, {str(self.dtype).replace('torch.', '')}")
@@ -351,6 +355,10 @@ class Generator:
             args.prompt_notes = 128 if args.retrieve else 64
         if args.best_of < 1:
             raise GenerationError("--best-of must be at least 1")
+        block = args.block_size or self.block_size
+        if block > self.block_size and config.pos_emb != 'rope':
+            raise GenerationError(f"--block-size {block}: learned positions stop at {self.block_size}")
+        config.block_size = block
         if args.retrieve and (args.prompt or args.val_prompt):
             raise GenerationError("--retrieve takes the prompts from its store: drop --prompt / --val-prompt")
         if args.retrieve and not args.text:

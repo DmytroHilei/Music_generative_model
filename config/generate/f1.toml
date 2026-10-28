@@ -2,8 +2,11 @@
 # with the gen_search winner b19 (guidance 2.5, T 1.1, DRY 3 on pitch-class chords). --length-seconds is the model's
 # length input; eos-ramp / length-stop end rows that run over (not tuned: gen_search's length axis has not run);
 # eos-floor 0.85: no end before 85% of the length (2026-10-28: 1 in 6 rows of 120 s ended at ~45 s on its own).
+# block-size 2048: f1_cap's checkpoint keeps its caption phase's 512 (the long run trained at 2048; RoPE), which kept
+# only the last 512 notes in view past ~40-60 s.
 # Usage: generate.py --config f1 --text "..." --length-seconds 60 --output x.mid
 checkpoint = "checkpoints/f1_cap"
+block-size = 2048
 sample-instruments = true
 cfg-scale = 2.5
 temperature = 1.1
