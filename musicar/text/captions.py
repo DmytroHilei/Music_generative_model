@@ -65,6 +65,7 @@ SECTION_P = dict(instruments=0.7, pace=0.6, dynamics=0.6, register=0.5, drums=1.
 # sections, Spearman -0.06 with onsets/s): 'busy' no longer has to stand for stacked chords
 SECTION_Q_V2 = dict(rhythm=(4.17, 8.88), dynamics=(18.25, 25.0), register=(54.2, 64.2), texture=(2.0, 5.2))
 SECTION_ATTRS = ('v1', 'v2')
+HOLD_CALM_NPS = 25.0  # hold_caption: no 'busy' / 'dense' above this many notes/s (real band songs ~5-15)
 LEVEL_KEYS = ('pace', 'dynamics', 'register', 'rhythm', 'texture')
 # change-aware section captions (section_caption prev=, loader section_style 'change'): what changed vs the previous
 # section is always named (entering instruments first, at most CHANGE_INSTRUMENTS), the rest subsampled with these
@@ -442,11 +443,17 @@ def section_caption(tok, prog, rng=random, uk_share=UK_SHARE, lang=None, prev=No
     return render_en(keep, rng) if lang == 'en' else render_uk(keep, rng)
 
 
-def hold_caption(tok, prog, version='v2'):
+def hold_caption(tok, prog, version='v2', calm_above=HOLD_CALM_NPS):
     """An English section caption of a stretch of notes with every attribute section_attributes finds, worded the
     same way every time: generation's style hold (sampling.generate hold), where the opening's description is the
-    section caption of the rest of the piece. More than 3 instruments: the 3 with the most notes. '' for no notes."""
+    section caption of the rest of the piece. More than 3 instruments: the 3 with the most notes. Above calm_above
+    notes/s the high rhythm / texture words ('busy', 'dense') are left out: held, they pushed an already dense opening
+    into a runaway (2026-10-28, 1 of 6 pieces at 40-50 notes/s to the end). '' for no notes."""
     attrs = section_attributes(tok, prog, version)
+    if len(tok) and len(tok) / max(float(tok[1:, 3].sum()) * DT, 0.5) > calm_above:
+        for k in ('rhythm', 'pace', 'texture'):
+            if attrs.get(k) == 'high':
+                attrs.pop(k)
     ids = attrs.get('instruments')
     if ids and len(ids) > 3:
         counts = {}

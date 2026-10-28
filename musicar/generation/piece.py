@@ -205,7 +205,7 @@ def build_parser():
                              "the opening's character instead of drifting")
     parser.add_argument("--lock-instruments", action="store_true",
                         help="with --sample-instruments: after the first section, only its instruments (>= 4 notes "
-                             "and 2%% of them) and those the --text names")
+                             "and 2%% of them), plus any instrument family the --text names that it hasn't played")
     parser.add_argument("--slide", type=int, default=None,
                         help="notes dropped per KV-cache rebuild past the window (default block_size // 4)")
     parser.add_argument("--max-polyphony", type=int, default=None,
@@ -685,13 +685,10 @@ def style_hold(config, args, device):
         raise GenerationError("--keep-style needs a checkpoint trained with section captions (section_len)")
     if not (keep or lock):
         return None
-    named = set()
+    families = []  # the instruments the caption names, each as its set of GM programs ('guitar' = all 8 guitars)
     wants = parse_caption(args.text) if args.text else None
     if wants is not None:
-        for _, progs in wants['instruments']:
-            named |= set(progs)
-        if wants['drums']:
-            named.add(DRUM_PROGRAM)
+        families = [set(progs) for _, progs in wants['instruments']] + ([{DRUM_PROGRAM}] if wants['drums'] else [])
 
     def hold(notes):
         pitch, velocity, duration, delta_time, programs = (t.numpy() for t in notes)
@@ -704,7 +701,9 @@ def style_hold(config, args, device):
             caps.append(hold_caption(tok, prog) if keep else '')
             counts = np.bincount(prog, minlength=129)
             present = set(np.flatnonzero((counts >= 4) & (counts >= 0.02 * len(prog))).tolist())
-            allowed.append(sorted(present | named) if lock and present else None)
+            # the opening's own instruments; a named family the opening hasn't played yet stays open
+            late = set().union(*(f for f in families if not f & present))
+            allowed.append(sorted(present | late) if lock and present else None)
             print(f"  style hold, row {r}: " + (f"{caps[-1]!r}" if keep else "")
                   + (f" instruments {instrument_names(allowed[-1])}" if allowed[-1] else ""))
         states = text_encoder(device).encode(caps, tokens=True, max_length=SECTION_TOKENS) if keep else None
