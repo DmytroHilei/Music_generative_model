@@ -18,6 +18,8 @@ auth = true                              # false only for local development (--n
 tokens_db = "data/serve/tokens.sqlite"   # token hashes, relative to the repository (data/ is not in git)
 per_token_jobs = 2                       # unfinished jobs one token may have; more get 429
 cors_origins = ["http://localhost:3000", "https://musicar-ivory.vercel.app"]  # pages that may call the engine
+admin_key_file = "data/serve/admin.key"  # the page's key for minting gh-<login> tokens at GitHub sign-in (made by
+                                         # python -m musicar.serve.tokens admin-key; no file = the route is off)
 
 # The page's three-step control: decoding options on top of `base` (generate.py names); a request's overrides apply
 # after these. balanced = the gen_search winner as in config/generate/f1.toml; faithful / wild are not measured.

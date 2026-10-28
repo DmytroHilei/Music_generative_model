@@ -26,10 +26,16 @@ class EngineConfig:
     tokens_db: str = "data/serve/tokens.sqlite"  # relative to the repository
     per_token_jobs: int = 2  # unfinished jobs per token at most
     cors_origins: list = field(default_factory=lambda: ["http://localhost:3000"])  # pages allowed to call the engine
+    admin_key_file: str = "data/serve/admin.key"  # the page's server key for /v1/admin/invites; missing = route off
 
     @property
     def tokens_path(self):
         return ROOT / self.tokens_db
+
+    @property
+    def admin_key_path(self):
+        return ROOT / self.admin_key_file
+
     @classmethod
     def load(cls, path=CONFIG, **overrides):
         """The TOML file's values, then `overrides` (None = keep the file's)."""
