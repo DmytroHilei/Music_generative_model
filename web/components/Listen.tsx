@@ -5,6 +5,8 @@
 import { useEffect, useState } from 'react';
 import Roll from './Roll';
 import { Pause, Play } from './Icons';
+import { useApp } from '@/lib/app';
+import { translateAny } from '@/lib/i18n';
 import { familyOf, type Note } from '@/lib/notes';
 import { Player } from '@/lib/synth';
 
@@ -40,18 +42,19 @@ function SampleCard({ s, onUse }: { s: Sample; onUse: (p: string) => void }) {
   useEffect(() => () => player.stop(), [player]);
   const start = startOf(s.notes ?? []);
   const thumb = (s.notes ?? []).filter((n) => n[0] >= start && n[0] < start + THUMB_S).map((n) => [n[0] - start, n[1], n[2], n[3], n[4]] as Note);
+  const { lang, t } = useApp();
   return (
     <div className="card">
       <Roll notes={thumb} duration={THUMB_S} thumb />
       <div className="prompt">{s.prompt}</div>
       <div className="foot">
-        <span>{s.instruments}</span>
+        <span>{s.instruments.split(' · ').map((x) => translateAny(lang, x)).join(' · ')}</span>
         <div className="card-actions">
-          <button type="button" className="act ctl icon" aria-label={playing ? 'Stop' : `Play ${s.prompt}`}
+          <button type="button" className="act ctl icon" aria-label={playing ? t('Stop') : t('Play {prompt}', { prompt: s.prompt })}
             onClick={() => { if (player.playing) { player.stop(0); setPlaying(false); } else { void player.play(start); setPlaying(true); } }}>
             {playing ? <Pause size={14} /> : <Play size={14} />}
           </button>
-          <button type="button" className="act" onClick={() => onUse(s.prompt)}>Use prompt</button>
+          <button type="button" className="act" onClick={() => onUse(s.prompt)}>{t('Use prompt')}</button>
         </div>
       </div>
     </div>
@@ -59,11 +62,12 @@ function SampleCard({ s, onUse }: { s: Sample; onUse: (p: string) => void }) {
 }
 
 export function ListenFirst({ samples, onUse }: { samples: Sample[]; onUse: (p: string) => void }) {
+  const { t } = useApp();
   return (
     <section className="listen" aria-labelledby="listen-title">
       <div className="listen-head">
-        <h2 id="listen-title">Listen first</h2>
-        <span>Written by musicar from the prompt alone. Use one as a starting point.</span>
+        <h2 id="listen-title">{t('Listen first')}</h2>
+        <span>{t('Written by musicar from the prompt alone. Use one as a starting point.')}</span>
       </div>
       <div className="cards">
         {samples.map((s) => <SampleCard key={s.name} s={s} onUse={onUse} />)}

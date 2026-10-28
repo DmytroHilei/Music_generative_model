@@ -14,7 +14,7 @@ import { MODELS, useApp } from '@/lib/app';
 
 export default function ChatPage() {
   const { id } = useParams<{ id: string }>();
-  const { chats, ready, compose, settings } = useApp();
+  const { chats, ready, compose, settings, t } = useApp();
   const router = useRouter();
   const openMenu = useMenu();
   const [text, setText] = useState('');
@@ -37,20 +37,20 @@ export default function ChatPage() {
 
   return (
     <>
-      <TopBar title={chat?.title ?? (missing ? 'Not found' : 'New piece')} line onMenu={openMenu} />
+      <TopBar title={chat?.title ?? (missing ? t('Not found') : t('New piece'))} line onMenu={openMenu} />
       <div className="thread">
         <div className="col chat">
           {missing && (
             <div className="empty-chat">
-              <strong>This chat is not in this browser</strong>
-              <div>Chats are kept in the browser that made them. <Link href="/" style={{ color: 'var(--acc-text)' }}>Back home</Link></div>
+              <strong>{t('This chat is not in this browser')}</strong>
+              <div>{t('Chats are kept in the browser that made them.')} <Link href="/" style={{ color: 'var(--acc-text)' }}>{t('Back home')}</Link></div>
             </div>
           )}
           {!chat && !missing && (
             <div className="empty-chat">
               <Logo size={40} />
-              <strong>A new piece</strong>
-              <div>Each message is a caption. After the first piece, Variation and Edit prompt build on it.</div>
+              <strong>{t('A new piece')}</strong>
+              <div>{t('Each message is a caption. After the first piece, Variation and Edit prompt build on it.')}</div>
             </div>
           )}
           {chat?.pieces.map((p) => (
@@ -68,8 +68,8 @@ export default function ChatPage() {
             <Composer variant="chat" text={text} setText={setText} onSubmit={submit} startOpen={!chat} />
             <p className="foot-note">
               {model.captions
-                ? 'musicar writes MIDI from a caption: mood, tempo, instruments and key work best. English or Ukrainian.'
-                : `${model.id} ignores the prompt for now; Compose still writes a new piece.`}
+                ? t('musicar writes MIDI from a caption: mood, tempo, instruments and key work best. English or Ukrainian.')
+                : t('{model} ignores the prompt for now; Compose still writes a new piece.', { model: model.id })}
             </p>
           </div>
         </div>

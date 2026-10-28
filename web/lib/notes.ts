@@ -1,9 +1,11 @@
 // A note as the engine sends it: [onset_s, program, pitch, duration_s, velocity], program 128 = drums.
 export type Note = [number, number, number, number, number];
 
+import type { Key } from './i18n';
+
 export type Family = 'piano' | 'guitar' | 'bass' | 'drums' | 'other';
 
-export const FAMILY_LABEL: Record<Family, string> = {
+export const FAMILY_LABEL: Record<Family, Key> = {
   piano: 'piano',
   guitar: 'guitar',
   bass: 'bass',

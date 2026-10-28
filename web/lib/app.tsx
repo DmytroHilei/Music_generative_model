@@ -5,11 +5,13 @@
 
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { DEFAULT_ENGINE, EngineError, engineFor, type Engine } from './engine';
+import { LANG_COOKIE, translateAny, translator, type Key, type Lang, type T } from './i18n';
 import { loadBank } from './sound';
 import { loadChats, newId, removeChat, saveChat, type Chat, type Piece } from './store';
 import { titleOf } from './vocab';
 
-export const LENGTHS = [
+// labels, descriptions: keys of lib/i18n.ts, shown with useApp().t
+export const LENGTHS: { label: Key; s: number }[] = [
   { label: '30 s', s: 30 },
   { label: '1 min', s: 60 },
   { label: '2 min', s: 120 },
@@ -17,13 +19,13 @@ export const LENGTHS = [
 ];
 
 // faithful / wild are first guesses around the gen_search winner (config/generate/f1.toml = balanced)
-export const PRESETS: { id: string; label: string; overrides: Record<string, number> }[] = [
+export const PRESETS: { id: string; label: Key; overrides: Record<string, number> }[] = [
   { id: 'faithful', label: 'faithful', overrides: { cfg_scale: 3.0, temperature: 1.0 } },
   { id: 'balanced', label: 'balanced', overrides: {} },
   { id: 'wild', label: 'wild', overrides: { cfg_scale: 1.5, temperature: 1.2 } },
 ];
 
-export const MODELS = [
+export const MODELS: { id: string; size: string; desc: Key; captions: boolean; available: boolean }[] = [
   { id: 'musicar-L', size: '477M', desc: 'Multi-instrument, reads English and Ukrainian captions', captions: true, available: true },
   { id: 'musicar-S', size: '108M', desc: 'Multi-instrument, faster; does not read the prompt yet', captions: false, available: false },
   { id: 'musicar-S-piano', size: '107M', desc: 'Solo piano; does not read the prompt yet', captions: false, available: false },
@@ -74,18 +76,18 @@ function takeSignin(): { status: string; as: string; reason: string; token: stri
   return { status, as, reason, token: m ? decodeURIComponent(m[1]) : '' };
 }
 
-function signinNotice({ status, as, reason, token }: { status: string; as: string; reason: string; token: string }): Notice {
-  const who = as ? `@${as}` : 'Your GitHub account';
-  if (status === 'ok' && token) return { kind: 'ok', text: `Signed in as @${as}: you can write pieces now.` };
-  if (status === 'pending') return { kind: 'info', text: `${who}: the access request is waiting for approval. Sign in again once it is approved.` };
+function signinNotice({ status, as, reason, token }: { status: string; as: string; reason: string; token: string }, t: T): Notice {
+  const who = as ? `@${as}` : t('Your GitHub account');
+  if (status === 'ok' && token) return { kind: 'ok', text: t('Signed in as @{as}: you can write pieces now.', { as }) };
+  if (status === 'pending') return { kind: 'info', text: t('{who}: the access request is waiting for approval. Sign in again once it is approved.', { who }) };
   if (status === 'none') {
-    return { kind: 'info', text: `${who} has no access request yet.`, link: { href: REQUEST_ACCESS_URL, label: 'Request access' } };
+    return { kind: 'info', text: t('{who} has no access request yet.', { who }), link: { href: REQUEST_ACCESS_URL, label: t('Request access') } };
   }
-  if (status === 'revoked') return { kind: 'error', text: `Access for ${who} was revoked.` };
-  const why = reason === 'off' ? 'GitHub sign-in is not set up on this site yet.'
-    : reason === 'state' ? 'the sign-in took too long or was opened twice. Try again.'
-      : reason === 'offline' ? 'the engine or GitHub did not answer. Try again in a minute.' : `${reason || 'unknown error'}.`;
-  return { kind: 'error', text: reason === 'off' ? why : `Sign-in failed: ${why}` };
+  if (status === 'revoked') return { kind: 'error', text: t('Access for {who} was revoked.', { who }) };
+  const why = reason === 'off' ? t('GitHub sign-in is not set up on this site yet.')
+    : reason === 'state' ? t('the sign-in took too long or was opened twice. Try again.')
+      : reason === 'offline' ? t('the engine or GitHub did not answer. Try again in a minute.') : `${reason || t('unknown error')}.`;
+  return { kind: 'error', text: reason === 'off' ? why : t('Sign-in failed: {why}', { why }) };
 }
 
 type AppState = {
@@ -95,6 +97,9 @@ type AppState = {
   setSettings: (s: Partial<Settings>) => void;
   theme: Theme;
   setTheme: (t: Theme) => void;
+  lang: Lang;
+  setLang: (l: Lang) => void;
+  t: T;
   status: EngineStatus;
   statusDetail: string;
   notice: Notice | null;
@@ -121,13 +126,20 @@ function readJSON<T>(key: string, fallback: T): T {
   }
 }
 
-export function AppProvider({ children }: { children: React.ReactNode }) {
+// lang: the language the server rendered (app/layout.tsx)
+export function AppProvider({ children, lang: firstLang }: { children: React.ReactNode; lang: Lang }) {
   const [ready, setReady] = useState(false);
   const [chats, setChats] = useState<Chat[]>([]);
   const chatsRef = useRef<Chat[]>([]);
   const [settings, setSettingsState] = useState<Settings>(DEFAULTS);
   const settingsRef = useRef<Settings>(DEFAULTS);
   const [theme, setThemeState] = useState<Theme>('dark');
+  const [lang, setLangState] = useState<Lang>(firstLang);
+  const t = useMemo(() => translator(lang), [lang]);
+  // messages kept with a piece are written in the language of the moment
+  const langRef = useRef(lang);
+  langRef.current = lang;
+  const tr = useCallback<T>((key, vars) => translator(langRef.current)(key, vars), []);
   const [status, setStatus] = useState<EngineStatus>('checking');
   const [statusDetail, setStatusDetail] = useState('');
   const [notice, setNotice] = useState<Notice | null>(null);
@@ -168,7 +180,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
             patch(chatId, pieceId, () => ({ status: 'done', elapsedS: e.elapsed_s, seed: e.seed }), true);
           } else if (e.type === 'error' || e.type === 'cancelled') {
             finished = true;
-            patch(chatId, pieceId, () => ({ status: 'error', error: e.type === 'error' ? e.message : 'Cancelled.' }), true);
+            patch(chatId, pieceId, () => ({ status: 'error', error: e.type === 'error' ? e.message : tr('Cancelled.') }), true);
           }
         });
         if (finished) return;
@@ -177,24 +189,24 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         if ((err as Error).name === 'AbortError') return;
         if (/no such job/.test(msg)) {
           patch(chatId, pieceId, () => ({
-            status: 'error', error: 'The engine no longer has this piece (it restarted, or the piece is more than an hour '
-              + 'old). Use Variation to write it again.',
+            status: 'error',
+            error: tr('The engine no longer has this piece (it restarted, or the piece is more than an hour old). Use Variation to write it again.'),
           }), true);
           return;
         }
         const access = err instanceof EngineError && /invite|access code/.test(msg); // 401: retrying can't help
         if (access || attempt >= RECONNECTS) {
-          patch(chatId, pieceId, () => ({ status: 'error', error: `Lost the engine: ${msg}` }), true);
+          patch(chatId, pieceId, () => ({ status: 'error', error: tr('Lost the engine: {msg}', { msg: translateAny(langRef.current, msg) }) }), true);
           return;
         }
       }
       if (attempt >= RECONNECTS) {
-        patch(chatId, pieceId, () => ({ status: 'error', error: 'Lost the engine: the stream kept breaking.' }), true);
+        patch(chatId, pieceId, () => ({ status: 'error', error: tr('Lost the engine: the stream kept breaking.') }), true);
         return;
       }
       await new Promise((r) => setTimeout(r, 1000 * 2 ** attempt)); // 1, 2, 4 s
     }
-  }, [patch]);
+  }, [patch, tr]);
 
   const run = useCallback(async (chatId: string, piece: Piece) => {
     const engine = engineFor(settingsRef.current.engine, settingsRef.current.token);
@@ -210,10 +222,11 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       const msg = (err as Error).message;
       patch(chatId, piece.id, () => ({
         status: 'error',
-        error: /fetch|network|Failed/i.test(msg) ? 'The engine is offline. Check Settings, or try the mock engine.' : msg,
+        error: /fetch|network|Failed/i.test(msg) ? tr('The engine is offline. Check Settings, or try the mock engine.')
+          : translateAny(langRef.current, msg),
       }), true);
     }
-  }, [follow, patch]);
+  }, [follow, patch, tr]);
 
   const compose = useCallback((chatId: string | null, prompt: string, like?: Piece) => {
     const now = Date.now();
@@ -259,6 +272,12 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     }
   }, []);
 
+  const setLang = useCallback((l: Lang) => {
+    setLangState(l);
+    document.documentElement.lang = l;
+    document.cookie = `${LANG_COOKIE}=${l}; Max-Age=31536000; path=/; SameSite=Lax`;
+  }, []);
+
   // first load: settings (and an invite link's or a GitHub sign-in's token), theme, chats; pieces left mid-stream
   // reattach to their job (the engine keeps its events)
   useEffect(() => {
@@ -267,7 +286,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     const signin = takeSignin();
     if (invite) s = { ...s, token: invite, account: '' };
     if (signin?.status === 'ok' && signin.token) s = { ...s, token: signin.token, account: `@${signin.as}` };
-    if (signin) setNotice(signinNotice(signin));
+    if (signin) setNotice(signinNotice(signin, tr));
     if (invite || signin?.token) {
       try {
         localStorage.setItem(SETTINGS_KEY, JSON.stringify(s));
@@ -286,28 +305,28 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       for (const c of loaded) for (const p of c.pieces) {
         if (p.status === 'done' || p.status === 'error') continue;
         if (p.jobId) void follow(engine, c.id, p.id, p.jobId);
-        else patch(c.id, p.id, () => ({ status: 'error', error: 'Interrupted before the engine took it.' }), true);
+        else patch(c.id, p.id, () => ({ status: 'error', error: tr('Interrupted before the engine took it.') }), true);
       }
     });
-  }, [commit, follow, patch]);
+  }, [commit, follow, patch, tr]);
 
   useEffect(() => {
     let live = true;
     const ask = async () => {
       if (settings.engine === 'mock') {
         setStatus('mock');
-        setStatusDetail('mock engine: replays docs/listen pieces');
+        setStatusDetail(t('mock engine: replays docs/listen pieces'));
         return;
       }
       try {
         const h = await engineFor(settings.engine).health();
         if (!live) return;
         setStatus(h.busy ? 'busy' : 'online');
-        setStatusDetail(`${h.engine} · ${h.model}${h.loaded ? '' : ' (loads on the first piece)'}${h.queue_len ? ` · ${h.queue_len} waiting` : ''}${settings.token ? '' : ' · not signed in'}`);
+        setStatusDetail(`${h.engine} · ${h.model}${h.loaded ? '' : t(' (loads on the first piece)')}${h.queue_len ? t(' · {n} waiting', { n: h.queue_len }) : ''}${settings.token ? '' : t(' · not signed in')}`);
       } catch {
         if (!live) return;
         setStatus('offline');
-        setStatusDetail(settings.engine ? `no answer from ${settings.engine}` : 'no answer from the laptop engine');
+        setStatusDetail(settings.engine ? t('no answer from {engine}', { engine: settings.engine }) : t('no answer from the laptop engine'));
       }
     };
     setStatus('checking');
@@ -317,13 +336,13 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       live = false;
       window.clearInterval(id);
     };
-  }, [settings.engine, settings.token]);
+  }, [settings.engine, settings.token, t]);
 
   const value = useMemo(() => ({
-    ready, chats, settings, setSettings, theme, setTheme, status, statusDetail, notice, dismissNotice, compose,
-    deleteChat,
-  }), [ready, chats, settings, setSettings, theme, setTheme, status, statusDetail, notice, dismissNotice, compose,
-    deleteChat]);
+    ready, chats, settings, setSettings, theme, setTheme, lang, setLang, t, status, statusDetail, notice, dismissNotice,
+    compose, deleteChat,
+  }), [ready, chats, settings, setSettings, theme, setTheme, lang, setLang, t, status, statusDetail, notice,
+    dismissNotice, compose, deleteChat]);
 
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
 }
