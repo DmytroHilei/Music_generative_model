@@ -52,12 +52,12 @@ a { color: inherit; text-decoration: none; }
 :focus-visible { outline: 2px solid var(--acc); outline-offset: 2px; }
 
 /* shell */
-.shell { display: flex; min-height: 100vh; }
+.shell { display: flex; min-height: 100vh; min-height: 100dvh; }
 .side {
   flex: 0 0 256px; padding: 16px 12px; background: var(--side); border-right: 1px solid var(--line);
-  display: flex; flex-direction: column; gap: 2px; position: sticky; top: 0; height: 100vh; overflow-y: auto;
+  display: flex; flex-direction: column; gap: 2px; position: sticky; top: 0; height: 100vh; height: 100dvh; overflow-y: auto;
 }
-.main { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; min-height: 100vh; }
+.main { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; min-height: 100vh; min-height: 100dvh; }
 .menu-btn { display: none; }
 .scrim { display: none; }
 
@@ -145,6 +145,12 @@ a { color: inherit; text-decoration: none; }
 .composer textarea { width: 100%; resize: none; border: 0; outline: none; background: transparent; font-size: 16px; line-height: 1.5; padding: 2px 4px; }
 .composer.big textarea { font-size: 19px; }
 .composer textarea::placeholder { color: var(--muted); opacity: 0.75; }
+/* folded (phone, chat): one line, prompt + send; the same elements, so the keyboard survives opening it */
+.composer.collapsed { flex-direction: row; align-items: center; gap: 8px; padding: 6px 6px 6px 14px; border-radius: 24px; }
+.composer.collapsed textarea { flex: 1; min-width: 0; height: 24px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.composer.collapsed .hints, .composer.collapsed .controls > :not(.send-btn) { display: none; }
+.composer.collapsed .controls { flex: none; }
+.composer.collapsed .send-btn { width: 36px; height: 36px; border-radius: 50%; }
 .controls { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 .grow { flex-grow: 1; }
 .ctl { display: inline-flex; align-items: center; gap: 6px; min-height: 36px; padding: 0 12px; border: 1px solid var(--line); border-radius: 9px; background: transparent; font-size: 13px; }
@@ -220,7 +226,13 @@ dialog.settings p { margin: 0 0 14px; font-size: 13px; color: var(--muted); }
   .scrim.open { display: block; position: fixed; inset: 0; z-index: 15; background: rgba(0, 0, 0, 0.4); }
   .menu-btn { display: inline-flex; align-items: center; justify-content: center; width: 40px; height: 40px; border: 1px solid var(--line); border-radius: 10px; background: var(--surf); }
   .topbar { padding: 12px 16px; }
-  .wrap, .thread, .composer-dock { padding-left: 16px; padding-right: 16px; }
+  .wrap, .thread { padding-left: 16px; padding-right: 16px; }
+  /* the dock sits on the home bar's safe area, not a fixed distance above the screen's edge */
+  .composer-dock { padding: 8px 12px calc(8px + env(safe-area-inset-bottom)); }
+  .foot-note { display: none; }
+  .composer-dock .hints { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; }
+  .composer-dock .hints > * { flex: none; white-space: nowrap; }
+  .thread { padding-top: 20px; }
   .hero { padding: 24px 16px 0; }
   .ing-row > span { width: 100%; }
 }

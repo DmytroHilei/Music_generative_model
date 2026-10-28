@@ -11,7 +11,8 @@ export const metadata: Metadata = {
   description: 'Describe a piece in one sentence; musicar writes it as MIDI, note by note.',
 };
 
-export const viewport: Viewport = { width: 'device-width', initialScale: 1 };
+// viewport-fit=cover: the page reaches under the iPhone's home bar, and env(safe-area-inset-*) says by how much
+export const viewport: Viewport = { width: 'device-width', initialScale: 1, viewportFit: 'cover' };
 
 // the saved theme is set before the first paint, so a light-mode visitor never sees a dark flash
 const THEME = `try{var t=localStorage.getItem('musicar.theme');if(t==='light'||t==='dark')document.documentElement.dataset.theme=t}catch(e){}`;

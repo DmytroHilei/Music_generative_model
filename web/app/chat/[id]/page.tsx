@@ -65,7 +65,7 @@ export default function ChatPage() {
       {!missing && (
         <div className="composer-dock">
           <div className="col chat">
-            <Composer variant="chat" text={text} setText={setText} onSubmit={submit} />
+            <Composer variant="chat" text={text} setText={setText} onSubmit={submit} startOpen={!chat} />
             <p className="foot-note">
               {model.captions
                 ? 'musicar writes MIDI from a caption: mood, tempo, instruments and key work best. English or Ukrainian.'
