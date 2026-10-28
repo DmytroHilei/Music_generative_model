@@ -1,0 +1,79 @@
+[
+ {
+  "name": "slow_piano_1",
+  "prompt": "A slow, quiet solo piano piece in a minor key",
+  "instruments": "piano",
+  "n_notes": 71,
+  "duration_s": 15.7
+ },
+ {
+  "name": "slow_piano_2",
+  "prompt": "A slow, quiet solo piano piece in a minor key",
+  "instruments": "piano",
+  "n_notes": 206,
+  "duration_s": 54.1
+ },
+ {
+  "name": "fast_rock_1",
+  "prompt": "A fast, energetic rock song with drums, electric guitar and bass",
+  "instruments": "guitars · bass · drums",
+  "n_notes": 1000,
+  "duration_s": 28.1
+ },
+ {
+  "name": "fast_rock_2",
+  "prompt": "A fast, energetic rock song with drums, electric guitar and bass",
+  "instruments": "guitars · bass · drums",
+  "n_notes": 1000,
+  "duration_s": 29.0
+ },
+ {
+  "name": "guitar_nodrums_1",
+  "prompt": "A calm acoustic guitar piece without drums, in a high register",
+  "instruments": "guitar",
+  "n_notes": 1000,
+  "duration_s": 372.7
+ },
+ {
+  "name": "guitar_nodrums_2",
+  "prompt": "A calm acoustic guitar piece without drums, in a high register",
+  "instruments": "guitar",
+  "n_notes": 167,
+  "duration_s": 104.0
+ },
+ {
+  "name": "jazz_band_1",
+  "prompt": "A lively jazz piece with piano, double bass and drums",
+  "instruments": "piano · double bass · drums",
+  "n_notes": 1000,
+  "duration_s": 61.1
+ },
+ {
+  "name": "jazz_band_2",
+  "prompt": "A lively jazz piece with piano, double bass and drums",
+  "instruments": "piano · double bass · drums",
+  "n_notes": 1000,
+  "duration_s": 30.7
+ },
+ {
+  "name": "uk_fast_drums_1",
+  "prompt": "Швидка весела пісня з барабанами та електрогітарою",
+  "instruments": "drums · bass · guitar",
+  "n_notes": 1000,
+  "duration_s": 34.6
+ },
+ {
+  "name": "uk_slow_piano_1",
+  "prompt": "Повільна сумна мелодія для фортепіано",
+  "instruments": "piano",
+  "n_notes": 1000,
+  "duration_s": 132.4
+ },
+ {
+  "name": "uk_slow_piano_2",
+  "prompt": "Повільна сумна мелодія для фортепіано",
+  "instruments": "piano",
+  "n_notes": 1000,
+  "duration_s": 90.0
+ }
+]
