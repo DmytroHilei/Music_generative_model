@@ -44,11 +44,6 @@ export function toMidi(notes: Note[]): Uint8Array {
   return new Uint8Array([...header, ...tempo, ...tracks.flat()]);
 }
 
-export function downloadMidi(notes: Note[], name: string) {
-  const blob = new Blob([toMidi(notes) as BlobPart], { type: 'audio/midi' });
-  const a = document.createElement('a');
-  a.href = URL.createObjectURL(blob);
-  a.download = `${name.replace(/[^\p{L}\p{N}]+/gu, '_').replace(/^_|_$/g, '').slice(0, 60) || 'musicar'}.mid`;
-  a.click();
-  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+export function midiBlob(notes: Note[]): Blob {
+  return new Blob([toMidi(notes) as BlobPart], { type: 'audio/midi' });
 }

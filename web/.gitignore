@@ -39,3 +39,7 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# sound runtime files, made by scripts/assets.mjs
+/public/soundfont/
+/public/spessasynth_processor.min.js

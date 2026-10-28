@@ -34,7 +34,9 @@ const PREVIEW_S = 30;
 
 function SampleCard({ s, onUse }: { s: Sample; onUse: (p: string) => void }) {
   const [playing, setPlaying] = useState(false);
-  const [player] = useState(() => new Player(() => s.notes ?? [], () => setPlaying(false), () => startOf(s.notes ?? []) + PREVIEW_S));
+  const [player] = useState(() => new Player(
+    () => s.notes ?? [], () => setPlaying(false), () => startOf(s.notes ?? []) + PREVIEW_S, () => setPlaying(false),
+  ));
   useEffect(() => () => player.stop(), [player]);
   const start = startOf(s.notes ?? []);
   const thumb = (s.notes ?? []).filter((n) => n[0] >= start && n[0] < start + THUMB_S).map((n) => [n[0] - start, n[1], n[2], n[3], n[4]] as Note);
@@ -46,7 +48,7 @@ function SampleCard({ s, onUse }: { s: Sample; onUse: (p: string) => void }) {
         <span>{s.instruments}</span>
         <div className="card-actions">
           <button type="button" className="act ctl icon" aria-label={playing ? 'Stop' : `Play ${s.prompt}`}
-            onClick={() => { if (player.playing) { player.stop(0); setPlaying(false); } else { player.play(start); setPlaying(true); } }}>
+            onClick={() => { if (player.playing) { player.stop(0); setPlaying(false); } else { void player.play(start); setPlaying(true); } }}>
             {playing ? <Pause size={14} /> : <Play size={14} />}
           </button>
           <button type="button" className="act" onClick={() => onUse(s.prompt)}>Use prompt</button>
