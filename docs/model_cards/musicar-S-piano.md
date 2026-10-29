@@ -43,7 +43,8 @@ A 107M-parameter autoregressive transformer that writes solo-piano MIDI one note
 musicar-S-piano is the project's earlier piano base. It is a 14-layer decoder-only transformer over compound note
 tokens (one sequence position = one whole note), pretrained on 2.33B notes of solo-piano MIDI (MAESTRO,
 GiantMIDI-Piano, Aria-MIDI) on one 8 GB laptop GPU in 12.5 hours. It was later grown into [musicar-S](https://huggingface.co/Dimitri-206265/musicar-S) (129
-instruments, 2,048-note context). Both S models are superseded by the [musicar-L](https://huggingface.co/Dimitri-206265/musicar-L) for new work.
+instruments, 2,048-note context). Both S models are superseded for new work by [musicar-L](https://huggingface.co/Dimitri-206265/musicar-L) and its
+captioned fine-tune [musicar-L-caption](https://huggingface.co/Dimitri-206265/musicar-L-caption).
 
 ## Model details
 
@@ -165,10 +166,10 @@ musicar-L, which use 2,048-note windows and other validation sets.
 
 ## Future work
 
-Planned, not done. The S models will not be trained further; they stay as small, cheap bases for pilots (musicar-S is the base of the caption pilots that come before musicar-L's captioned run). The project's next models build
-on musicar-L: first a captioned fine-tune (F1, planned: captions from a frozen multilingual LaBSE encoder, in
-English and Ukrainian, section captions and length control; the recipe is being settled in laptop pilots), then a
-captioned fine-tune on about 5,400 Ukrainian songs transcribed from audio.
+The S models will not be trained further; they stay as small, cheap bases for pilots (musicar-S was the base of the caption pilots that came before musicar-L's captioned run). That run, F1 (captions from a
+frozen multilingual LaBSE encoder, in English and Ukrainian, section captions and length control), is done and
+released as [musicar-L-caption](https://huggingface.co/Dimitri-206265/musicar-L-caption). Planned, not done: a
+captioned fine-tune on about 5,400 Ukrainian songs transcribed from audio (F2).
 
 ## Files
 

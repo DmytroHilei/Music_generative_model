@@ -6,7 +6,7 @@ instrument where stated), unless a row says otherwise. Numbers from different va
 each other. Every comparison below changed one thing at a time; single-seed results are marked as such.
 
 Hardware: a laptop RTX 5060 (8 GB, Blackwell sm_120) for almost everything, and one rented RTX 5090 for the 450M
-pretraining run (~41 h).
+pretraining run (~41 h) and its F1 caption fine-tune (~14 h).
 
 ## 1. Output heads
 
@@ -101,6 +101,8 @@ Kept in [`musicar/model/rejected.py`](../musicar/rejected.py) with their results
 | **450M multi-instrument** (new block, RoPE 2048, 129 instruments, conditioning) | 8.3B notes, GigaMIDI + Aria + Discover | ~41 h, rented RTX 5090, resumable with Hub sync | clean GigaMIDI 1.679, Aria 5.091; −0.56 vs the 108M pilot for ≈ 180× compute |
 | Piano fine-tune of the 450M | Ukrainian piano covers + reductions + 20% Aria pop/rock replay | 350 steps, 8-bit AdamW | distance to the real continuations of 27 held-out covers 0.12–0.13 (4 seeds) vs 0.24 for the earlier best model and for the base; clearly preferred in a 5-song listening comparison |
 | Multi-track fine-tune of the 450M | ~4,800 Ukrainian multi-track songs + 25% GigaMIDI replay | 1,500 steps | target CE 9.30 → 8.53; distance to the real continuation 0.69 vs 1.14 for the base (12 songs, one seed), no density runaways (base: 3 of 12) |
+| F1: caption fine-tune of the 450M (file caption, section captions, length input; Section 10) | 2.04B notes: labeled GigaMIDI 0.55 + labeled Aria 0.15 + GigaMIDI with feature captions 0.30; 30% Ukrainian captions | 31,098 steps, ~14 h, rented RTX 5090, 8-bit AdamW 1e-4, WSD | captioned GigaMIDI 1.882, clean GigaMIDI 1.750 (450M base 1.679); text follow F 0.82 at guidance 2 |
+| Caption phase (f1_cap), released as musicar-L-caption | the F1 mix at 512 notes, half the windows at piece starts, no spliced windows | 600 steps, ~20 min, same GPU | captioned 1.898, clean 1.763; text follow F 1.03 at guidance 2 (EN 1.07, UK 0.97) |
 
 ## 8. Generation and evaluation
 
@@ -173,3 +175,34 @@ these rows). ² validation captions changed.
   said so.
 - **Evaluation:** pooled notes/s (all notes over all seconds) reversed one tempo pair because a few slow pieces
   dominate it; per-piece medians do not. 16 pieces per prompt only resolve large effects.
+
+**450M (F1 and the caption phase).** The 450M was fine-tuned with the T2 file caption, section captions (4 vectors
+every 256 notes, recipe s50_v2) and a length input (seconds to the end and share played), then 600 more steps at 512
+notes with half the windows at piece starts (f1_cap). Text follow F from text_eval on 17 EN + UK caption pairs
+(higher = follows more); length on 32 pieces per target (median end / asked, share ending within 20%).
+
+| Measure | F1 | f1_cap |
+|---|---|---|
+| Caption gain, notes 1–4 / 1–32 | +0.377 / +0.072 | +0.348 / +0.068 |
+| Text follow F, guidance 1 / 2 | 0.77 / 0.82 | 0.82 / 1.03 |
+| Length 30 s | 1.09 / 72% | 1.04 / 75% |
+| Length 60 s | 1.01 / 84% | 0.96 / 81% |
+| Length 120 s | 0.91 / 44% | 0.97 / 56% |
+| Held-out CE, captioned / clean GigaMIDI | 1.882 / 1.750 | 1.898 / 1.763 |
+
+- **The caption phase** cost +0.016 captioned CE and left the opening gain about flat, but raised text follow at
+  guidance 2 from 0.82 to 1.03 and the 120 s length hits from 44% to 56%.
+- **GQA was dropped:** merging the trained 450M's key / value heads by PCA broke the QK-norm model (held-out CE 2.01
+  → 6.57), so F1 kept full attention.
+- **Decoding search** on f1_cap: guidance 2.5, temperature 1.1 and DRY 3 on pitch-class chords (from 16 chords)
+  gave F 1.072; this is `config/generate/f1.toml`.
+  With eos ramp 1, 72% / 75% / 81% of pieces ended within 20% of 30 / 60 / 120 s; the preset's eos ramp 0.5 with eos
+  floor 0.85 and length stop 1.2 was not measured as one set. The search ran with top-p 0.9; the preset has none.
+- **Style hold** (generation only): `--keep-style` uses the first section's own description as the caption of every
+  later section, `--lock-instruments` keeps its instruments. Over 3 captions × 2 seeds × 120 s, density max / min over
+  the quarters fell 8.1× → 4.3×, loudness swing 16 → 7, instruments in the last quarter 10 → 4. 'busy' / 'dense' are
+  not held above 25 notes/s.
+- **Continuation vs other open MIDI models** (32 clean GigaMIDI validation prompts of 128 notes with ≥ 3
+  instruments, 1,000 new notes; D = distance to the real continuations, lower = closer):
+  musicar-L 0.121, musicar-L-caption 0.218, AMT large (780M) 0.289, SkyTNT midi-model tv2o-medium (234M) 0.314,
+  Music-Llama (457M) 0.357.

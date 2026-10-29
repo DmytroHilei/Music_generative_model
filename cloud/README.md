@@ -1,6 +1,7 @@
 # Long run on a rented RTX 5090 (vast.ai): runbook
 
-The 450M multi-instrument pretraining run (`config/pretrain/long_450m.py`) on one rented RTX 5090, paid from a ~EUR 20 budget.
+The 450M multi-instrument pretraining run (`config/pretrain/long_450m.py`) on one rented RTX 5090, paid from a ~EUR 20
+budget, and the F1 caption run after it (`config/f1/f1.py`, section "F1" below; released as `musicar-L-caption`).
 Everything below was rehearsed end to end on the laptop on 2026-10-03 (fresh clone → setup → preflight → launch →
 Hub sync → graceful stop → simulated host loss → pull → resume → finish → laptop pull → generate.py), so the
 paid hours should go to training only.
@@ -112,11 +113,15 @@ the checkpoint is safely on the laptop; the data repo can stay for a later run (
 | AUTO_STOP did nothing | vast.ai didn't provide `CONTAINER_ID` / `CONTAINER_API_KEY` in this image: stop the instance in the console yourself |
 | finish on the laptop instead | `ckpt.py pull`, then edit `run.env`: `MICRO=1 ACCUM=32 ACT_CKPT=-1` (450M fits 8 GB only like this, ~8.8k notes/s), `cloud/run/launch.sh` |
 
-## F1: the caption run (config/f1/f1.py, 2026-10-28)
+## F1: the caption run (config/f1/f1.py, 2026-10-27 / 28)
 
-The same machinery with three F1 scripts around it. The long run starts from `checkpoints/f1_plain512_long` (from the
-laptop), and after it the caption phase (`config/f1/f1_cap.py`) and the before / after evals run on the instance
-before it stops. Times are for the 84 Mbps 5090 host of 2026-10-27; data is ~24 GB (no Discover stores).
+The same machinery with three F1 scripts around it. The long run started from `checkpoints/f1_plain512_long` (from the
+laptop), and after it the caption phase (`config/f1/f1_cap.py`) and the before / after evals ran on the instance
+before it stopped. It ran on one vast.ai RTX 5090 (400 W cap) from 2026-10-27 10:25 UTC to ~02:30 local on
+2026-10-28: 31,098 steps x 65,536 notes (2.04B notes, ~14 h, 1.58 s/step), then `f1_post.sh`: the caption phase
+(600 steps at block 512, ~20 min) and the evals. The caption-phase weights (`checkpoints/f1_cap`) were released on
+2026-10-28 as `Dimitri-206265/musicar-L-caption` (card: `docs/model_cards/musicar-L-caption.md`).
+Times are for the 84 Mbps 5090 host of 2026-10-27; data is ~24 GB (no Discover stores).
 
 | # | where | command | time |
 |---|---|---|---|
@@ -134,8 +139,8 @@ Disk: ~70 GB at the end (data 24, packages 7, LaBSE 2, checkpoints ~30 with the 
 
 After: `.venv/bin/python cloud/sync/ckpt.py pull --run f1` (the long run) and
 `hf download <user>/f1-results --local-dir results/f1_post` (the caption-phase weights, its logs and the evals),
-then destroy the instance. Until the long run ends, `config/f1/f1_cap.py` on the instance can still change (the
-post-run reads it when it starts), e.g. after the length check in step 6.
+then destroy the instance. The post-run reads `config/f1/f1_cap.py` when it starts, so the file on the instance can
+be changed until the long run ends, e.g. after the length check in step 6.
 
 ## Files
 

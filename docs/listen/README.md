@@ -14,9 +14,10 @@ from existing music. The MP3s are cut at 75 seconds with a fade; the MIDI files 
 
 ## How they were made
 
-- Model: the 477M caption checkpoint after the first caption stage (block 512 on piece openings), a research
-  checkpoint on the way to the captioned musicar-L. The prompt goes through a frozen LaBSE encoder into 16 prefix
-  vectors.
+- Model: the 477M caption checkpoint after the first caption stage (block 512 on piece openings,
+  `f1_plain512_long`), the starting point of the F1 run. It is not the released captioned model, which is
+  [musicar-L-caption](https://huggingface.co/Dimitri-206265/musicar-L-caption) (F1 and its caption phase,
+  `f1_cap`). The prompt goes through a frozen LaBSE encoder into 16 prefix vectors.
 - Sampling: classifier-free guidance 2, temperature and top-p as in `generate.py`, a repetition penalty on chords,
   up to 1,000 notes (a piece may end earlier). Each file is one of the best 2 of 8 candidates by an automatic
   caption-match score; one sample was left out after listening; no hand editing.

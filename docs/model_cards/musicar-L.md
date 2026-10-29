@@ -46,8 +46,8 @@ notes of public MIDI data.
 musicar-L is the project's pretrained multi-instrument model. Each sequence position is one whole note, and
 five cascade output heads choose its time shift, instrument, pitch, duration and velocity one after another. It is a
 pretrained model only: it has no text captions, and besides a MIDI prompt its only controls are two optional window
-conditions (the set of instruments and the notes per second). It is the starting point of the project's planned
-captioned model (see Future work).
+conditions (the set of instruments and the notes per second). It is the base of the project's captioned model,
+[musicar-L-caption](https://huggingface.co/Dimitri-206265/musicar-L-caption).
 
 Smaller bases of the same family: [musicar-S-piano](https://huggingface.co/Dimitri-206265/musicar-S-piano) and [musicar-S](https://huggingface.co/Dimitri-206265/musicar-S).
 
@@ -113,12 +113,12 @@ model.eval()
 - Research on symbolic music generation: multi-instrument modelling, sampling, conditioning.
 - Continuing a MIDI prompt (piano or multi-instrument), or generating from the start token.
 - A base for fine-tuning: the project's fine-tunes on Ukrainian songs (piano arrangements and multi-track) start from
-  it, and so does the planned captioned model.
+  it, and so does the captioned model [musicar-L-caption](https://huggingface.co/Dimitri-206265/musicar-L-caption).
 
 Out of scope:
 
 - Commercial use (see License).
-- Text-conditioned generation: this checkpoint has no caption input.
+- Text-conditioned generation: this checkpoint has no caption input; [musicar-L-caption](https://huggingface.co/Dimitri-206265/musicar-L-caption) adds one.
 - Audio: the model reads and writes MIDI notes, not sound.
 
 ## Training data
@@ -190,14 +190,17 @@ The diagram (section 6) shows every evaluation of the run, one every 2,000 steps
 
 ## Future work
 
+Done: the captioned fine-tune (F1) of this model on one rented RTX 5090, released as
+[musicar-L-caption](https://huggingface.co/Dimitri-206265/musicar-L-caption): captions from a frozen multilingual LaBSE encoder in English
+and Ukrainian, section captions that change during a piece, and length control. It keeps full attention:
+grouped-query attention was tested for it and dropped, because merging the heads broke this QK-norm model (held-out
+cross-entropy 2.01 → 6.57).
+
 Planned, not done:
 
-- A captioned fine-tune (F1), planned on a rented RTX 5090: captions from a frozen multilingual LaBSE encoder in English
-  and Ukrainian, section captions that change during a piece, and length control. The recipe is being settled in
-  laptop pilots.
-- Then F2: a captioned fine-tune on about 5,400 Ukrainian songs transcribed from audio.
-- Later: regenerating parts of a piece (infilling), and inference on small devices (int8 / int4 on a Raspberry Pi 5,
-  possibly with grouped-query attention converted after the caption training).
+- F2: a captioned fine-tune on about 5,400 Ukrainian songs transcribed from audio.
+- Later: regenerating parts of a piece (infilling), and inference on small devices (int8 / int4 on a Raspberry Pi 5);
+  a grouped-query attention conversion would be its own optional step.
 
 ## Files
 

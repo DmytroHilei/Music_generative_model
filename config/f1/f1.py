@@ -10,8 +10,7 @@
 #     6.57 at the merge; the 2,400-it rehearsal still 2.115 vs 2.058 for full attention after 600 it) and it was not
 #     what kept captions out; context/claude/caption_450m_2026-10-25.md. A GQA conversion for the Pi, if any, is its
 #     own step after F1 (config/f1/f1_gqa_s1.py)
-# Open until their pilots report (set here to the planned choice): remain_jitter vs remain_slack and length_words
-# (len2 / len2_slack / len2_words).
+# Length settings as run: remain_jitter (not remain_slack) and length_words v2.
 # 2026-10-27 (context/claude/block512_plan_2026-10-26.md): starts from f1_plain512_long (plain T2 at block 512 with
 # half the windows at piece starts: the caption is read there) instead of long_450m_final; change oversampling off
 # and half the windows at piece starts (C10: 13.8 captioned openings per step vs 7.6), so the long run keeps most of
@@ -22,8 +21,9 @@
 # Needs on the instance: data/labels/gigamidi_train.features.npz (data_prep/labels/song_features.py; on the Hub since
 # 2026-10-25: without it the GigaMIDI captions have no instruments / pace / length words and the unlabeled tier none)
 # and checkpoints/f1_plain512_long/model_bf16.pt (from the laptop: cloud/run/f1_ship.sh).
-# Length: ~3B notes (~46k steps; F1 length rule: extend the constant phase only for captions, at the cooldown start
-# from pre_cooldown.pt). On the instance (cloud/README.md), the LR stays (no LR probe: the probe is for pretraining):
+# Ran 2026-10-27 / 28 on one rented RTX 5090: 31,098 steps (2.04B notes; max_iters from f1_checks for 14 h), then
+# config/f1/f1_cap.py (600 it at 512); f1_cap released as musicar-L-caption. On the instance (cloud/README.md), the
+# LR stays (no LR probe: the probe is for pretraining):
 #   python cloud/setup/preflight.py --run f1 --config config/f1/f1.py --hours H --skip-lr-probe
 #   bash cloud/run/f1_checks.sh
 #   POST_SWEEP=0 POST_RUN="bash cloud/run/f1_post.sh" POST_RUN_DIR=results/f1_post POST_RUN_LIMIT_MIN=150 \

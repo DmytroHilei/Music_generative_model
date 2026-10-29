@@ -45,7 +45,8 @@ A 108M-parameter autoregressive transformer that writes multi-instrument MIDI on
 musicar-S is musicar-S-piano, the project's earlier piano base, grown to 129 instruments: each note gained
 an instrument attribute with its own embedding and output head, the learned positions were replaced by RoPE, and the
 context grew from 512 to 2,048 notes. It was then trained for 3,000 steps (197M notes) on GigaMIDI and Aria-MIDI. It is
-the base of the project's 107M caption pilots. For new work it is superseded by the [musicar-L](https://huggingface.co/Dimitri-206265/musicar-L).
+the base of the project's 107M caption pilots. For new work it is superseded by the [musicar-L](https://huggingface.co/Dimitri-206265/musicar-L)
+and, for generation from text, by [musicar-L-caption](https://huggingface.co/Dimitri-206265/musicar-L-caption).
 
 ## Model details
 
@@ -181,11 +182,11 @@ windows, all files).
 
 ## Future work
 
-Planned, not done. The S models will not be trained further; they stay as small, cheap bases for pilots (this
-model is the base of the caption pilots that come before musicar-L's captioned run). The project's next models build on
-musicar-L: first a captioned fine-tune (F1, planned: captions from a frozen multilingual LaBSE encoder, in English
-and Ukrainian, section captions and length control; the recipe is being settled in laptop pilots), then a captioned
-fine-tune on about 5,400 Ukrainian songs transcribed from audio.
+The S models will not be trained further; they stay as small, cheap bases for pilots (this model is the base of the
+caption pilots that came before musicar-L's captioned run). That run, F1 (captions from a frozen multilingual LaBSE
+encoder, in English and Ukrainian, section captions and length control), is done and released as
+[musicar-L-caption](https://huggingface.co/Dimitri-206265/musicar-L-caption). Planned, not done: a captioned fine-tune
+of it on about 5,400 Ukrainian songs transcribed from audio.
 
 ## Files
 
