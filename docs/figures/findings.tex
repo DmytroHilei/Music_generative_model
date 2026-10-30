@@ -119,6 +119,38 @@ SkyTNT medium \rcite{16} & 22.9 & 5.34 & 0 & 0.439 & 0.031 & 0.156 & 0.136 & 0.2
 Music-Llama \rcite{17} & 28.9 & 5.69 & 0.020 & 0.439 & 0.031 & 0.250 & 0.137 & 0.25 & 0.357 & 457M\\
 \end{tabular}}%
 
+\newsavebox{\curveHHp}
+\sbox{\curveHHp}{\begin{tikzpicture}
+\begin{axis}[dots, width=4.6cm, height=3.6cm, ymax=4.6, xmin=0, xmax=0.2, xtick={0,0.05,0.1,0.15,0.2}, ytick={0,...,4},
+    xlabel={D: distance to the real continuations (lower = closer)},
+    yticklabels={{real continuation}, {108M piano covers (ua\_2048\_v2)}, {musicar-L (464M)}, {Aria medium (659M)},
+                 {450M piano-cover fine-tune}}]
+  \draw[black!25, line width=1.2pt] (axis cs:0, 1) -- (axis cs:0.018, 1);
+  \node[anchor=west, font=\scriptsize, text=black!80, inner sep=4pt] at (axis cs:0.018, 1) {0.018};
+  \draw[black!25, line width=1.2pt] (axis cs:0, 2) -- (axis cs:0.040, 2);
+  \node[anchor=west, font=\scriptsize, text=black!80, inner sep=4pt] at (axis cs:0.040, 2) {0.040};
+  \draw[black!25, line width=1.2pt] (axis cs:0, 3) -- (axis cs:0.096, 3);
+  \node[anchor=west, font=\scriptsize, text=black!80, inner sep=4pt] at (axis cs:0.096, 3) {0.096};
+  \draw[black!25, line width=1.2pt] (axis cs:0, 4) -- (axis cs:0.177, 4);
+  \node[anchor=west, font=\scriptsize, text=black!80, inner sep=4pt] at (axis cs:0.177, 4) {0.177};
+  \node[anchor=west, font=\scriptsize, text=black!80, inner sep=4pt] at (axis cs:0, 0) {0 (the reference)};
+  \addplot[black, only marks, mark=*, mark size=2.4pt] table[x=D, y expr=\coordindex, skip coords between index={1}{5}] {curves/h2h_piano.dat};
+  \addplot[tealT, only marks, mark=*, mark size=2.8pt] table[x=D, y expr=\coordindex, skip coords between index={0}{1}, skip coords between index={3}{4}] {curves/h2h_piano.dat};
+  \addplot[altG, only marks, mark=*, mark size=2.4pt] table[x=D, y expr=\coordindex, skip coords between index={0}{3}, skip coords between index={4}{5}] {curves/h2h_piano.dat};
+\end{axis}
+\end{tikzpicture}}%
+
+\newsavebox{\hhPiano}
+\sbox{\hhPiano}{\scriptsize\renewcommand{\arraystretch}{1.3}\setlength{\tabcolsep}{4.5pt}%
+\begin{tabular}{@{}lrrrrrrr@{}}
+system & notes / s & runaway & ended & copies & prompt check & D & params\\\hline
+real continuation & 7.95 & 0 & 0 & 0.001 & 1 & 0 & \\
+\us{108M piano covers} (ua\_2048\_v2, not released) & 8.39 & 0 & 0.34 & 0.001 & 1 & \textbf{0.018} & 108M\\
+\us{musicar-L} & 8.95 & 0 & 0.41 & 0.003 & 1 & \textbf{0.040} & 464M\\
+Aria medium, continuation \rcite{20} & 9.98 & 0.031 & 0.28 & 0.007 & 0.75 & 0.096 & 659M\\
+\us{450M piano-cover fine-tune} (not released) & 3.53 & 0 & 1.00 & 0 & 1 & 0.177 & 464M\\
+\end{tabular}}%
+
 \newsavebox{\textTable}
 \sbox{\textTable}{\scriptsize\renewcommand{\arraystretch}{1.3}\setlength{\tabcolsep}{4.5pt}%
 \begin{tabular}{@{}lrrrrrrrr@{}}
@@ -355,6 +387,7 @@ guidance \rcite{9} & classifier-free guidance: logits pushed away from the capti
 \rh{17}{Music-Llama (SkyTNT architecture, tv2o-large)}{asigalov61/Music-Llama}
 \rf{18}{MIDI-LLM (2025), weights \texttt{slseanwu/MIDI-LLM\_Llama-3.2-1B}}{2511.03942}
 \rf{19}{Text2midi (2024), weights \texttt{amaai-lab/text2midi}}{2412.16526}
+\rh{20}{Aria (2025), continuation weights \texttt{model-gen}}{loubb/aria-medium-base}
 \end{tabular}}%
 
 \begin{tikzpicture}
@@ -392,22 +425,37 @@ guidance \rcite{9} & classifier-free guidance: logits pushed away from the capti
   15\% in the real music), 5.3--5.7 instruments, and Music-Llama runs away in a quarter of the rows. Verbatim copies:
   musicar-L 14\%, SkyTNT 14\%, musicar-L-caption 0 (DRY).};
 \path let \p1 = (h1.south), \p2 = (h2.south), \n1 = {min(\y1, \y2)} in coordinate (A2) at (0, \n1);
-\node[cell, text width=14.4cm] (h3) at (A2) {%
+\node[cell, text width=8.6cm] (h3) at (A2) {%
+  {\footnotesize\bfseries Piano: 32 prompts, 1,000 new notes each}\\[3pt]
+  \usebox{\curveHHp}\\[2pt]
+  Solo-piano prompts from our held-out split of Aria-MIDI (Aria may have seen these files in training). For solo
+  piano D reduces to notes per second and runaway.};
+\node[cell, text width=16.4cm] (h4) at (h3.north east) {%
+  {\footnotesize\bfseries The row metrics behind D (mean over the 32 rows)}\\[5pt]
+  \usebox{\hhPiano}\\[6pt]
+  Aria runs with its authors' CUDA sampler at the README's settings ($T$ 0.98, min-p 0.035), ours at $T$ 0.9. Both
+  continuation models of ours are closer to the real piano than Aria: it plays faster (10.0 vs 8.0 notes per second)
+  and runs away in 1 row of 32; 8 of its 32 files do not open with the prompt's notes as given (prompt check 0.75, an
+  adapter check; ours 1.0). The 450M piano-cover fine-tune is the one model of ours behind Aria: trained to
+  write covers that end, it plays 3.5 notes per second and ends every row inside the 1,000 notes.};
+\path let \p1 = (h3.south), \p2 = (h4.south), \n1 = {min(\y1, \y2)} in coordinate (A3) at (0, \n1);
+\node[cell, text width=14.4cm] (h5) at (A3) {%
   {\footnotesize\bfseries Text to MIDI: the text\_eval captions (EN and UK pairs) from the first note}\\[5pt]
   \usebox{\textTable}\\[6pt]
   F over 9 English and 8 Ukrainian contrasts: \capt{fast} / \capt{slow}, \capt{minor} / \capt{major},
   \capt{loud} / \capt{soft}, \capt{high} / \capt{low} as caption pairs; \capt{solo piano}, \capt{a drum beat},
   \capt{without drums}, \capt{string ensemble}, \capt{electric guitar} each against no caption (no guitar prompt in
   Ukrainian). Caption match: see the glossary.};
-\node[cell, text width=10.6cm] (h4) at (h3.north east) {%
-  {\footnotesize\bfseries Not run (yet)}\\[3pt]
-  Moonbeam (839M) is downloaded (checkpoints/baselines) but not run. The piano continuation
-  against Aria runs on its own prompt set (32 piano prompts with their real continuations); not scored yet. MIDI-LLM writes almost nothing different for Ukrainian captions
-  (F 0.09, English 0.60): it is one Llama 3.2 1B with MIDI tokens added, trained for text to MIDI on MidiCaps' English
-  captions; musicar-L-caption reads both through LaBSE.\\[4pt]
+\node[cell, text width=10.6cm] (h6) at (h5.north east) {%
+  {\footnotesize\bfseries Why MIDI-LLM barely moves in Ukrainian}\\[3pt]
+  MIDI-LLM writes almost nothing different for Ukrainian captions (F 0.09, English 0.60): it is one Llama 3.2 1B
+  with MIDI tokens added, trained for text to MIDI on MidiCaps' English captions; musicar-L-caption reads both
+  languages through LaBSE.\\[4pt]
+  {\footnotesize\bfseries Not run}\\[3pt]
+  Moonbeam (839M) is downloaded (checkpoints/baselines) but not run.\\[4pt]
   {\footnotesize\bfseries Listening}\\[3pt]
   One prompt (p23) with every system as MIDI and mp3: results/head2head/listen/p23.};
-\path let \p1 = (h3.south), \p2 = (h4.south), \n1 = {min(\y1, \y2)} in coordinate (As) at (0, \n1);
+\path let \p1 = (h5.south), \p2 = (h6.south), \n1 = {min(\y1, \y2)} in coordinate (As) at (0, \n1);
 \begin{scope}[on background layer]
   \draw[panel] (A) rectangle (R |- As);
 \end{scope}

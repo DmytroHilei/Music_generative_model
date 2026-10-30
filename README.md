@@ -49,7 +49,8 @@ links (`…/?invite=…`) work as well.
   - the fine-tuned 450M halves the distance to real piano covers vs the earlier best model;
   - continuing 32 real multi-instrument prompts, musicar-L and musicar-L-caption stay closer to the real music than
     every other open model run on the same prompts (distance D 0.121 and 0.218 vs 0.289–0.357 for AMT large, SkyTNT
-    medium and Music-Llama; [comparison](#comparison-with-other-open-models)).
+    medium and Music-Llama), and on solo piano musicar-L beats Aria (0.040 vs 0.096;
+    [comparison](#comparison-with-other-open-models)).
 - **Rejected after testing:** mixture of experts, a bigger pitch head, future-prediction heads, velocity augmentation
   (kept in [`musicar/model/rejected.py`](musicar/model/rejected.py) with their results).
 
@@ -118,6 +119,20 @@ D = distance of six row metrics to the real continuations of the same files, in 
 musicar-L-caption's distance is mostly density: without a requested length it writes shorter, sparser pieces (12.8
 vs 24.0 notes per second). AMT lets one instrument take over 9% of the rows; SkyTNT and Music-Llama add almost no new
 instruments and use fewer of them.
+
+**Piano continuation** of 32 solo-piano prompts from our held-out split of Aria-MIDI (which Aria may have seen in
+training), 1,000 new notes each:
+
+| System | Parameters | Notes / s | Runaway | Ended | D |
+|---|---|---|---|---|---|
+| real continuation | | 7.95 | 0 | 0 | 0 |
+| **108M piano-cover fine-tune** (ua_2048_v2, not released) | 108M | 8.39 | 0 | 0.34 | **0.018** |
+| **musicar-L** | 464M | 8.95 | 0 | 0.41 | **0.040** |
+| [Aria medium](https://huggingface.co/loubb/aria-medium-base) (continuation weights) | 659M | 9.98 | 0.03 | 0.28 | 0.096 |
+| 450M piano-cover fine-tune (not released) | 464M | 3.53 | 0 | 1.00 | 0.177 |
+
+The 450M piano-cover fine-tune writes short covers that end (every row ends inside the 1,000 notes), so it is the one
+model of ours behind Aria here.
 
 **Text to MIDI** from the first note, the text_eval caption pairs in English and Ukrainian: <!-- h2h-text -->running
 (musicar-L-caption vs [MIDI-LLM](https://huggingface.co/slseanwu/MIDI-LLM_Llama-3.2-1B) and

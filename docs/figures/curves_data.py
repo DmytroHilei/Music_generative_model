@@ -16,6 +16,7 @@ f1_run.dat                          step, notes (B), held-out captioned GigaMIDI
                                     (logs/f1/f1_evals.log, from the f1-results Hub repo)
 h2h_cont.dat                        system, D of the head-to-head continuations (results/head2head/scores.json)
 h2h_text.dat                        system, F over the EN / UK pairs of the head-to-head text task (same file)
+h2h_piano.dat                       system, D of the head-to-head piano continuations (same file)
 """
 import json
 import re
@@ -52,6 +53,7 @@ def f1_run():
 
 H2H_CONT = ('real', 'long_450m', 'f1', 'amt', 'skytnt_medium', 'skytnt_large')
 H2H_TEXT = ('f1', 'midi_llm', 'text2midi')
+H2H_PIANO = ('real', 'ua_2048_v2', 'long_450m', 'aria', 'piano')
 
 
 def head2head():
@@ -62,6 +64,8 @@ def head2head():
     rows = [(s, round(text[s]['F_en'], 3), round(text[s]['F_uk'], 3)) for s in H2H_TEXT
             if s in text and text[s].get('F_en') == text[s].get('F_en')]  # nan = not scored yet
     write('h2h_text.dat', ('system', 'F_en', 'F_uk'), rows)
+    piano = scores.get('piano', {})
+    write('h2h_piano.dat', ('system', 'D'), [(s, round(piano[s]['D'], 3)) for s in H2H_PIANO if s in piano])
 
 
 def main():
