@@ -1,4 +1,4 @@
-"""Data for the training-curves row of architecture.tex: parses the run logs into small .dat tables in curves/.
+"""Data for the charts of findings.tex: parses the run logs and results into small .dat tables in curves/.
 
     python docs/figures/curves_data.py
 
@@ -12,7 +12,13 @@ gqa_{full,mean,pca,lw}.dat          step, held-out CE of the 107M GQA conversion
 heads_cascade_s{1,2,3}.dat          step, held-out GigaMIDI CE of the 42M heads A/B (logs/muon_*.log): the cascade
 heads_cascade_mean.dat              (muon_base, seeds 1337 / 2 / 3) and its mean, the same residual heads without the
 heads_{indep,linear}.dat            chain (muon_indep) and independent linear heads (muon_linear), seed 1337
+f1_run.dat                          step, notes (B), held-out captioned GigaMIDI CE, clean GigaMIDI CE of the F1 run
+                                    (logs/f1/f1_evals.log, from the f1-results Hub repo)
+h2h_cont.dat                        system, D of the head-to-head continuations (results/head2head/scores.json)
+h2h_text.dat                        system, F over the EN / UK pairs of the head-to-head text task (same file)
+h2h_piano.dat                       system, D of the head-to-head piano continuations (same file)
 """
+import json
 import re
 from pathlib import Path
 
@@ -36,6 +42,30 @@ def write(name, header, rows):
     lines = [' '.join(header)] + [' '.join(str(v) for v in r) for r in rows]
     (OUT / name).write_text('\n'.join(lines) + '\n')
     print(f'{name}: {len(rows)} rows')
+
+
+def f1_run():
+    clean = dict(evals(LOGS / 'f1/f1_evals.log', 'clean'))
+    write('f1_run.dat', ('step', 'notes', 'ce', 'clean'),
+          [(s, round(s * NOTES_PER_STEP / 1e9, 4), ce, clean[s]) for s, ce in
+           evals(LOGS / 'f1/f1_evals.log', 'heldout_labeled') if s in clean])
+
+
+H2H_CONT = ('real', 'long_450m', 'f1', 'amt', 'skytnt_medium', 'skytnt_large', 'moonbeam')
+H2H_TEXT = ('f1', 's50', 'midi_llm', 'text2midi')
+H2H_PIANO = ('real', 'ua_2048_v2', 'long_450m', 'aria', 'piano')
+
+
+def head2head():
+    scores = json.loads((ROOT / 'results/head2head/scores.json').read_text())
+    cont = scores.get('cont', {})
+    write('h2h_cont.dat', ('system', 'D'), [(s, round(cont[s]['D'], 3)) for s in H2H_CONT if s in cont])
+    text = scores.get('text', {})
+    rows = [(s, round(text[s]['F_en'], 3), round(text[s]['F_uk'], 3)) for s in H2H_TEXT
+            if s in text and text[s].get('F_en') == text[s].get('F_en')]  # nan = not scored yet
+    write('h2h_text.dat', ('system', 'F_en', 'F_uk'), rows)
+    piano = scores.get('piano', {})
+    write('h2h_piano.dat', ('system', 'D'), [(s, round(piano[s]['D'], 3)) for s in H2H_PIANO if s in piano])
 
 
 def main():
@@ -77,6 +107,8 @@ def main():
     for arm in ('indep', 'linear'):
         write(f'heads_{arm}.dat', ('step', 'ce'),
               [(t, ce) for t, ce in evals(LOGS / f'muon_{arm}_s1337.log', 'gigamidi_heldout') if t > 0])
+    f1_run()
+    head2head()
 
 
 if __name__ == '__main__':

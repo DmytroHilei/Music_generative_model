@@ -769,13 +769,17 @@ def perf(s):
 
 @test('docs', timeout=900)
 def docs(s):
-    """pdflatex docs/figures/architecture.tex in a scratch copy (OpenCV builds its docs as a separate job)."""
+    """pdflatex docs/figures/architecture.tex and findings.tex in a scratch copy (OpenCV builds its docs as a separate
+    job)."""
     if not shutil.which('pdflatex'):
         raise Skip('no pdflatex on PATH')
     d = s.work / 'docs'
     shutil.copytree(ROOT / 'docs' / 'figures', d)
-    s.run(['pdflatex', '-interaction=nonstopmode', '-halt-on-error', 'architecture.tex'], cwd=d)
-    return f'{(d / "architecture.pdf").stat().st_size / 1e6:.1f} MB pdf'
+    sizes = []
+    for name in ('architecture', 'findings'):
+        s.run(['pdflatex', '-interaction=nonstopmode', '-halt-on-error', f'{name}.tex'], cwd=d)
+        sizes.append(f'{name} {(d / f"{name}.pdf").stat().st_size / 1e6:.1f} MB')
+    return ', '.join(sizes) + ' pdf'
 
 
 # ---------------------------------------------------------------- runner

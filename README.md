@@ -6,10 +6,12 @@ multi-track band arrangements.
 
 Each position is one note made of compound tokens (pitch, velocity, duration and delta-time on a 20 ms grid). Cascade
 output heads predict these, plus the instrument. The window can be conditioned on the instrument set, density and
-style.
+style. The captioned 450M (musicar-L-caption) also reads a text caption in English or Ukrainian (frozen LaBSE + a
+learned adapter), section captions and a requested length in seconds.
 
 **Contents:** [Try it online](#try-it-online) · [Overview](#overview) · [Architecture](#architecture) ·
-[Pretrained models](#pretrained-models) · [Layout](#layout) · [Setup](#setup) · [Usage](#usage) ·
+[What was found and tested](#what-was-found-and-tested) ·
+[Comparison with other open models](#comparison-with-other-open-models) · [Pretrained models](#pretrained-models) · [Layout](#layout) · [Setup](#setup) · [Usage](#usage) ·
 [Data and licenses](#data-and-licenses)
 
 ## Try it online
@@ -32,8 +34,10 @@ links (`…/?invite=…`) work as well.
   - a Ukrainian target set built from audio: about 5,900 songs separated into stems (Demucs) and transcribed to piano
     reductions and multi-track MIDI, plus ~700 transcribed piano covers.
 - **Models:** from 6M to 450M parameters. The 450M multi-instrument model (RoPE, context 2,048 notes, 129 instruments,
-  instrument-set and density conditioning) was trained on 8.3B notes on a rented RTX 5090 (~41 h). Everything else,
-  including fine-tuning the 450M, ran on an 8 GB laptop GPU (fp8, activation checkpointing, 8-bit optimizer states).
+  instrument-set and density conditioning) was trained on 8.3B notes on a rented RTX 5090 (~41 h). Its caption
+  fine-tune F1 (captions, section captions, length) added 2.04B notes on the same kind of GPU (~14 h) plus a 600-step
+  caption phase (20 min): musicar-L-caption. Everything else, including fine-tuning the 450M on songs, ran on an 8 GB
+  laptop GPU (fp8, activation checkpointing, 8-bit optimizer states).
 - **Method:** one change per experiment, validation loss per note attribute, generation metrics against the real
   continuation of each song, seed checks and listening tests for final choices. Scaling ladders and iso-FLOP curves
   sized the models, and the forecasts held (107M: predicted 5.47–5.72, measured 5.706).
@@ -42,7 +46,13 @@ links (`…/?invite=…`) work as well.
   - Muon −0.54 vs AdamW in pretraining, but AdamW for small fine-tunes;
   - RMSNorm + SwiGLU + QK-norm −0.75 over 3 seeds;
   - growing a trained model 2.5–4× faster than training from scratch;
-  - the fine-tuned 450M halves the distance to real piano covers vs the earlier best model.
+  - the fine-tuned 450M halves the distance to real piano covers vs the earlier best model;
+  - head-to-head with other open MIDI models on the same prompts ([comparison](#comparison-with-other-open-models)):
+        continuing 32 real multi-instrument prompts, musicar-L and musicar-L-caption stay closer to the real
+    continuations in density and instrument use than AMT large, SkyTNT, Music-Llama and Moonbeam (distance D 0.121
+    and 0.218 vs 0.289–0.703); on solo piano musicar-L's note rate is closer to the real one than Aria's (D 0.040 vs
+    0.096); from text, musicar-L-caption follows captions better than MIDI-LLM and
+    Text2midi (F 1.07 vs 0.60 / 0.54 in English, 0.95 vs 0.09 / 0.06 in Ukrainian).
 - **Rejected after testing:** mixture of experts, a bigger pitch head, future-prediction heads, velocity augmentation
   (kept in [`musicar/model/rejected.py`](musicar/model/rejected.py) with their results).
 
@@ -52,51 +62,124 @@ Full results: [`docs/experiments.md`](docs/experiments.md).
 
 ![Captioned music model](docs/figures/architecture.png)
 
-The figure shows the captioned layout of the 450M model as F1 trained it: 477M trainable parameters, the 464M
-base with full attention plus the two caption adapters (13M).
-The sections are numbered in reading order:
+The model sheet shows the 450M as F1 trained it (musicar-L-caption): 477M trainable parameters, the 464M base with
+full attention plus the two caption adapters (13M) and the length tables. The sections are numbered in reading order:
 
 - **1–4: the model.** Captions go through the frozen LaBSE encoder and a small learned-query adapter, and become a
-  few vectors inside the note sequence. The trunk is 28 pre-norm blocks over compound note tokens. The cascade heads
-  pick Δt, instrument, pitch, duration and velocity one after another, each seeing the values already chosen.
-- **5: generation**, with classifier-free guidance over the captions.
-- **6: the section-caption recipe.** Without it the model follows the first section's caption and ignores later ones.
-  Change-aware captions, half of the windows spliced from another file, the caption repeated every 64 notes and
-  caption words from section statistics take the 107M pilot's switch score from 0.06 to 0.98. A counterfactual loss
-  was tested and left out (0.85 with splice and repeat, at 1.8× the step time).
-- **7: training curves** behind the design choices: trunk block, base pretraining, section-caption measures, a
-  grouped-query attention conversion (worked at 107M, broke the 450M, so F1 keeps full attention), and the output
-  heads (the chain is worth 0.34 nats per note at 42M).
-- **8–9: training stages and the audio → MIDI pipeline** that builds the Ukrainian fine-tune set.
-- **10–11: glossary and references.**
+  few vectors inside the note sequence. Each note also gets the instrument and two length levels (seconds left, share
+  played). The trunk is 28 pre-norm blocks over compound note tokens. The cascade heads pick Δt, instrument, pitch,
+  duration and velocity one after another, each seeing the values already chosen.
+- **5: the sequence:** where the file and section caption vectors go, and the length levels of each note.
+- **6: generation** with the defaults of `config/generate/f1.toml`: classifier-free guidance 2.5 and the DRY
+  repetition penalty per head, the instrument choice (allowed set, lock-instruments), the length and the end (EOS
+  floor, ramp and stop), and keep-style (the opening's own description holds the rest of the piece).
+- **7–8: glossary and references.**
 
-Status: F1 is trained (rented RTX 5090, 2026-10-27/28): a long run of 31,098 iterations at 2,048 notes (held-out
-1.882 nats / note), then a 600-iteration caption phase at 512 notes, half of the windows at piece starts
-(`checkpoints/f1_cap`, held-out 1.898). The caption phase raises the caption-following score F (text_eval) at
-guidance 2 from 0.82 to 1.03. The caption results in the figure still come from the 107M pilots. F1 also has a
-length-control input (roadmap item 11), not drawn yet; infilling (item 12) comes in a later fine-tune.
+## What was found and tested
 
-The figure is TikZ / pgfplots: [`docs/figures/architecture.tex`](docs/figures/architecture.tex) (PDF and SVG next to
-it). [`docs/figures/curves_data.py`](docs/figures/curves_data.py) rebuilds the curve data from the run logs, then
-`pdflatex architecture.tex` in `docs/figures/`.
+![What was found and tested](docs/figures/findings.png)
+
+The second sheet holds the evidence behind each part:
+
+- **1: the head-to-head** with other open MIDI models (below).
+- **2: F1 and the caption phase:** the F1 curve, what the 600-step caption phase changed (+0.016 nats per note,
+  caption following F at guidance 2 from 0.82 to 1.03, 120-s lengths 44% → 56% within 20%), length control, the
+  decoding-settings search and the style hold.
+- **3: the section-caption recipe.** Change-aware captions, half of the windows spliced from another file, the
+  caption repeated every 64 notes and caption words from section statistics take the 107M pilot's switch score from
+  0.06 to 0.98. A counterfactual loss was tested and left out (0.85 with splice and repeat, at 1.8× the step time).
+- **4: training curves** behind the design choices: trunk block, base pretraining, output heads (the chain is worth
+  0.34 nats per note at 42M) and a grouped-query attention conversion (worked at 107M, broke the 450M, so F1 kept
+  full attention).
+- **5–6: training stages and the audio → MIDI pipeline** that builds the Ukrainian fine-tune set.
+- **7–8: glossary and references.**
+
+Both sheets are TikZ / pgfplots: [`docs/figures/architecture.tex`](docs/figures/architecture.tex) and
+[`docs/figures/findings.tex`](docs/figures/findings.tex) (PDF and SVG next to them).
+[`docs/figures/curves_data.py`](docs/figures/curves_data.py) rebuilds the chart data from the run logs and results,
+then `pdflatex architecture.tex` and `pdflatex findings.tex` in `docs/figures/`.
+
+## Comparison with other open models
+
+Every system writes MIDI for one frozen prompt set, and every file is read back from the MIDI and scored the same way,
+per note and per second, never per token ([`eval/compare/head2head.py`](eval/compare/head2head.py); the other models run
+through the adapters in [`eval/compare/h2h_baselines/`](eval/compare/h2h_baselines) with their authors' sampling
+settings).
+
+**Continuation** of the 32 clean GigaMIDI validation prompts (128 notes, ≥ 3 instruments), up to 1,000 new notes
+each. D = weighted gap in six row statistics of density and instrument use (takeover, top-instrument share, notes per
+second, out-of-band instruments, instrument count, runaway) to the real continuations of the same files, each divided
+by the real rows' spread with a floor (lower = closer); runaway = share of rows above 40 notes per second:
+
+| System | Parameters | Notes / s | Instruments | Out of band | Takeover | Runaway | Copies | D |
+|---|---|---|---|---|---|---|---|---|
+| real continuation | | 24.0 | 7.7 | 0.15 | 0 | 0.16 | 0.05 | 0 |
+| **musicar-L** | 464M | 23.5 | 6.9 | 0.10 | 0 | 0.13 | 0.14 | **0.121** |
+| **musicar-L-caption** (no caption) | 477M | 12.8 | 7.8 | 0.17 | 0 | 0.06 | 0 | **0.218** |
+| [AMT large](https://huggingface.co/stanford-crfm/music-large-800k) | 780M | 21.2 | 7.4 | 0.12 | 0.09 | 0.06 | 0.04 | 0.289 |
+| [SkyTNT midi-model tv2o-medium](https://huggingface.co/skytnt/midi-model-tv2o-medium) | 234M | 22.9 | 5.3 | 0 | 0.03 | 0.16 | 0.14 | 0.314 |
+| [Music-Llama](https://huggingface.co/asigalov61/Music-Llama) (SkyTNT architecture) | 457M | 28.9 | 5.7 | 0.02 | 0.03 | 0.25 | 0.14 | 0.357 |
+| [Moonbeam](https://huggingface.co/guozixunnicolas/moonbeam-midi-foundation-model) | 839M | 49.5 | 8.9 | 0.14 | 0.16 | 0.31 | 0.21 | 0.703 |
+
+musicar-L-caption's distance is mostly density: without a requested length it writes shorter, sparser pieces (12.8
+vs 24.0 notes per second). AMT lets one instrument take over 9% of the rows; SkyTNT and Music-Llama add almost no new
+instruments and use fewer of them; Moonbeam plays at twice the real density and runs away in 31% of the rows (its
+1,024-note context is shorter than prompt + continuation, so the harness restarts its window on the last 768 notes).
+
+**Piano continuation** of 32 solo-piano prompts from our held-out split of Aria-MIDI (which Aria may have seen in
+training), up to 1,000 new notes each. With one instrument, D here only measures how close the note rate is to the real
+one (and runaway):
+
+| System | Parameters | Notes / s | Runaway | Ended | D |
+|---|---|---|---|---|---|
+| real continuation | | 7.95 | 0 | 0 | 0 |
+| **108M piano-cover fine-tune** (ua_2048_v2, not released) | 108M | 8.39 | 0 | 0.34 | **0.018** |
+| **musicar-L** | 464M | 8.95 | 0 | 0.41 | **0.040** |
+| [Aria medium](https://huggingface.co/loubb/aria-medium-base) (continuation weights) | 659M | 9.99 | 0.03 | 0.31 | 0.096 |
+| 450M piano-cover fine-tune (not released) | 464M | 3.53 | 0 | 1.00 | 0.177 |
+
+The 450M piano-cover fine-tune writes short covers that end (every row ends inside the 1,000 notes), so it is the one
+model of ours further from the real note rate than Aria.
+
+**Text to MIDI** from the first note: 28 prompts (15 English and 12 Ukrainian captions and the empty prompt), 16 pieces
+each. F = caption following over 9 English and 8 Ukrainian contrasts (higher = follows); caption match = how well a
+piece meets what its caption asks, judged with our caption builder's thresholds (so it favours our models); runaway =
+share of 10-s windows above 40 notes per second; MIDI-LLM and Text2midi have no length input and stop at their
+authors' token budgets:
+
+| System | Parameters | F, English | F, Ukrainian | Caption match | Runaway | Seconds |
+|---|---|---|---|---|---|---|
+| **musicar-L-caption** (f1 preset, 60 s asked) | 477M (+ frozen LaBSE) | **1.07** | **0.95** | **0.857** | 0.02 | 63.5 |
+| [MIDI-LLM](https://huggingface.co/slseanwu/MIDI-LLM_Llama-3.2-1B) | 1.72B | 0.60 | 0.09 | 0.553 | 0.14 | 35.0 |
+| [Text2midi](https://huggingface.co/amaai-lab/text2midi) | 250M (incl. its frozen FLAN-T5 encoder) | 0.54 | 0.06 | 0.554 | 0.09 | 25.2 |
+
+Both other models learned text to MIDI from MidiCaps' English captions and hardly react to Ukrainian ones;
+musicar-L-caption reads both languages through LaBSE. Our 107M caption pilot (s50, best of 4 candidates by caption
+match) reaches F 1.16 / 1.16 on the same captions. Raw scores: `results/head2head/scores.md` (not tracked).
 
 ## Pretrained models
 
-The three pretrained models are on Hugging Face under CC BY-NC-SA 4.0, one repository each, with the weights
-(`model_bf16.pt` for the scripts here; `model.safetensors` + `config.json` without pickle), an architecture diagram
-and a model card:
+The four models are on Hugging Face under CC BY-NC-SA 4.0, one repository each, with the weights
+(`model_bf16.pt` for the scripts here; `model.safetensors` + `config.json` without pickle) and a model card:
 
 | Model | Parameters | Context | Validation (nats / note) | Diagram |
 |---|---|---|---|---|
+| [musicar-L-caption](https://huggingface.co/Dimitri-206265/musicar-L-caption) | 477M (+ frozen LaBSE 471M) | 2,048 notes, caption (EN / UK), length | captioned GigaMIDI held-out 1.898 | [png](docs/figures/architecture.png) |
 | [musicar-L](https://huggingface.co/Dimitri-206265/musicar-L) | 464M | 2,048 notes, 129 instruments | clean GigaMIDI 1.679 | [png](docs/figures/base_450m.png) |
 | [musicar-S](https://huggingface.co/Dimitri-206265/musicar-S) | 108M | 129 instruments, RoPE | GigaMIDI 2.232 (original split) | [png](docs/figures/base_107m_band.png) |
 | [musicar-S-piano](https://huggingface.co/Dimitri-206265/musicar-S-piano) | 107M | 512 notes, solo piano | Aria-MIDI 5.706 | [png](docs/figures/base_107m_piano.png) |
 
-- **musicar-L:** multi-instrument with window conditions; the base of F1, the captioned model (not released yet).
+- **musicar-L-caption:** musicar-L after F1 and its caption phase (`checkpoints/f1_cap`): follows a caption in
+  English or Ukrainian and a length in seconds; the app's model.
+- **musicar-L:** multi-instrument with window conditions; the base of musicar-L-caption.
 - **musicar-S:** the piano model grown to 129 instruments and RoPE; the base of the 107M caption pilots.
 - **musicar-S-piano:** solo piano; the earlier model.
 
 ```bash
+hf download Dimitri-206265/musicar-L-caption --local-dir checkpoints/musicar-L-caption
+.venv/bin/python generate.py --config f1 --checkpoint checkpoints/musicar-L-caption/model_bf16.pt \
+    --text "a calm jazz piano trio" --length-seconds 60 --output samples/calm_jazz.mid
+
 hf download Dimitri-206265/musicar-L --local-dir checkpoints/musicar-L
 .venv/bin/python generate.py --checkpoint checkpoints/musicar-L/model_bf16.pt --sample-instruments \
     --max-new-tokens 1000 --output samples/out.mid
@@ -132,8 +215,8 @@ Other folders:
 | `config/` | run configs: `pretrain/`, `finetune/`, `pilots/`, `f1/`, `smoke.py` (stacks on any of them); `generate/` = generation presets (TOML); `serve/engine.toml` = the app engine's settings |
 | `data/` | datasets, token stores and their metadata (see [`data/README.md`](data/README.md)); `skryabin/` = the hand-picked songs |
 | `data_prep/` | `datasets/` (downloads, tokenization into stores, store splits), `songs/` (song search, download, audio → MIDI, fine-tune CSVs), `labels/` (features, labels, pseudo-labels, caption text) |
-| `docs/` | experiment results (`experiments.md`), `figures/` (architecture figure, per-model diagrams, curve data), `model_cards/` (the Hugging Face model cards) |
-| `eval/` | `settings/` (sampling sweeps, settings search), `compare/` (seeded comparisons, text control, sample statistics), `probes/` (hidden-state probes, label coverage) |
+| `docs/` | experiment results (`experiments.md`), `figures/` (the architecture and findings sheets, per-model diagrams, chart data), `model_cards/` (the Hugging Face model cards) |
+| `eval/` | `settings/` (sampling sweeps, settings search), `compare/` (seeded comparisons, text control, sample statistics, the head-to-head with other open models), `probes/` (hidden-state probes, label coverage) |
 | `tools/` | `status.py` (dashboard), `sweeps/` (fine-tune sweeps), `bench/` (GPU / CPU throughput), `checkpoints/` (bf16 export, weight interpolation, checkpoint averaging) |
 | `cloud/` | rented-GPU pipeline: `setup/` (instance setup, preflight), `run/` (launch, auto-resume, stop), `sync/` (Hugging Face Hub checkpoints and data), `status/` |
 | `tests/` | CPU tests per package area: `python tests/run.py [filter]` (or `pytest tests/`) |
