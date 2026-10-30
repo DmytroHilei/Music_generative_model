@@ -173,6 +173,10 @@ The diagram (section 6) shows every evaluation of the run, one every 2,000 steps
 
 ### Comparison with other open models
 
+![What was found and tested](https://huggingface.co/Dimitri-206265/musicar-L/resolve/main/findings.png)
+
+The project's evidence sheet ([`findings.tex`](https://github.com/DmytroHilei/Music_generative_model/blob/transformer-v2/docs/figures/findings.tex) in the code repository): the comparison below is its section 1.
+
 Every system wrote MIDI for one frozen prompt set, and every file was read back from the MIDI and scored the same way,
 per note and per second (never per token), with each model at its authors' sampling settings. Code:
 `eval/compare/head2head.py` and `eval/compare/h2h_baselines/` in the code repository. One seed per system.
@@ -250,6 +254,7 @@ Planned, not done:
 | `model_bf16.pt` | Training checkpoint: bf16 weights + `model_args` + the training config. This is what the repository's scripts load (`generate.py --checkpoint`, `train.py` with `init_from='finetune'`) |
 | `model.safetensors` + `config.json` | The same weights without pickle; `config.json` holds `model_args` |
 | `diagram.png` | The architecture diagram above |
+| `findings.png` | The project's evidence sheet: comparison with other models (section 1), training curves |
 
 ## License
 
