@@ -171,6 +171,45 @@ its training split. The window conditions are measured on each validation window
 
 The diagram (section 6) shows every evaluation of the run, one every 2,000 steps.
 
+### Comparison with other open models
+
+Every system wrote MIDI for one frozen prompt set, and every file was read back from the MIDI and scored the same way,
+per note and per second (never per token), with each model at its authors' sampling settings. Code:
+`eval/compare/head2head.py` and `eval/compare/h2h_baselines/` in the code repository. One seed per system.
+
+**Continuation of real multi-instrument music** (32 clean GigaMIDI validation prompts of 128 notes with at least 3
+instruments; up to 1,000 new notes each, the first 1,000 scored, a continuation that ends sooner scored as it is).
+D = weighted gap in six row statistics of density and instrument use (one instrument taking over, top-instrument share,
+notes per second 0.20 each; out-of-band instruments, instrument count 0.15 each; runaway 0.10) to the real
+continuations of the same files, each divided by the real rows' spread (with a floor); lower = closer to the real
+continuations on these statistics. Runaway = share of rows above 40 notes per second:
+
+| System | Parameters | Notes / s | Instruments | Runaway | D |
+|---|---|---|---|---|---|
+| Real continuation | | 24.0 | 7.7 | 0.16 | 0 |
+| **musicar-L** (temperature 0.9) | 464M | 23.5 | 6.9 | 0.13 | **0.121** |
+| [musicar-L-caption](https://huggingface.co/Dimitri-206265/musicar-L-caption) (no caption) | 477M | 12.8 | 7.8 | 0.06 | 0.218 |
+| [Anticipatory Music Transformer, large](https://huggingface.co/stanford-crfm/music-large-800k) ([arXiv:2306.08620](https://arxiv.org/abs/2306.08620)) | 780M | 21.2 | 7.4 | 0.06 | 0.289 |
+| [SkyTNT midi-model tv2o-medium](https://huggingface.co/skytnt/midi-model-tv2o-medium) | 234M | 22.9 | 5.3 | 0.16 | 0.314 |
+| [Music-Llama](https://huggingface.co/asigalov61/Music-Llama) (SkyTNT architecture) | 457M | 28.9 | 5.7 | 0.25 | 0.357 |
+| [Moonbeam](https://huggingface.co/guozixunnicolas/moonbeam-midi-foundation-model) ([arXiv:2505.15559](https://arxiv.org/abs/2505.15559)) | 839M | 49.5 | 8.9 | 0.31 | 0.703 |
+
+Moonbeam's context (1,024 notes) is shorter than prompt + continuation; past it the harness restarts its window on the
+last 768 notes (the head-to-head's scheme, not the authors').
+
+**Solo-piano continuation** (32 prompts from the project's held-out split of Aria-MIDI, which Aria may have seen in
+training; up to 1,000 new notes each, the real continuations all 1,000 long). With one instrument, D here measures
+only how close the note rate is to the real one (and runaway):
+
+| System | Parameters | Notes / s | Runaway | D |
+|---|---|---|---|---|
+| Real continuation | | 7.95 | 0 | 0 |
+| **musicar-L** (temperature 0.9) | 464M | 8.95 | 0 | **0.040** |
+| [Aria medium](https://huggingface.co/loubb/aria-medium-base), continuation weights ([arXiv:2506.23869](https://arxiv.org/abs/2506.23869)) | 659M | 9.99 | 0.03 | 0.096 |
+
+On the same prompts the project's 108M piano-cover fine-tune (not released) is closer still in note rate (D 0.018);
+its 450M piano-cover fine-tune of this model (not released), which writes short covers that end, is further (0.177).
+
 ## Limitations and biases
 
 - The data lean toward Western popular and classical music in General MIDI instrumentation; other traditions, and
@@ -190,7 +229,8 @@ The diagram (section 6) shows every evaluation of the run, one every 2,000 steps
 
 ## Future work
 
-Done: the captioned fine-tune (F1) of this model on one rented RTX 5090, released as
+Done: the captioned fine-tune (F1) of this model (a short first stage on a laptop RTX 5060, then about 14 h on one
+rented RTX 5090), released as
 [musicar-L-caption](https://huggingface.co/Dimitri-206265/musicar-L-caption): captions from a frozen multilingual LaBSE encoder in English
 and Ukrainian, section captions that change during a piece, and length control. It keeps full attention:
 grouped-query attention was tested for it and dropped, because merging the heads broke this QK-norm model (held-out
@@ -201,6 +241,7 @@ Planned, not done:
 - F2: a captioned fine-tune on about 5,400 Ukrainian songs transcribed from audio.
 - Later: regenerating parts of a piece (infilling), and inference on small devices (int8 / int4 on a Raspberry Pi 5);
   a grouped-query attention conversion would be its own optional step.
+- A listening test against the other open models of the comparison above.
 
 ## Files
 

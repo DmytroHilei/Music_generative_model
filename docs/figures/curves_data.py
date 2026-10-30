@@ -51,8 +51,8 @@ def f1_run():
            evals(LOGS / 'f1/f1_evals.log', 'heldout_labeled') if s in clean])
 
 
-H2H_CONT = ('real', 'long_450m', 'f1', 'amt', 'skytnt_medium', 'skytnt_large')
-H2H_TEXT = ('f1', 'midi_llm', 'text2midi')
+H2H_CONT = ('real', 'long_450m', 'f1', 'amt', 'skytnt_medium', 'skytnt_large', 'moonbeam')
+H2H_TEXT = ('f1', 's50', 'midi_llm', 'text2midi')
 H2H_PIANO = ('real', 'ua_2048_v2', 'long_450m', 'aria', 'piano')
 
 

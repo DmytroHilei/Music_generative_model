@@ -47,10 +47,12 @@ links (`…/?invite=…`) work as well.
   - RMSNorm + SwiGLU + QK-norm −0.75 over 3 seeds;
   - growing a trained model 2.5–4× faster than training from scratch;
   - the fine-tuned 450M halves the distance to real piano covers vs the earlier best model;
-  - continuing 32 real multi-instrument prompts, musicar-L and musicar-L-caption stay closer to the real music than
-    every other open model run on the same prompts (distance D 0.121 and 0.218 vs 0.289–0.357 for AMT large, SkyTNT
-    medium and Music-Llama), and on solo piano musicar-L beats Aria (0.040 vs 0.096;
-    [comparison](#comparison-with-other-open-models)).
+  - head-to-head with other open MIDI models on the same prompts ([comparison](#comparison-with-other-open-models)):
+        continuing 32 real multi-instrument prompts, musicar-L and musicar-L-caption stay closer to the real
+    continuations in density and instrument use than AMT large, SkyTNT, Music-Llama and Moonbeam (distance D 0.121
+    and 0.218 vs 0.289–0.703); on solo piano musicar-L's note rate is closer to the real one than Aria's (D 0.040 vs
+    0.096); from text, musicar-L-caption follows captions better than MIDI-LLM and
+    Text2midi (F 1.07 vs 0.60 / 0.54 in English, 0.95 vs 0.09 / 0.06 in Ukrainian).
 - **Rejected after testing:** mixture of experts, a bigger pitch head, future-prediction heads, velocity augmentation
   (kept in [`musicar/model/rejected.py`](musicar/model/rejected.py) with their results).
 
@@ -103,9 +105,10 @@ Every system writes MIDI for one frozen prompt set, and every file is read back 
 per note and per second, never per token (`eval/compare/head2head.py`; the other models run through the adapters in
 `eval/compare/h2h_baselines/` with their authors' sampling settings).
 
-**Continuation** of the 32 clean GigaMIDI validation prompts (128 notes, ≥ 3 instruments), 1,000 new notes each.
-D = distance of six row metrics to the real continuations of the same files, in units of the real rows' spread
-(lower = closer):
+**Continuation** of the 32 clean GigaMIDI validation prompts (128 notes, ≥ 3 instruments), up to 1,000 new notes
+each. D = weighted gap in six row statistics of density and instrument use (takeover, top-instrument share, notes per
+second, out-of-band instruments, instrument count, runaway) to the real continuations of the same files, each divided
+by the real rows' spread with a floor (lower = closer); runaway = share of rows above 40 notes per second:
 
 | System | Parameters | Notes / s | Instruments | Out of band | Takeover | Runaway | Copies | D |
 |---|---|---|---|---|---|---|---|---|
@@ -115,28 +118,43 @@ D = distance of six row metrics to the real continuations of the same files, in 
 | [AMT large](https://huggingface.co/stanford-crfm/music-large-800k) | 780M | 21.2 | 7.4 | 0.12 | 0.09 | 0.06 | 0.04 | 0.289 |
 | [SkyTNT midi-model tv2o-medium](https://huggingface.co/skytnt/midi-model-tv2o-medium) | 234M | 22.9 | 5.3 | 0 | 0.03 | 0.16 | 0.14 | 0.314 |
 | [Music-Llama](https://huggingface.co/asigalov61/Music-Llama) (SkyTNT architecture) | 457M | 28.9 | 5.7 | 0.02 | 0.03 | 0.25 | 0.14 | 0.357 |
+| [Moonbeam](https://huggingface.co/guozixunnicolas/moonbeam-midi-foundation-model) | 839M | 49.5 | 8.9 | 0.14 | 0.16 | 0.31 | 0.21 | 0.703 |
 
 musicar-L-caption's distance is mostly density: without a requested length it writes shorter, sparser pieces (12.8
 vs 24.0 notes per second). AMT lets one instrument take over 9% of the rows; SkyTNT and Music-Llama add almost no new
-instruments and use fewer of them.
+instruments and use fewer of them; Moonbeam plays at twice the real density and runs away in 31% of the rows (its
+1,024-note context is shorter than prompt + continuation, so the harness restarts its window on the last 768 notes).
 
 **Piano continuation** of 32 solo-piano prompts from our held-out split of Aria-MIDI (which Aria may have seen in
-training), 1,000 new notes each:
+training), up to 1,000 new notes each. With one instrument, D here only measures how close the note rate is to the real
+one (and runaway):
 
 | System | Parameters | Notes / s | Runaway | Ended | D |
 |---|---|---|---|---|---|
 | real continuation | | 7.95 | 0 | 0 | 0 |
 | **108M piano-cover fine-tune** (ua_2048_v2, not released) | 108M | 8.39 | 0 | 0.34 | **0.018** |
 | **musicar-L** | 464M | 8.95 | 0 | 0.41 | **0.040** |
-| [Aria medium](https://huggingface.co/loubb/aria-medium-base) (continuation weights) | 659M | 9.98 | 0.03 | 0.28 | 0.096 |
+| [Aria medium](https://huggingface.co/loubb/aria-medium-base) (continuation weights) | 659M | 9.99 | 0.03 | 0.31 | 0.096 |
 | 450M piano-cover fine-tune (not released) | 464M | 3.53 | 0 | 1.00 | 0.177 |
 
 The 450M piano-cover fine-tune writes short covers that end (every row ends inside the 1,000 notes), so it is the one
-model of ours behind Aria here.
+model of ours further from the real note rate than Aria.
 
-**Text to MIDI** from the first note, the text_eval caption pairs in English and Ukrainian: <!-- h2h-text -->running
-(musicar-L-caption vs [MIDI-LLM](https://huggingface.co/slseanwu/MIDI-LLM_Llama-3.2-1B) and
-[Text2midi](https://huggingface.co/amaai-lab/text2midi)).<!-- /h2h-text -->
+**Text to MIDI** from the first note: 28 prompts (15 English and 12 Ukrainian captions and the empty prompt), 16 pieces
+each. F = caption following over 9 English and 8 Ukrainian contrasts (higher = follows); caption match = how well a
+piece meets what its caption asks, judged with our caption builder's thresholds (so it favours our models); runaway =
+share of 10-s windows above 40 notes per second; MIDI-LLM and Text2midi have no length input and stop at their
+authors' token budgets:
+
+| System | Parameters | F, English | F, Ukrainian | Caption match | Runaway | Seconds |
+|---|---|---|---|---|---|---|
+| **musicar-L-caption** (f1 preset, 60 s asked) | 477M (+ frozen LaBSE) | **1.07** | **0.95** | **0.857** | 0.02 | 63.5 |
+| [MIDI-LLM](https://huggingface.co/slseanwu/MIDI-LLM_Llama-3.2-1B) | 1.72B | 0.60 | 0.09 | 0.553 | 0.14 | 35.0 |
+| [Text2midi](https://huggingface.co/amaai-lab/text2midi) | 250M (incl. its frozen FLAN-T5 encoder) | 0.54 | 0.06 | 0.554 | 0.09 | 25.2 |
+
+Both other models learned text to MIDI from MidiCaps' English captions and hardly react to Ukrainian ones;
+musicar-L-caption reads both languages through LaBSE. Our 107M caption pilot (s50, best of 4 candidates by caption
+match) reaches F 1.16 / 1.16 on the same captions. Raw scores: `results/head2head/scores.md` (not tracked).
 
 ## Pretrained models
 

@@ -178,9 +178,12 @@ Three stages after musicar-L, 65,536 notes per step in each:
 | Config | `logs/queue_20261026_tail.sh` (job 6'') | `config/f1/f1.py` | `config/f1/f1_cap.py` |
 
 The first stage exists because a strong unconditional trunk learns to ignore a new prefix at 2,048 notes: in short
-windows that start at a piece's beginning, the caption is worth more per loss position. The long run was then
-dominated by notes far from the caption, which wore the reading down, and the short caption phase at the end rebuilt
-it (half the windows at piece starts, about 60 captioned openings per step instead of 14).
+windows that start at a piece's beginning, the caption is worth more per loss position. In the laptop pilots, long
+runs at 2,048 notes wore that reading down and a short phase at 512 notes rebuilt it (about 60 captioned openings per
+step instead of 14), so the caption phase follows the long run. On F1 itself the reading was intact (the caption's
+gain on the first 32 notes is about the same before and after the phase, 0.072 vs 0.068 nats per note); the phase
+raised caption following at guidance 2 (F 0.82 → 1.03) and the 120-s length hits (within 20%: 44% → 56%; 60 s fell
+slightly, 84% → 81%), for +0.016 nats per note of held-out cross-entropy.
 
 | | |
 |---|---|
@@ -244,6 +247,52 @@ from a retrieved real opening: F 1.27, with fewer verbatim repeats (13% vs 17% o
 | 60 s | 57.7 s | 59% | 81% |
 | 120 s | 116.8 s | 31% | 56% |
 
+### Comparison with other open models
+
+Every system wrote MIDI for one frozen prompt set, and every file was read back from the MIDI and scored the same way,
+per note and per second (never per token), with each model at its authors' sampling settings. Code:
+`eval/compare/head2head.py` and `eval/compare/h2h_baselines/` in the code repository. One seed per system.
+
+**Text to MIDI** (28 prompts from the project's caption evaluation: 15 English and 12 Ukrainian captions and the
+empty prompt; 16 pieces each, from the first note). F = caption following over 9 English and 8 Ukrainian contrasts (fast / slow, minor / major, loud /
+soft, high / low, and solo piano, a drum beat, without drums, strings, electric guitar each against no caption);
+higher = follows more. Caption match = how well a piece meets the checkable things its caption asks for (0-1),
+judged with the thresholds this model's own training captions were built from, so it favours this model:
+
+| System | Parameters | F, English | F, Ukrainian | Caption match | Runaway (10-s windows) | Seconds |
+|---|---|---|---|---|---|---|
+| **musicar-L-caption** (`--config f1`, 60 s asked) | 477M (+ frozen LaBSE) | **1.07** | **0.95** | **0.857** | 0.02 | 63.5 |
+| [MIDI-LLM](https://huggingface.co/slseanwu/MIDI-LLM_Llama-3.2-1B) ([arXiv:2511.03942](https://arxiv.org/abs/2511.03942)) | 1.72B | 0.60 | 0.09 | 0.553 | 0.14 | 35.0 |
+| [Text2midi](https://huggingface.co/amaai-lab/text2midi) ([arXiv:2412.16526](https://arxiv.org/abs/2412.16526)) | 250M (incl. its frozen FLAN-T5 encoder) | 0.54 | 0.06 | 0.554 | 0.09 | 25.2 |
+
+Seconds: this model was asked for 60 s; MIDI-LLM and Text2midi have no length input and stop at their authors' token
+budgets (2,046 and 2,000 tokens). Both learned text to MIDI from MidiCaps' English captions and hardly react to
+Ukrainian ones; this model reads both languages through LaBSE.
+
+**Continuation of real multi-instrument music** (32 clean GigaMIDI validation prompts of 128 notes with at least 3
+instruments; up to 1,000 new notes each, the first 1,000 scored, a continuation that ends sooner scored as it is).
+D = weighted gap in six row statistics of density and instrument use (one instrument taking over, top-instrument share,
+notes per second 0.20 each; out-of-band instruments, instrument count 0.15 each; runaway 0.10) to the real
+continuations of the same files, each divided by the real rows' spread (with a floor); lower = closer to the real
+continuations on these statistics. Runaway = share of rows above 40 notes per second:
+
+| System | Parameters | Notes / s | Instruments | Runaway | D |
+|---|---|---|---|---|---|
+| Real continuation | | 24.0 | 7.7 | 0.16 | 0 |
+| [musicar-L](https://huggingface.co/Dimitri-206265/musicar-L) (temperature 0.9) | 464M | 23.5 | 6.9 | 0.13 | **0.121** |
+| **musicar-L-caption** (`--config f1`, no caption) | 477M | 12.8 | 7.8 | 0.06 | **0.218** |
+| [Anticipatory Music Transformer, large](https://huggingface.co/stanford-crfm/music-large-800k) ([arXiv:2306.08620](https://arxiv.org/abs/2306.08620)) | 780M | 21.2 | 7.4 | 0.06 | 0.289 |
+| [SkyTNT midi-model tv2o-medium](https://huggingface.co/skytnt/midi-model-tv2o-medium) | 234M | 22.9 | 5.3 | 0.16 | 0.314 |
+| [Music-Llama](https://huggingface.co/asigalov61/Music-Llama) (SkyTNT architecture) | 457M | 28.9 | 5.7 | 0.25 | 0.357 |
+| [Moonbeam](https://huggingface.co/guozixunnicolas/moonbeam-midi-foundation-model) ([arXiv:2505.15559](https://arxiv.org/abs/2505.15559)) | 839M | 49.5 | 8.9 | 0.31 | 0.703 |
+
+Moonbeam's context (1,024 notes) is shorter than prompt + continuation; past it the harness restarts its window on the
+last 768 notes (the head-to-head's scheme, not the authors').
+
+Without a caption or a length this model writes shorter, sparser pieces than the real continuations (12.8 vs 24.0
+notes per second; 53% of the rows end inside the 1,000 notes), which is most of its distance; its base musicar-L is
+closer (0.121). On these statistics both are closer to the real continuations than every other model in the table.
+
 ## Limitations and biases
 
 - Caption following is broad, not precise: the attributes above move, but genre words, key and named instruments
@@ -266,8 +315,12 @@ from a retrieved real opening: F 1.27, with fewer verbatim repeats (13% vs 17% o
 
 Planned, not done:
 
-- Section-by-section generation in the app (the trained section captions).
+- Section-by-section generation in the app: user-written section captions (today only `--keep-style` uses the section
+  input), and a section-switch test at this size.
 - F2: a captioned fine-tune on about 5,400 Ukrainian songs transcribed from audio.
+- Regenerating parts of a piece (infilling) in a later fine-tune.
+- Closing the gap to real density when no length is asked (see the continuation comparison).
+- A listening test against the other open models of the comparison.
 - Inference on small devices (int8 / int4 on a Raspberry Pi 5).
 
 ## Files
