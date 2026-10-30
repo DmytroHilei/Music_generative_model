@@ -1,6 +1,6 @@
-system D
-real 0.0
-ua_2048_v2 0.018
-long_450m 0.04
-aria 0.096
-piano 0.177
+system D D200
+real 0.0 0.0
+ua_2048_v2 0.018 0.006
+long_450m 0.04 0.019
+aria 0.096 0.067
+piano 0.177 0.078

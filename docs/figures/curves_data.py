@@ -14,9 +14,10 @@ heads_cascade_mean.dat              (muon_base, seeds 1337 / 2 / 3) and its mean
 heads_{indep,linear}.dat            chain (muon_indep) and independent linear heads (muon_linear), seed 1337
 f1_run.dat                          step, notes (B), held-out captioned GigaMIDI CE, clean GigaMIDI CE of the F1 run
                                     (logs/f1/f1_evals.log, from the f1-results Hub repo)
-h2h_cont.dat                        system, D of the head-to-head continuations (results/head2head/scores.json)
-h2h_text.dat                        system, F over the EN / UK pairs of the head-to-head text task (same file)
-h2h_piano.dat                       system, D of the head-to-head piano continuations (same file)
+h2h_cont.dat                        system, D of the head-to-head continuations (results/head2head/scores.json: the first
+                                    1,000 new notes) and D200 (scores_first200.json: the first 200)
+h2h_text.dat                        system, F over the EN / UK pairs of the head-to-head text task (scores.json)
+h2h_piano.dat                       system, D and D200 of the head-to-head piano continuations (as h2h_cont.dat)
 """
 import json
 import re
@@ -51,21 +52,24 @@ def f1_run():
            evals(LOGS / 'f1/f1_evals.log', 'heldout_labeled') if s in clean])
 
 
-H2H_CONT = ('real', 'long_450m', 'f1', 'amt', 'skytnt_medium', 'skytnt_large', 'moonbeam')
-H2H_TEXT = ('f1', 's50', 'midi_llm', 'text2midi')
+H2H_CONT = ('real', 'long_450m', 'f1', 'amt', 'skytnt_medium', 'skytnt_large', 'moonbeam', 'moonbeam_t06')
+H2H_TEXT = ('f1', 'f1_retrieve', 's50', 'caption', 'midi_llm', 'text2midi')
 H2H_PIANO = ('real', 'ua_2048_v2', 'long_450m', 'aria', 'piano')
 
 
 def head2head():
     scores = json.loads((ROOT / 'results/head2head/scores.json').read_text())
-    cont = scores.get('cont', {})
-    write('h2h_cont.dat', ('system', 'D'), [(s, round(cont[s]['D'], 3)) for s in H2H_CONT if s in cont])
+    first200 = json.loads((ROOT / 'results/head2head/scores_first200.json').read_text())
+    cont, cont200 = scores.get('cont', {}), first200.get('cont', {})
+    write('h2h_cont.dat', ('system', 'D', 'D200'),
+          [(s, round(cont[s]['D'], 3), round(cont200[s]['D'], 3)) for s in H2H_CONT if s in cont])
     text = scores.get('text', {})
     rows = [(s, round(text[s]['F_en'], 3), round(text[s]['F_uk'], 3)) for s in H2H_TEXT
             if s in text and text[s].get('F_en') == text[s].get('F_en')]  # nan = not scored yet
     write('h2h_text.dat', ('system', 'F_en', 'F_uk'), rows)
-    piano = scores.get('piano', {})
-    write('h2h_piano.dat', ('system', 'D'), [(s, round(piano[s]['D'], 3)) for s in H2H_PIANO if s in piano])
+    piano, piano200 = scores.get('piano', {}), first200.get('piano', {})
+    write('h2h_piano.dat', ('system', 'D', 'D200'),
+          [(s, round(piano[s]['D'], 3), round(piano200[s]['D'], 3)) for s in H2H_PIANO if s in piano])
 
 
 def main():
