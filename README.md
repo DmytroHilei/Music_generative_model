@@ -102,8 +102,9 @@ then `pdflatex architecture.tex` and `pdflatex findings.tex` in `docs/figures/`.
 ## Comparison with other open models
 
 Every system writes MIDI for one frozen prompt set, and every file is read back from the MIDI and scored the same way,
-per note and per second, never per token (`eval/compare/head2head.py`; the other models run through the adapters in
-`eval/compare/h2h_baselines/` with their authors' sampling settings).
+per note and per second, never per token ([`eval/compare/head2head.py`](eval/compare/head2head.py); the other models run
+through the adapters in [`eval/compare/h2h_baselines/`](eval/compare/h2h_baselines) with their authors' sampling
+settings).
 
 **Continuation** of the 32 clean GigaMIDI validation prompts (128 notes, ≥ 3 instruments), up to 1,000 new notes
 each. D = weighted gap in six row statistics of density and instrument use (takeover, top-instrument share, notes per
