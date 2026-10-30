@@ -6,6 +6,7 @@ Update the status column when a step is done.
 
 Times: **work** = focused working days (writing code, checking results); **machine** = unattended compute.
 Calendar weeks are targets, not commitments. Last update: 2026-10-30 (F1 + musicar-L-caption).
+Directions after F1: `context/claude/future_directions_2026-10-30.md`.
 
 ## Overview
 
@@ -13,7 +14,7 @@ Calendar weeks are targets, not commitments. Last update: 2026-10-30 (F1 + music
 |---|---|---|---|---|
 | 1 | **Text control**: generate from a text prompt ("sad slow piano ballad"), fully offline | ~12-14 days (~11 left after Oct 15) | ~1 laptop night + ~16-25 h rented 5090 (~€7-10; +€2-3 if step 8) | weeks of Oct 15 - Nov 4; step 4 done 2026-10-28 |
 | 2 | **Private demo** on the Raspberry Pi: chat-like page (browser → Pi → MIDI/MP3) | see `context/claude/demo.md` + ~3 days for the chat features below | — | after 1; the chat page runs today on a Vercel page + laptop engine (invite / GitHub sign-in), the Pi later |
-| 3 | **Audio rendering** (MIDI → audio tokens) | not estimated yet | — | after 2 |
+| 3 | **Audio rendering** (stem render → codec-token renderer, ladder in `context/claude/future_directions_2026-10-30.md`) | not estimated yet | laptop nights for the first tests | after 2 |
 
 ## 1. Text control
 
