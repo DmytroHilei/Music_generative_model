@@ -81,7 +81,7 @@
   every axis plot/.append style={line join=round}, clip=false, xlabel shift=-2pt, ylabel shift=-3pt,
   scaled ticks=false, tick label style={/pgf/number format/fixed}}}
 \pgfplotsset{dots/.style={cplot, ymin=-0.6, y dir=reverse, grid=none, xmajorgrids, axis y line*=none,
-  y axis line style={draw=none}, ytick style={draw=none}, yticklabel style={align=right}}}
+  y axis line style={draw=none}, ytick style={draw=none}, yticklabel style={align=right, xshift=-6pt}}}
 
 % head-to-head: D of each system's continuations (rows of curves/h2h_cont.dat: real, ours x 2, other models x 3)
 \newsavebox{\curveHH}
@@ -124,7 +124,7 @@ Moonbeam \rcite{21} & 49.5 & 8.88 & 0.140 & 0.491 & 0.156 & 0.312 & 0.208 & 0.16
 
 \newsavebox{\curveHHp}
 \sbox{\curveHHp}{\begin{tikzpicture}
-\begin{axis}[dots, width=4.6cm, height=3.6cm, ymax=4.6, xmin=0, xmax=0.2, xtick={0,0.05,0.1,0.15,0.2}, ytick={0,...,4},
+\begin{axis}[dots, width=4.3cm, height=3.6cm, ymax=4.6, xmin=0, xmax=0.2, xtick={0,0.05,0.1,0.15,0.2}, ytick={0,...,4},
     xlabel={D: distance to the real continuations (lower = closer)},
     yticklabels={{real continuation}, {108M piano covers (ua\_2048\_v2)}, {musicar-L (464M)}, {Aria medium (659M)},
                  {450M piano-cover fine-tune}}]
@@ -190,7 +190,7 @@ Text2midi \rcite{19} & 0.54 & 0.06 & 0.554 & 0.090 & 0.016 & 23.3 & 11.4 & 25.2 
   \addplot[tealT, line width=1.6pt] table[x=notes, y=ce] {curves/f1_run.dat};
   \addplot[tealB, dashed, line width=1.3pt] table[x=notes, y=clean] {curves/f1_run.dat};
   \node[anchor=south west, font=\scriptsize, text=tealT] at (axis cs:0.25, 1.945) {held-out, captioned};
-  \node[anchor=north west, font=\scriptsize, text=black!85] at (axis cs:0.25, 1.835) {clean GigaMIDI};
+  \node[anchor=north west, font=\scriptsize, text=black!85] at (axis cs:0.25, 1.822) {clean GigaMIDI};
   \node[anchor=west, font=\scriptsize, text=tealT] at (axis cs:2.1, 1.882) {1.882};
   \node[anchor=west, font=\scriptsize, text=black!85] at (axis cs:2.1, 1.750) {1.750};
 \end{axis}
@@ -256,19 +256,19 @@ nothing: median end & 142 s & 66 s & 68 s\\
 \begin{axis}[arms, name=sw, xmin=0, xmax=1.1, xtick={0,0.5,1}, xlabel={switch score (higher = follows)},
     yticklabels={{none (ctrl)}, {repeat}, {counterfactual}, {splice}, {all three}, {all three\\+ v2 words}, {splice 50\%,\\repeat, v2}}]
   \draw[black!25, line width=1.2pt] (axis cs:0, 0) -- (axis cs:0.06, 0);
-  \node[anchor=west, font=\scriptsize, text=black!80, inner sep=4pt] at (axis cs:0.06, 0) {0.06};
+  \node[anchor=west, font=\scriptsize, text=black!80, inner sep=1.5pt, xshift=2.5pt, fill=greyF] at (axis cs:0.06, 0) {0.06};
   \draw[black!25, line width=1.2pt] (axis cs:0, 1) -- (axis cs:0.09, 1);
-  \node[anchor=west, font=\scriptsize, text=black!80, inner sep=4pt] at (axis cs:0.09, 1) {0.09};
+  \node[anchor=west, font=\scriptsize, text=black!80, inner sep=1.5pt, xshift=2.5pt, fill=greyF] at (axis cs:0.09, 1) {0.09};
   \draw[black!25, line width=1.2pt] (axis cs:0, 2) -- (axis cs:0.13, 2);
-  \node[anchor=west, font=\scriptsize, text=black!80, inner sep=4pt] at (axis cs:0.13, 2) {0.13};
+  \node[anchor=west, font=\scriptsize, text=black!80, inner sep=1.5pt, xshift=2.5pt, fill=greyF] at (axis cs:0.13, 2) {0.13};
   \draw[black!25, line width=1.2pt] (axis cs:0, 3) -- (axis cs:0.59, 3);
-  \node[anchor=west, font=\scriptsize, text=black!80, inner sep=4pt] at (axis cs:0.59, 3) {0.59};
+  \node[anchor=west, font=\scriptsize, text=black!80, inner sep=1.5pt, xshift=2.5pt, fill=greyF] at (axis cs:0.59, 3) {0.59};
   \draw[black!25, line width=1.2pt] (axis cs:0, 4) -- (axis cs:0.85, 4);
-  \node[anchor=west, font=\scriptsize, text=black!80, inner sep=4pt] at (axis cs:0.85, 4) {0.85};
+  \node[anchor=west, font=\scriptsize, text=black!80, inner sep=1.5pt, xshift=2.5pt, fill=greyF] at (axis cs:0.85, 4) {0.85};
   \draw[black!25, line width=1.2pt] (axis cs:0, 5) -- (axis cs:0.94, 5);
-  \node[anchor=west, font=\scriptsize, text=black!80, inner sep=4pt] at (axis cs:0.94, 5) {0.94};
+  \node[anchor=west, font=\scriptsize, text=black!80, inner sep=1.5pt, xshift=2.5pt, fill=greyF] at (axis cs:0.94, 5) {0.94};
   \draw[black!25, line width=1.2pt] (axis cs:0, 6) -- (axis cs:0.98, 6);
-  \node[anchor=west, font=\scriptsize, text=black!80, inner sep=4pt] at (axis cs:0.98, 6) {0.98};
+  \node[anchor=west, font=\scriptsize, text=black!80, inner sep=1.5pt, xshift=2.5pt, fill=greyF] at (axis cs:0.98, 6) {0.98};
   \addplot[altG, only marks, mark=*, mark size=2.4pt] table[x=switch, y expr=\coordindex, skip coords between index={6}{7}] {curves/section_arms.dat};
   \addplot[tealT, only marks, mark=*, mark size=2.8pt] table[x=switch, y expr=\coordindex, skip coords between index={0}{6}] {curves/section_arms.dat};
 \end{axis}
@@ -309,7 +309,7 @@ nothing: median end & 142 s & 66 s & 68 s\\
   \addplot[altG, densely dotted, line width=1.1pt] table {curves/heads_linear.dat};
   \node[anchor=west, font=\scriptsize, text=black!85, align=left] at (axis cs:1520, 3.40) {linear 3.145};
   \node[anchor=west, font=\scriptsize, text=black!85, align=left] at (axis cs:1520, 3.08) {no chain 3.106};
-  \node[anchor=west, font=\scriptsize, text=tealT, align=left] at (axis cs:1520, 2.70) {cascade 2.766};
+  \node[anchor=west, font=\scriptsize, text=tealT, align=left] at (axis cs:1520, 2.80) {cascade 2.766};
 \end{axis}
 \end{tikzpicture}}%
 
@@ -371,7 +371,7 @@ Precision & bf16 with fp8 matmuls, torch.compile & same & same\\
 
 \newsavebox{\glossBox}
 \sbox{\glossBox}{\scriptsize\renewcommand{\arraystretch}{1.2}%
-\begin{tabular}{@{}>{\bfseries}l>{\raggedright}p{4.6cm}@{\hspace{12pt}}>{\bfseries}l>{\raggedright\arraybackslash}p{4.6cm}@{}}
+\begin{tabular}{@{}>{\bfseries}l>{\raggedright}p{4.4cm}@{\hspace{12pt}}>{\bfseries}l>{\raggedright\arraybackslash}p{4.4cm}@{}}
 CE & cross-entropy of the true notes (nats per note), the sum over the note's heads & D & distance to real music: weighted sum over takeover, top share, notes/s (0.20 each), out of band, instruments (0.15), runaway (0.10) of $|$system $-$ real$|$ / the real rows' spread\\
 held-out captioned & 3,648 captioned GigaMIDI files kept out of training & runaway & continuation: share of rows above 40 notes per second; text and Q: share of 10-s windows above it\\
 clean GigaMIDI & the base run's validation set (no captions) & takeover & one instrument plays over 80\% of a row's notes\\
@@ -402,13 +402,13 @@ guidance \rcite{9} & classifier-free guidance: logits pushed away from the capti
 \rf{12}{basic-pitch: lightweight polyphonic note transcription (2022)}{2203.09893}
 \rf{13}{ADTOF dataset (2021); the model used: Frame\_RNN, Zehren et al., Signals 2023}{2111.11737}
 \rf{14}{EnCodec: High Fidelity Neural Audio Compression (2022)}{2210.13438}
-\rf{15}{Anticipatory Music Transformer (2023), weights \texttt{stanford-crfm/music-large-800k}}{2306.08620}
-\rh{16}{SkyTNT midi-model, tv2o-medium}{skytnt/midi-model-tv2o-medium}
-\rh{17}{Music-Llama (SkyTNT architecture, tv2o-large)}{asigalov61/Music-Llama}
-\rf{18}{MIDI-LLM (2025), weights \texttt{slseanwu/MIDI-LLM\_Llama-3.2-1B}}{2511.03942}
-\rf{19}{Text2midi (2024), weights \texttt{amaai-lab/text2midi}}{2412.16526}
-\rf{20}{Aria (2025), weights \texttt{loubb/aria-medium-base} (model-gen)}{2506.23869}
-\rf{21}{Moonbeam (2025), weights \texttt{guozixunnicolas/moonbeam-midi-foundation-model}}{2505.15559}
+\rf{15}{Anticipatory Music Transformer (2023)}{2306.08620}
+\rh{16}{SkyTNT midi-model}{skytnt/midi-model-tv2o-medium}
+\rh{17}{Music-Llama}{asigalov61/Music-Llama}
+\rf{18}{MIDI-LLM (2025)}{2511.03942}
+\rf{19}{Text2midi (2024)}{2412.16526}
+\rf{20}{Aria (2025)}{2506.23869}
+\rf{21}{Moonbeam (2025)}{2505.15559}
 \end{tabular}}%
 
 \begin{tikzpicture}

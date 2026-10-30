@@ -85,22 +85,22 @@
            dots/.style={font=\scriptsize, inner sep=0pt}, lab/.style={font=\tiny, text=black!80, align=center}}
   % file caption: 16 vectors
   \foreach \i in {0,1,2} { \node[pt] at (\i, 0) {}; }
-  \node[dots] at (3, 0) {$\cdots$};
+  \node[dots] at (3.1, 0) {$\cdots$};
   \node[pt] at (4, 0) {};
   % section A: 4 vectors
   \foreach \i in {5.6,6.6,7.6,8.6} { \node[pt] at (\i, 0) {}; }
   % notes 1-64
   \foreach \i in {10.2,11.2,12.2} { \node[t] at (\i, 0) {}; }
-  \node[dots] at (13.2, 0) {$\cdots$};
+  \node[dots] at (13.3, 0) {$\cdots$};
   \node[t] at (14.2, 0) {};
   % section A again
   \foreach \i in {15.8,16.8,17.8,18.8} { \node[pt] at (\i, 0) {}; }
   \foreach \i in {20.4,21.4} { \node[t] at (\i, 0) {}; }
-  \node[dots] at (22.4, 0) {$\cdots$};
+  \node[dots] at (22.55, 0) {$\cdots$};
   % section B at note 256
   \foreach \i in {24.0,25.0,26.0,27.0} { \node[pt, fill=pinkL!45] at (\i, 0) {}; }
   \foreach \i in {28.6,29.6} { \node[t] at (\i, 0) {}; }
-  \node[dots] at (30.6, 0) {$\cdots$};
+  \node[dots] at (30.75, 0) {$\cdots$};
   % labels above
   \draw[decorate, decoration={brace, amplitude=3pt}, black!60] (-0.4, 0.3) -- (4.4, 0.3)
     node[midway, above=3pt, lab] {file caption\\16 vectors};
@@ -113,14 +113,14 @@
   \draw[decorate, decoration={brace, amplitude=3pt}, black!60] (23.6, 0.3) -- (27.4, 0.3)
     node[midway, above=3pt, lab] {section B\\at note 257};
   % length levels of the notes
-  \draw[arr, line width=0.7pt, black!70] (10.0, -0.55) -- (31.2, -0.55);
+  \draw[arr, line width=0.7pt, black!70] (10.0, -0.55) -- (24.2, -0.55);
   \node[font=\scriptsize, anchor=east, text=black!85] at (9.6, -0.55) {seconds left};
-  \node[font=\tiny, anchor=south west, inner sep=1pt, text=black!80] at (10.0, -0.55) {$L$};
-  \node[font=\tiny, anchor=south east, inner sep=1pt, text=black!80] at (31.2, -0.55) {$\to 0$ s: 33 levels};
-  \draw[arr, line width=0.7pt, black!70] (10.0, -1.05) -- (31.2, -1.05);
+  \node[font=\tiny, anchor=south west, inner sep=1pt, yshift=1.5pt, text=black!80] at (10.0, -0.55) {$L$};
+  \node[font=\tiny, anchor=west, inner sep=2pt, text=black!80] at (24.4, -0.55) {0 s; 33 levels};
+  \draw[arr, line width=0.7pt, black!70] (10.0, -1.05) -- (24.2, -1.05);
   \node[font=\scriptsize, anchor=east, text=black!85] at (9.6, -1.05) {share played};
-  \node[font=\tiny, anchor=south west, inner sep=1pt, text=black!80] at (10.0, -1.05) {0};
-  \node[font=\tiny, anchor=south east, inner sep=1pt, text=black!80] at (31.2, -1.05) {$\to 1$: 17 levels};
+  \node[font=\tiny, anchor=south west, inner sep=1pt, yshift=1.5pt, text=black!80] at (10.0, -1.05) {0};
+  \node[font=\tiny, anchor=west, inner sep=2pt, text=black!80] at (24.4, -1.05) {1; 17 levels};
 \end{tikzpicture}}%
 
 \newsavebox{\genBox}
@@ -133,10 +133,10 @@
   \node[pbox, font=\scriptsize] (lc) at (6.95, 0.38) {$\ell_\text{caption}$};
   \node[box, font=\scriptsize] (ln) at (6.95, -0.38) {$\ell_\text{none}$};
   \node[box, font=\scriptsize, minimum height=13mm] (cfg) at (9.15, 0) {$\ell_\text{none} + 2.5\,(\ell_\text{caption} - \ell_\text{none})$};
-  \node[box, minimum height=13mm, text width=26mm, font=\scriptsize] (dry) at (12.6, 0) {\textbf{DRY} \rcite{9}, pitch head, chords as pitch-class sets: every pitch of a class that would continue a copy of $m \ge 16$ chords loses $\min(50,\,3 \cdot 1.15^{\,m-16})$};
-  \node[box, minimum height=13mm, text width=17mm] (smp) at (15.55, 0) {sample $a_i$\\[-1pt] {\scriptsize temperature 1.1}};
+  \node[box, minimum height=13mm, text width=33mm, font=\scriptsize] (dry) at (12.95, 0) {\textbf{DRY} \rcite{9}, pitch head, chords as pitch-class sets: every pitch of a class that would continue a copy of $m \ge 16$ chords loses $\min(50,\,3 \cdot 1.15^{\,m-16})$};
+  \node[box, minimum height=13mm, text width=17mm] (smp) at (16.25, 0) {sample $a_i$\\[-1pt] {\scriptsize temperature 1.1}};
   \draw[arr] (kv) -- (m);
-  \draw[arr] (m) -- node[above, font=\scriptsize, inner sep=1pt] {$h_t$} (cas);
+  \draw[arr] (m) -- node[above, font=\scriptsize, inner sep=3pt] {$h_t$} (cas);
   \draw[arr] (cas.east |- lc) -- (lc);
   \draw[arr] (cas.east |- ln) -- (ln);
   \draw[arr] (lc) -- (cfg.west |- lc);
@@ -145,24 +145,24 @@
   \draw[arr] (dry) -- (smp);
   \draw[arr, rounded corners=5pt] (smp.north) -- ++(0, 0.35) -| node[pos=0.25, above, font=\scriptsize] {next head: $z_i = z_{i-1} + E_i(a_i)$, five heads per note (no new trunk step)} (cas.north);
   \draw[arr, dashed, rounded corners=5pt] (smp.south) -- ++(0, -0.35) -| node[pos=0.25, below, font=\scriptsize] {after the 5th head: the note is appended, one trunk step} (kv.south);
-  \node[note, anchor=north west, text width=17.6cm] at (-1.0, -1.55) {Classifier-free guidance \rcite{8}: every
+  \node[note, anchor=north west, text width=18.2cm] at (-1.0, -1.55) {Classifier-free guidance \rcite{8}: every
     step runs the batch twice as wide, once with the captions and once with the null vectors; both halves are fed the
     same sampled note. Caption vectors enter the cache as in training (5). Past 2,048 notes the window slides by a
     quarter and the caption vectors are rebuilt in front of it.};
 
   %% row B: instrument choice (head 2)
-  \node[rowtitle] at (-1.0, -2.80) {Choosing the instrument: head 2 of every note};
-  \node[box, text width=24mm, font=\scriptsize] (ib) at (0.25, -3.45) {\textbf{band:} instrument set at every position (a list, the prompt's, or none)};
-  \node[pbox, text width=24mm, font=\scriptsize] (ic) at (0.25, -4.40) {caption names instruments: \capt{drums enter}};
-  \node[box, minimum height=13mm, text width=15mm, densely dotted, line width=1.1pt] (ih) at (2.85, -3.90) {instr. head\\[-1pt] {\scriptsize reads $z_1$ (trunk + $\Delta t$), 129 logits after guidance}};
-  \node[box, minimum height=13mm, text width=40mm, font=\scriptsize] (im) at (6.55, -3.90) {\textbf{mask:} only the allowed instruments: a list, the prompt's, and by default the caption's limits
+  \node[rowtitle] at (-1.0, -3.40) {Choosing the instrument: head 2 of every note};
+  \node[box, text width=24mm, font=\scriptsize] (ib) at (0.25, -4.05) {\textbf{band:} instrument set at every position (a list, the prompt's, or none)};
+  \node[pbox, text width=24mm, font=\scriptsize] (ic) at (0.25, -5.00) {caption names instruments: \capt{drums enter}};
+  \node[box, minimum height=13mm, text width=15mm, densely dotted, line width=1.1pt] (ih) at (2.85, -4.50) {instr. head\\[-1pt] {\scriptsize reads $z_1$ (trunk + $\Delta t$), 129 logits after guidance}};
+  \node[box, minimum height=13mm, text width=58mm, font=\scriptsize] (im) at (7.55, -4.50) {\textbf{mask:} only the allowed instruments: a list, the prompt's, and by default the caption's limits
     (\capt{solo piano}, \capt{no drums}, ...);
     \textbf{lock-instruments:} from note 257 the opening's instruments with $\ge$ 4 notes and $\ge$ 2\% of its notes,
     + the families the caption names that have not played yet};
-  \node[box, minimum height=13mm, text width=10mm] (is) at (9.85, -3.90) {sample\\ $a_2$};
-  \node[box, minimum height=13mm, text width=36mm, font=\scriptsize] (iz) at (13.15, -3.90) {$z_2 = z_1 + E_2(a_2)$: pitch, dur., vel.
+  \node[box, minimum height=13mm, text width=10mm] (is) at (11.85, -4.50) {sample\\ $a_2$};
+  \node[box, minimum height=13mm, text width=36mm, font=\scriptsize] (iz) at (15.05, -4.50) {$z_2 = z_1 + E_2(a_2)$: pitch, dur., vel.
     are chosen for this instrument; drums get duration 0. Next step: the instrument table at the input (2)};
-  \node[box, dashed, text width=31mm, font=\scriptsize] (if) at (6.55, -5.45) {or one fixed instrument (default piano): the head is not sampled};
+  \node[box, dashed, text width=58mm, font=\scriptsize] (if) at (7.55, -6.15) {or one fixed instrument (default piano): the head is not sampled};
   \draw[arr, rounded corners=3pt] (ib.east) -- ++(0.2, 0) |- ([yshift=2mm]ih.west);
   \draw[parr, rounded corners=3pt] (ic.east) -- ++(0.2, 0) |- ([yshift=-2mm]ih.west);
   \draw[arr] (ih) -- (im);
@@ -172,11 +172,11 @@
   \draw[arr, dashed, rounded corners=4pt] (if.east) -| (is.south);
 
   %% row C: length and the end of the piece
-  \node[rowtitle] at (-1.0, -6.55) {Length and the end: the requested length $L$ (seconds)};
-  \node[box, text width=19mm, minimum height=13mm] (len) at (0, -7.65) {length $L$\\[-1pt] {\scriptsize from the user (or none)}};
-  \node[gbox, text width=36mm, minimum height=13mm, font=\scriptsize] (lv) at (3.85, -7.65) {each new note: seconds left $L - $ onset and share played onset$\,/\,L$ $\to$ two levels, added to its note vector (2, 5)};
-  \node[box, minimum height=13mm, text width=26mm, font=\scriptsize] (eh) at (7.95, -7.65) {pitch head: value 129 = \textbf{EOS}, the end of the piece};
-  \node[box, minimum height=13mm, text width=60mm, font=\scriptsize, align=left] (er) at (13.35, -7.65) {%
+  \node[rowtitle] at (-1.0, -7.50) {Length and the end: the requested length $L$ (seconds)};
+  \node[box, text width=19mm, minimum height=13mm] (len) at (0, -8.60) {length $L$\\[-1pt] {\scriptsize from the user (or none)}};
+  \node[gbox, text width=36mm, minimum height=13mm, font=\scriptsize] (lv) at (3.85, -8.60) {each new note: seconds left $L - $ onset and share played onset$\,/\,L$ $\to$ two levels, added to its note vector (2, 5)};
+  \node[box, minimum height=13mm, text width=26mm, font=\scriptsize] (eh) at (7.95, -8.60) {pitch head: value 129 = \textbf{EOS}, the end of the piece};
+  \node[box, minimum height=13mm, text width=60mm, font=\scriptsize, align=left] (er) at (13.35, -8.60) {%
     before $0.85\,L$: EOS blocked (floor)\\
     past $L$: EOS logit $+\,0.5$ per second over (ramp)\\
     at $1.2\,L$: EOS forced, the row fades out (stop)};
@@ -185,12 +185,12 @@
   \draw[arr] (eh) -- (er);
 
   %% row D: style hold
-  \node[rowtitle] at (-1.0, -9.00) {Keep-style: the opening's own description holds the rest of the piece};
-  \node[box, text width=19mm, minimum height=13mm] (op) at (0, -10.10) {BOS + 255 notes\\[-1pt] {\scriptsize written with the requested captions}};
-  \node[pbox, text width=44mm, minimum height=13mm, font=\scriptsize] (hc) at (4.45, -10.10) {their description, in the
+  \node[rowtitle] at (-1.0, -9.95) {Keep-style: the opening's own description holds the rest of the piece};
+  \node[box, text width=19mm, minimum height=13mm] (op) at (0, -11.05) {BOS + 255 notes\\[-1pt] {\scriptsize written with the requested captions}};
+  \node[pbox, text width=44mm, minimum height=13mm, font=\scriptsize] (hc) at (4.45, -11.05) {their description, in the
     section-caption words: loudness, pace, register, up to 3 instruments (no \capt{busy} / \capt{dense} above 25 notes / s)};
-  \node[box, text width=24mm, minimum height=13mm, font=\scriptsize] (ha) at (8.75, -10.10) {LaBSE + section caption adapter (1)};
-  \node[pbox, text width=56mm, minimum height=13mm, font=\scriptsize] (hs) at (13.35, -10.10) {the section caption of every
+  \node[box, text width=24mm, minimum height=13mm, font=\scriptsize] (ha) at (8.75, -11.05) {LaBSE + section caption adapter (1)};
+  \node[pbox, text width=56mm, minimum height=13mm, font=\scriptsize] (hs) at (13.35, -11.05) {the section caption of every
     later section: once, at note 257; with lock-instruments, the same moment fixes the instrument mask (row above)};
   \draw[arr] (op) -- (hc);
   \draw[parr] (hc) -- (ha);
