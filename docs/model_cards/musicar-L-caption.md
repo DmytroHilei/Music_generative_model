@@ -267,7 +267,8 @@ judged with the thresholds this model's own training captions were built from, s
 
 | System | Parameters | F, English | F, Ukrainian | Caption match | Runaway (10-s windows) | Seconds |
 |---|---|---|---|---|---|---|
-| **musicar-L-caption** (`--config f1`, 60 s asked) | 477M (+ frozen LaBSE) | **1.07** | **0.95** | **0.857** | 0.02 | 63.5 |
+| **musicar-L-caption** (`--config f1`, 60 s asked) | 477M (+ frozen LaBSE) | 1.07 | 0.95 | 0.857 | 0.02 | 63.5 |
+| **musicar-L-caption** (`--config f1 --retrieve gigamidi_replay_train`, 60 s asked) | 477M (+ frozen LaBSE) | **1.08** | **1.15** | **0.871** | 0.02 | 49.2 |
 | [MIDI-LLM](https://huggingface.co/slseanwu/MIDI-LLM_Llama-3.2-1B) ([arXiv:2511.03942](https://arxiv.org/abs/2511.03942)) | 1.72B | 0.60 | 0.09 | 0.553 | 0.14 | 35.0 |
 | [Text2midi](https://huggingface.co/amaai-lab/text2midi) ([arXiv:2412.16526](https://arxiv.org/abs/2412.16526)) | 250M (incl. its frozen FLAN-T5 encoder) | 0.54 | 0.06 | 0.554 | 0.09 | 25.2 |
 
@@ -275,29 +276,45 @@ Seconds: this model was asked for 60 s; MIDI-LLM and Text2midi have no length in
 budgets (2,046 and 2,000 tokens). Both learned text to MIDI from MidiCaps' English captions and hardly react to
 Ukrainian ones; this model reads both languages through LaBSE.
 
+With `--retrieve` the caption also picks a real 128-note opening (from GigaMIDI, by LaBSE and measured attributes)
+that the model continues; the opening is not in the file, hence the shorter pieces. For its empty prompt each piece
+starts from a random opening of the same files. Two paths that are not released and keep the best of 4 candidates
+by caption match score higher: the project's 107M caption pilot (F 1.16 / 1.16, caption match 0.972) and a band
+fine-tune of musicar-L without text input, whose caption only picks the opening and ranks the candidates (1.12 /
+1.22, 0.981).
+
 **Continuation of real multi-instrument music** (32 clean GigaMIDI validation prompts of 128 notes with at least 3
 instruments; up to 1,000 new notes each, the first 1,000 scored, a continuation that ends sooner scored as it is).
 D = weighted gap in six row statistics of density and instrument use (one instrument taking over, top-instrument share,
 notes per second 0.20 each; out-of-band instruments, instrument count 0.15 each; runaway 0.10) to the real
 continuations of the same files, each divided by the real rows' spread (with a floor); lower = closer to the real
-continuations on these statistics. Runaway = share of rows above 40 notes per second:
+continuations on these statistics. Runaway = share of rows above 40 notes per second. The last column scores the
+first 200 new notes only:
 
-| System | Parameters | Notes / s | Instruments | Runaway | D |
-|---|---|---|---|---|---|
-| Real continuation | | 24.0 | 7.7 | 0.16 | 0 |
-| [musicar-L](https://huggingface.co/Dimitri-206265/musicar-L) (temperature 0.9) | 464M | 23.5 | 6.9 | 0.13 | **0.121** |
-| **musicar-L-caption** (`--config f1`, no caption) | 477M | 12.8 | 7.8 | 0.06 | **0.218** |
-| [Anticipatory Music Transformer, large](https://huggingface.co/stanford-crfm/music-large-800k) ([arXiv:2306.08620](https://arxiv.org/abs/2306.08620)) | 780M | 21.2 | 7.4 | 0.06 | 0.289 |
-| [SkyTNT midi-model tv2o-medium](https://huggingface.co/skytnt/midi-model-tv2o-medium) | 234M | 22.9 | 5.3 | 0.16 | 0.314 |
-| [Music-Llama](https://huggingface.co/asigalov61/Music-Llama) (SkyTNT architecture) | 457M | 28.9 | 5.7 | 0.25 | 0.357 |
-| [Moonbeam](https://huggingface.co/guozixunnicolas/moonbeam-midi-foundation-model) ([arXiv:2505.15559](https://arxiv.org/abs/2505.15559)) | 839M | 49.5 | 8.9 | 0.31 | 0.703 |
+| System | Parameters | Notes / s | Instruments | Runaway | D | D, first 200 notes |
+|---|---|---|---|---|---|---|
+| Real continuation | | 24.0 | 7.7 | 0.16 | 0 | 0 |
+| [musicar-L](https://huggingface.co/Dimitri-206265/musicar-L) (temperature 0.9) | 464M | 23.5 | 6.9 | 0.13 | **0.121** | **0.090** |
+| **musicar-L-caption** (`--config f1`, no caption) | 477M | 12.8 | 7.8 | 0.06 | **0.218** | 0.198 |
+| [Anticipatory Music Transformer, large](https://huggingface.co/stanford-crfm/music-large-800k) ([arXiv:2306.08620](https://arxiv.org/abs/2306.08620)) | 780M | 21.2 | 7.4 | 0.06 | 0.289 | 0.239 |
+| [SkyTNT midi-model tv2o-medium](https://huggingface.co/skytnt/midi-model-tv2o-medium) | 234M | 22.9 | 5.3 | 0.16 | 0.314 | 0.184 |
+| [Music-Llama](https://huggingface.co/asigalov61/Music-Llama) (SkyTNT architecture) | 457M | 28.9 | 5.7 | 0.25 | 0.357 | 0.218 |
+| [Moonbeam](https://huggingface.co/guozixunnicolas/moonbeam-midi-foundation-model) ([arXiv:2505.15559](https://arxiv.org/abs/2505.15559)), temperature 0.9, top-p 0.95 (its README) | 839M | 49.5 | 8.9 | 0.31 | 0.703 | 0.322 |
+| Moonbeam, temperature 0.6, top-p 0.9 (its completion example) | 839M | 85.9 | 5.3 | 0.06 | 1.316 | 0.525 |
 
 Moonbeam's context (1,024 notes) is shorter than prompt + continuation; past it the harness restarts its window on the
-last 768 notes (the head-to-head's scheme, not the authors').
+last 768 notes (the head-to-head's scheme, not the authors'). At temperature 0.9 its notes per second climb inside
+the first window, before any restart: rows above 40 notes per second are 16% over its first 200 new notes and 46%
+over new notes 447-894 (real continuations 13% and 18%). At 0.6 the density stays flat except in 2 files that stack
+notes on one onset (most of its mean), and it repeats itself more: 46% of its new pitched notes sit inside exact
+copies of 16 or more chords (real continuations 5%). Over the first 200 notes every model is closer to the real
+continuations; SkyTNT, Music-Llama and Moonbeam gain most.
 
 Without a caption or a length this model writes shorter, sparser pieces than the real continuations (12.8 vs 24.0
 notes per second; 53% of the rows end inside the 1,000 notes), which is most of its distance; its base musicar-L is
-closer (0.121). On these statistics both are closer to the real continuations than every other model in the table.
+closer (0.121). Over the first 1,000 notes both are closer to the real continuations on these statistics than every
+other model in the table; over the first 200, SkyTNT tv2o-medium (0.184) comes ahead of this model (0.198), and
+musicar-L stays closest (0.090).
 
 ## Limitations and biases
 

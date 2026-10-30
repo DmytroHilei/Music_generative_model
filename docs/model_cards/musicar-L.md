@@ -186,33 +186,41 @@ instruments; up to 1,000 new notes each, the first 1,000 scored, a continuation 
 D = weighted gap in six row statistics of density and instrument use (one instrument taking over, top-instrument share,
 notes per second 0.20 each; out-of-band instruments, instrument count 0.15 each; runaway 0.10) to the real
 continuations of the same files, each divided by the real rows' spread (with a floor); lower = closer to the real
-continuations on these statistics. Runaway = share of rows above 40 notes per second:
+continuations on these statistics. Runaway = share of rows above 40 notes per second. The last column scores the
+first 200 new notes only:
 
-| System | Parameters | Notes / s | Instruments | Runaway | D |
-|---|---|---|---|---|---|
-| Real continuation | | 24.0 | 7.7 | 0.16 | 0 |
-| **musicar-L** (temperature 0.9) | 464M | 23.5 | 6.9 | 0.13 | **0.121** |
-| [musicar-L-caption](https://huggingface.co/Dimitri-206265/musicar-L-caption) (no caption) | 477M | 12.8 | 7.8 | 0.06 | 0.218 |
-| [Anticipatory Music Transformer, large](https://huggingface.co/stanford-crfm/music-large-800k) ([arXiv:2306.08620](https://arxiv.org/abs/2306.08620)) | 780M | 21.2 | 7.4 | 0.06 | 0.289 |
-| [SkyTNT midi-model tv2o-medium](https://huggingface.co/skytnt/midi-model-tv2o-medium) | 234M | 22.9 | 5.3 | 0.16 | 0.314 |
-| [Music-Llama](https://huggingface.co/asigalov61/Music-Llama) (SkyTNT architecture) | 457M | 28.9 | 5.7 | 0.25 | 0.357 |
-| [Moonbeam](https://huggingface.co/guozixunnicolas/moonbeam-midi-foundation-model) ([arXiv:2505.15559](https://arxiv.org/abs/2505.15559)) | 839M | 49.5 | 8.9 | 0.31 | 0.703 |
+| System | Parameters | Notes / s | Instruments | Runaway | D | D, first 200 notes |
+|---|---|---|---|---|---|---|
+| Real continuation | | 24.0 | 7.7 | 0.16 | 0 | 0 |
+| **musicar-L** (temperature 0.9) | 464M | 23.5 | 6.9 | 0.13 | **0.121** | **0.090** |
+| [musicar-L-caption](https://huggingface.co/Dimitri-206265/musicar-L-caption) (no caption) | 477M | 12.8 | 7.8 | 0.06 | 0.218 | 0.198 |
+| [Anticipatory Music Transformer, large](https://huggingface.co/stanford-crfm/music-large-800k) ([arXiv:2306.08620](https://arxiv.org/abs/2306.08620)) | 780M | 21.2 | 7.4 | 0.06 | 0.289 | 0.239 |
+| [SkyTNT midi-model tv2o-medium](https://huggingface.co/skytnt/midi-model-tv2o-medium) | 234M | 22.9 | 5.3 | 0.16 | 0.314 | 0.184 |
+| [Music-Llama](https://huggingface.co/asigalov61/Music-Llama) (SkyTNT architecture) | 457M | 28.9 | 5.7 | 0.25 | 0.357 | 0.218 |
+| [Moonbeam](https://huggingface.co/guozixunnicolas/moonbeam-midi-foundation-model) ([arXiv:2505.15559](https://arxiv.org/abs/2505.15559)), temperature 0.9, top-p 0.95 (its README) | 839M | 49.5 | 8.9 | 0.31 | 0.703 | 0.322 |
+| Moonbeam, temperature 0.6, top-p 0.9 (its completion example) | 839M | 85.9 | 5.3 | 0.06 | 1.316 | 0.525 |
 
 Moonbeam's context (1,024 notes) is shorter than prompt + continuation; past it the harness restarts its window on the
-last 768 notes (the head-to-head's scheme, not the authors').
+last 768 notes (the head-to-head's scheme, not the authors'). At temperature 0.9 its notes per second climb inside
+the first window, before any restart: rows above 40 notes per second are 16% over its first 200 new notes and 46%
+over new notes 447-894 (real continuations 13% and 18%). At 0.6 the density stays flat except in 2 files that stack
+notes on one onset (most of its mean), and it repeats itself more: 46% of its new pitched notes sit inside exact
+copies of 16 or more chords (real continuations 5%). Over the first 200 notes every model is closer to the real
+continuations; SkyTNT, Music-Llama and Moonbeam gain most.
 
 **Solo-piano continuation** (32 prompts from the project's held-out split of Aria-MIDI, which Aria may have seen in
 training; up to 1,000 new notes each, the real continuations all 1,000 long). With one instrument, D here measures
 only how close the note rate is to the real one (and runaway):
 
-| System | Parameters | Notes / s | Runaway | D |
-|---|---|---|---|---|
-| Real continuation | | 7.95 | 0 | 0 |
-| **musicar-L** (temperature 0.9) | 464M | 8.95 | 0 | **0.040** |
-| [Aria medium](https://huggingface.co/loubb/aria-medium-base), continuation weights ([arXiv:2506.23869](https://arxiv.org/abs/2506.23869)) | 659M | 9.99 | 0.03 | 0.096 |
+| System | Parameters | Notes / s | Runaway | D | D, first 200 notes |
+|---|---|---|---|---|---|
+| Real continuation | | 7.95 | 0 | 0 | 0 |
+| **musicar-L** (temperature 0.9) | 464M | 8.95 | 0 | **0.040** | **0.019** |
+| [Aria medium](https://huggingface.co/loubb/aria-medium-base), continuation weights ([arXiv:2506.23869](https://arxiv.org/abs/2506.23869)) | 659M | 9.99 | 0.03 | 0.096 | 0.067 |
 
-On the same prompts the project's 108M piano-cover fine-tune (not released) is closer still in note rate (D 0.018);
-its 450M piano-cover fine-tune of this model (not released), which writes short covers that end, is further (0.177).
+On the same prompts the project's 108M piano-cover fine-tune (not released) is closer still in note rate (D 0.018; 0.006
+over the first 200 notes); its 450M piano-cover fine-tune of this model (not released), which writes short covers
+that end, is further (0.177; 0.078).
 
 ## Limitations and biases
 

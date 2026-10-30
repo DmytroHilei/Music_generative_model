@@ -1,8 +1,9 @@
-system D
-real 0.0
-long_450m 0.121
-f1 0.218
-amt 0.289
-skytnt_medium 0.314
-skytnt_large 0.357
-moonbeam 0.703
+system D D200
+real 0.0 0.0
+long_450m 0.121 0.09
+f1 0.218 0.198
+amt 0.289 0.239
+skytnt_medium 0.314 0.184
+skytnt_large 0.357 0.218
+moonbeam 0.703 0.322
+moonbeam_t06 1.316 0.525

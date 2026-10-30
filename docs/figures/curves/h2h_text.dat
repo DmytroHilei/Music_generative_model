@@ -1,5 +1,7 @@
 system F_en F_uk
 f1 1.073 0.951
+f1_retrieve 1.08 1.146
 s50 1.164 1.158
+caption 1.123 1.218
 midi_llm 0.604 0.092
 text2midi 0.541 0.06

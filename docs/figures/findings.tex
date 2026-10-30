@@ -83,13 +83,15 @@
 \pgfplotsset{dots/.style={cplot, ymin=-0.6, y dir=reverse, grid=none, xmajorgrids, axis y line*=none,
   y axis line style={draw=none}, ytick style={draw=none}, yticklabel style={align=right, xshift=-6pt}}}
 
-% head-to-head: D of each system's continuations (rows of curves/h2h_cont.dat: real, ours x 2, other models x 3)
+% head-to-head: D of each system's continuations (rows of curves/h2h_cont.dat: real, ours x 2, other models x 5;
+% filled = the first 1,000 new notes, hollow = the first 200; Moonbeam at T 0.6 is off the scale at 1,000)
 \newsavebox{\curveHH}
 \sbox{\curveHH}{\begin{tikzpicture}
-\begin{axis}[dots, width=4.6cm, height=5.0cm, ymax=6.6, xmin=0, xmax=0.75, xtick={0,0.2,0.4,0.6}, ytick={0,...,6},
+\begin{axis}[dots, width=4.6cm, height=5.6cm, ymax=7.6, xmin=0, xmax=0.75, xtick={0,0.2,0.4,0.6}, ytick={0,...,7},
     xlabel={D: distance to the real continuations (lower = closer)},
     yticklabels={{real continuation}, {musicar-L (464M)}, {musicar-L-caption (477M)}, {AMT large (780M)},
-                 {SkyTNT medium (234M)}, {Music-Llama, SkyTNT\\architecture (457M)}, {Moonbeam (839M)}}]
+                 {SkyTNT medium (234M)}, {Music-Llama, SkyTNT\\architecture (457M)}, {Moonbeam, $T$ 0.9 (839M)},
+                 {Moonbeam, $T$ 0.6 (839M)}}]
   \draw[black!25, line width=1.2pt] (axis cs:0, 1) -- (axis cs:0.121, 1);
   \node[anchor=west, font=\scriptsize, text=black!80, inner sep=4pt] at (axis cs:0.121, 1) {0.121};
   \draw[black!25, line width=1.2pt] (axis cs:0, 2) -- (axis cs:0.218, 2);
@@ -102,24 +104,29 @@
   \node[anchor=west, font=\scriptsize, text=black!80, inner sep=4pt] at (axis cs:0.357, 5) {0.357};
     \draw[black!25, line width=1.2pt] (axis cs:0, 6) -- (axis cs:0.703, 6);
   \node[anchor=south east, font=\scriptsize, text=black!80, inner sep=3pt] at (axis cs:0.703, 6) {0.703};
+  \draw[black!25, line width=1.2pt, -{Stealth[length=4pt]}] (axis cs:0, 7) -- (axis cs:0.75, 7);
+  \node[anchor=south east, font=\scriptsize, text=black!80, inner sep=3pt] at (axis cs:0.75, 7) {1.316 $\rightarrow$};
   \node[anchor=west, font=\scriptsize, text=black!80, inner sep=4pt] at (axis cs:0, 0) {0 (the reference)};
-  \addplot[black, only marks, mark=*, mark size=2.4pt] table[x=D, y expr=\coordindex, skip coords between index={1}{7}] {curves/h2h_cont.dat};
-  \addplot[tealT, only marks, mark=*, mark size=2.8pt] table[x=D, y expr=\coordindex, skip coords between index={0}{1}, skip coords between index={3}{7}] {curves/h2h_cont.dat};
-  \addplot[altG, only marks, mark=*, mark size=2.4pt] table[x=D, y expr=\coordindex, skip coords between index={0}{3}] {curves/h2h_cont.dat};
+  \addplot[black, only marks, mark=*, mark size=2.4pt] table[x=D, y expr=\coordindex, skip coords between index={1}{8}] {curves/h2h_cont.dat};
+  \addplot[tealT, only marks, mark=*, mark size=2.8pt] table[x=D, y expr=\coordindex, skip coords between index={0}{1}, skip coords between index={3}{8}] {curves/h2h_cont.dat};
+  \addplot[altG, only marks, mark=*, mark size=2.4pt] table[x=D, y expr=\coordindex, skip coords between index={0}{3}, skip coords between index={7}{8}] {curves/h2h_cont.dat};
+  \addplot[tealT, only marks, mark=o, mark size=2.8pt, line width=1pt, fill=white] table[x=D200, y expr=\coordindex, skip coords between index={0}{1}, skip coords between index={3}{8}] {curves/h2h_cont.dat};
+  \addplot[altG, only marks, mark=o, mark size=2.4pt, line width=1pt, fill=white] table[x=D200, y expr=\coordindex, skip coords between index={0}{3}] {curves/h2h_cont.dat};
 \end{axis}
 \end{tikzpicture}}%
 
 \newsavebox{\hhTable}
 \sbox{\hhTable}{\scriptsize\renewcommand{\arraystretch}{1.3}\setlength{\tabcolsep}{4.5pt}%
-\begin{tabular}{@{}lrrrrrrrrrr@{}}
-system & notes / s & instr. & out of band & top share & takeover & runaway & copies & ended & D & params\\\hline
-real continuation & 24.0 & 7.69 & 0.153 & 0.390 & 0 & 0.156 & 0.049 & 0.22 & 0 & \\
-\us{musicar-L} & 23.5 & 6.91 & 0.103 & 0.418 & 0 & 0.125 & 0.144 & 0.31 & \textbf{0.121} & 464M\\
-\us{musicar-L-caption} & 12.8 & 7.78 & 0.170 & 0.415 & 0 & 0.063 & 0 & 0.53 & \textbf{0.218} & 477M\\
-AMT large \rcite{15} & 21.2 & 7.44 & 0.117 & 0.468 & 0.094 & 0.063 & 0.043 & 0.78 & 0.289 & 780M\\
-SkyTNT medium \rcite{16} & 22.9 & 5.34 & 0 & 0.439 & 0.031 & 0.156 & 0.136 & 0.28 & 0.314 & 234M\\
-Music-Llama \rcite{17} & 28.9 & 5.69 & 0.020 & 0.439 & 0.031 & 0.250 & 0.137 & 0.25 & 0.357 & 457M\\
-Moonbeam \rcite{21} & 49.5 & 8.88 & 0.140 & 0.491 & 0.156 & 0.312 & 0.208 & 0.16 & 0.703 & 839M\\
+\begin{tabular}{@{}lrrrrrrrrrrr@{}}
+system & notes / s & instr. & out of band & top share & takeover & runaway & copies & ended & D & D, 200 & params\\\hline
+real continuation & 24.0 & 7.69 & 0.153 & 0.390 & 0 & 0.156 & 0.049 & 0.22 & 0 & 0 & \\
+\us{musicar-L} & 23.5 & 6.91 & 0.103 & 0.418 & 0 & 0.125 & 0.144 & 0.31 & \textbf{0.121} & \textbf{0.090} & 464M\\
+\us{musicar-L-caption} & 12.8 & 7.78 & 0.170 & 0.415 & 0 & 0.063 & 0 & 0.53 & \textbf{0.218} & 0.198 & 477M\\
+AMT large \rcite{15} & 21.2 & 7.44 & 0.117 & 0.468 & 0.094 & 0.063 & 0.043 & 0.78 & 0.289 & 0.239 & 780M\\
+SkyTNT medium \rcite{16} & 22.9 & 5.34 & 0 & 0.439 & 0.031 & 0.156 & 0.136 & 0.28 & 0.314 & 0.184 & 234M\\
+Music-Llama \rcite{17} & 28.9 & 5.69 & 0.020 & 0.439 & 0.031 & 0.250 & 0.137 & 0.25 & 0.357 & 0.218 & 457M\\
+Moonbeam \rcite{21}, $T$ 0.9 & 49.5 & 8.88 & 0.140 & 0.491 & 0.156 & 0.312 & 0.208 & 0.16 & 0.703 & 0.322 & 839M\\
+Moonbeam, $T$ 0.6 & 85.9 & 5.25 & 0.018 & 0.533 & 0.125 & 0.063 & 0.456 & 0 & 1.316 & 0.525 & 839M\\
 \end{tabular}}%
 
 \newsavebox{\curveHHp}
@@ -140,33 +147,38 @@ Moonbeam \rcite{21} & 49.5 & 8.88 & 0.140 & 0.491 & 0.156 & 0.312 & 0.208 & 0.16
   \addplot[black, only marks, mark=*, mark size=2.4pt] table[x=D, y expr=\coordindex, skip coords between index={1}{5}] {curves/h2h_piano.dat};
   \addplot[tealT, only marks, mark=*, mark size=2.8pt] table[x=D, y expr=\coordindex, skip coords between index={0}{1}, skip coords between index={3}{4}] {curves/h2h_piano.dat};
   \addplot[altG, only marks, mark=*, mark size=2.4pt] table[x=D, y expr=\coordindex, skip coords between index={0}{3}, skip coords between index={4}{5}] {curves/h2h_piano.dat};
+  \addplot[tealT, only marks, mark=o, mark size=2.8pt, line width=1pt, fill=white] table[x=D200, y expr=\coordindex, skip coords between index={0}{1}, skip coords between index={3}{4}] {curves/h2h_piano.dat};
+  \addplot[altG, only marks, mark=o, mark size=2.4pt, line width=1pt, fill=white] table[x=D200, y expr=\coordindex, skip coords between index={0}{3}, skip coords between index={4}{5}] {curves/h2h_piano.dat};
 \end{axis}
 \end{tikzpicture}}%
 
 \newsavebox{\hhPiano}
 \sbox{\hhPiano}{\scriptsize\renewcommand{\arraystretch}{1.3}\setlength{\tabcolsep}{4.5pt}%
-\begin{tabular}{@{}lrrrrrrr@{}}
-system & notes / s & runaway & ended & copies & prompt check & D & params\\\hline
-real continuation & 7.95 & 0 & 0 & 0.001 & 1 & 0 & \\
-\us{108M piano covers} (ua\_2048\_v2, not released) & 8.39 & 0 & 0.34 & 0.001 & 1 & \textbf{0.018} & 108M\\
-\us{musicar-L} & 8.95 & 0 & 0.41 & 0.003 & 1 & \textbf{0.040} & 464M\\
-Aria medium, continuation \rcite{20} & 9.99 & 0.031 & 0.31 & 0.007 & 1 & 0.096 & 659M\\
-\us{450M piano-cover fine-tune} (not released) & 3.53 & 0 & 1.00 & 0 & 1 & 0.177 & 464M\\
+\begin{tabular}{@{}lrrrrrrrr@{}}
+system & notes / s & runaway & ended & copies & prompt check & D & D, 200 & params\\\hline
+real continuation & 7.95 & 0 & 0 & 0.001 & 1 & 0 & 0 & \\
+\us{108M piano covers} (ua\_2048\_v2, not released) & 8.39 & 0 & 0.34 & 0.001 & 1 & \textbf{0.018} & \textbf{0.006} & 108M\\
+\us{musicar-L} & 8.95 & 0 & 0.41 & 0.003 & 1 & \textbf{0.040} & \textbf{0.019} & 464M\\
+Aria medium, continuation \rcite{20} & 9.99 & 0.031 & 0.31 & 0.007 & 1 & 0.096 & 0.067 & 659M\\
+\us{450M piano-cover fine-tune} (not released) & 3.53 & 0 & 1.00 & 0 & 1 & 0.177 & 0.078 & 464M\\
 \end{tabular}}%
 
 \newsavebox{\curveHHt}
 \sbox{\curveHHt}{\begin{tikzpicture}
-\begin{axis}[dots, width=4.6cm, height=2.9cm, ymax=3.6, xmin=0, xmax=1.3, xtick={0,0.25,0.5,0.75,1,1.25}, ytick={0,...,3},
+\begin{axis}[dots, width=4.6cm, height=4.1cm, ymax=5.6, xmin=0, xmax=1.3, xtick={0,0.25,0.5,0.75,1,1.25}, ytick={0,...,5},
     xlabel={F: caption following (higher = follows)},
-    yticklabels={{musicar-L-caption (477M)}, {107M caption pilot s50\\(best of 4)}, {MIDI-LLM (1.72B)}, {Text2midi (250M)}}]
+    yticklabels={{musicar-L-caption (477M)}, {musicar-L-caption,\\with \texttt{-{}-retrieve}}, {107M caption pilot s50\\(best of 4)},
+                 {band fine-tune, caption\\picks + ranks (best of 4)}, {MIDI-LLM (1.72B)}, {Text2midi (250M)}}]
   \draw[black!25, line width=1.2pt] (axis cs:0.951, 0) -- (axis cs:1.073, 0);
-  \draw[black!25, line width=1.2pt] (axis cs:1.158, 1) -- (axis cs:1.164, 1);
-  \draw[black!25, line width=1.2pt] (axis cs:0.092, 2) -- (axis cs:0.604, 2);
-  \draw[black!25, line width=1.2pt] (axis cs:0.06, 3) -- (axis cs:0.541, 3);
-  \addplot[tealT, only marks, mark=*, mark size=2.8pt] table[x=F_en, y expr=\coordindex, skip coords between index={2}{4}] {curves/h2h_text.dat};
-  \addplot[tealT, only marks, mark=o, mark size=2.8pt, line width=1pt, fill=white] table[x=F_uk, y expr=\coordindex, skip coords between index={2}{4}] {curves/h2h_text.dat};
-  \addplot[altG, only marks, mark=*, mark size=2.4pt] table[x=F_en, y expr=\coordindex, skip coords between index={0}{2}] {curves/h2h_text.dat};
-  \addplot[altG, only marks, mark=o, mark size=2.4pt, line width=1pt, fill=white] table[x=F_uk, y expr=\coordindex, skip coords between index={0}{2}] {curves/h2h_text.dat};
+  \draw[black!25, line width=1.2pt] (axis cs:1.08, 1) -- (axis cs:1.146, 1);
+  \draw[black!25, line width=1.2pt] (axis cs:1.158, 2) -- (axis cs:1.164, 2);
+  \draw[black!25, line width=1.2pt] (axis cs:1.123, 3) -- (axis cs:1.218, 3);
+  \draw[black!25, line width=1.2pt] (axis cs:0.092, 4) -- (axis cs:0.604, 4);
+  \draw[black!25, line width=1.2pt] (axis cs:0.06, 5) -- (axis cs:0.541, 5);
+  \addplot[tealT, only marks, mark=*, mark size=2.8pt] table[x=F_en, y expr=\coordindex, skip coords between index={4}{6}] {curves/h2h_text.dat};
+  \addplot[tealT, only marks, mark=o, mark size=2.8pt, line width=1pt, fill=white] table[x=F_uk, y expr=\coordindex, skip coords between index={4}{6}] {curves/h2h_text.dat};
+  \addplot[altG, only marks, mark=*, mark size=2.4pt] table[x=F_en, y expr=\coordindex, skip coords between index={0}{4}] {curves/h2h_text.dat};
+  \addplot[altG, only marks, mark=o, mark size=2.4pt, line width=1pt, fill=white] table[x=F_uk, y expr=\coordindex, skip coords between index={0}{4}] {curves/h2h_text.dat};
 \end{axis}
 \end{tikzpicture}}%
 
@@ -174,8 +186,10 @@ Aria medium, continuation \rcite{20} & 9.99 & 0.031 & 0.31 & 0.007 & 1 & 0.096 &
 \sbox{\textTable}{\scriptsize\renewcommand{\arraystretch}{1.3}\setlength{\tabcolsep}{4.5pt}%
 \begin{tabular}{@{}lrrrrrrrrr@{}}
 system & F, EN & F, UK & caption match & runaway & copies & notes / s & instr. & seconds & params\\\hline
-\us{musicar-L-caption} (app preset, 60 s) & \textbf{1.07} & \textbf{0.95} & \textbf{0.857} & 0.021 & 0.031 & 8.8 & 9.5 & 63.5 & 477M\\
+\us{musicar-L-caption} (app preset, 60 s) & 1.07 & 0.95 & 0.857 & 0.021 & 0.031 & 8.8 & 9.5 & 63.5 & 477M\\
+\us{musicar-L-caption} with \texttt{-{}-retrieve} (60 s) & \textbf{1.08} & \textbf{1.15} & \textbf{0.871} & 0.024 & 0.005 & 12.1 & 4.7 & 49.2 & 477M\\
 \us{107M caption pilot s50} (best of 4) & 1.16 & 1.16 & 0.972 & 0.009 & 0.081 & 12.2 & 3.5 & 88.5 & 119M\\
+\us{band fine-tune}, no text input (best of 4) & 1.12 & 1.22 & 0.981 & 0.011 & 0.068 & 15.1 & 3.4 & 61.0 & 464M\\
 MIDI-LLM \rcite{18} & 0.60 & 0.09 & 0.553 & 0.141 & 0.021 & 24.6 & 3.0 & 35.0 & 1.72B\\
 Text2midi \rcite{19} & 0.54 & 0.06 & 0.554 & 0.090 & 0.016 & 23.3 & 11.4 & 25.2 & 250M\\
 \end{tabular}}%
@@ -428,17 +442,19 @@ guidance \rcite{9} & classifier-free guidance: logits pushed away from the capti
 \node[cell, text width=8.6cm] (h1) at (A) {%
   {\footnotesize\bfseries Continuation: 32 prompts, 1,000 new notes each}\\[3pt]
   \usebox{\curveHH}\\[2pt]
-  On these density and instrument-use statistics both of our models continue closer to the real music than every
-  other open model run here. D in units of the real rows' spread (with a floor); 0 = the real continuations; up to
-  1,000 new notes, the first 1,000 scored.};
+  $\bullet$ the first 1,000 new notes, $\circ$ the first 200. Over 1,000 notes both of our models continue closer to
+  the real music on these density and instrument-use statistics than every other open model run here; over the first
+  200 every model is closer, SkyTNT medium passes musicar-L-caption (0.184 vs 0.198) and musicar-L stays closest
+  (0.090). D in units of the real rows' spread (with a floor); 0 = the real continuations.};
 \node[cell, text width=16.4cm] (h2) at (h1.north east) {%
   {\footnotesize\bfseries The row metrics behind D (mean over the 32 rows)}\\[5pt]
   \usebox{\hhTable}\\[6pt]
   \textbf{Setup.} Every system writes MIDI for one frozen prompt set; every file is read back from the MIDI and scored the
   same way, per note and per second, never per token, so the tokenizers never enter. Prompts: the 32 clean GigaMIDI
   validation files of the sample evaluation (128 notes, $\ge$ 3 instruments, evenly spaced). Each model runs with its
-  authors' sampling (AMT top-p 0.98; SkyTNT and Music-Llama $T$ 1.0, top-p 0.94, top-k 20; Moonbeam $T$ 0.9, top-p 0.95,
-  its 1,024-position window restarted on the last 768 notes by the harness, not the authors' scheme); ours with their presets
+  authors' sampling (AMT top-p 0.98; SkyTNT and Music-Llama $T$ 1.0, top-p 0.94, top-k 20; Moonbeam $T$ 0.9, top-p 0.95
+  from its README and $T$ 0.6, top-p 0.9 from its completion example, its 1,024-position window restarted on the last
+  768 notes by the harness, not the authors' scheme); ours with their presets
   (musicar-L $T$ 0.9; musicar-L-caption the app's f1 preset, no caption).\\[4pt]
   \textbf{Where the distance comes from.} musicar-L: its top instrument plays a little more (top share 0.418 vs
   0.390), it uses under one instrument fewer (6.9 vs 7.7) and it stays closer to the prompt's band (10\% vs 15\% out of
@@ -446,15 +462,17 @@ guidance \rcite{9} & classifier-free guidance: logits pushed away from the capti
   and ends its piece inside the 1,000 notes in 53\% of the rows (length training: no length asked = a short piece).
   AMT: one instrument takes over 9\% of the rows. SkyTNT and Music-Llama: almost no new instruments (0--2\% out of band vs
   15\% in the real music), 5.3--5.7 instruments, and Music-Llama runs away in a quarter of the rows. Moonbeam plays twice the real density (49.5 notes per
-  second: 0.33 of its 0.703), runs away in 31\% of the rows and lets one instrument take over 16\% (at $T$ 0.6: 85.9
-  notes per second, D 1.32). Verbatim copies:
+  second: 0.33 of its 0.703), runs away in 31\% of the rows and lets one instrument take over 16\%; its density climbs
+  inside the first window, before any restart (rows over 40 notes per second: 16\% of its first 200 new notes, 46\% of
+  notes 447--894; real 13\% and 18\%). At $T$ 0.6 its density stays flat except in 2 files that stack notes on one
+  onset (most of its 85.9 notes per second), and it copies more (46\%). Verbatim copies:
   musicar-L 14\%, SkyTNT 14\%, musicar-L-caption 0 (DRY).};
 \path let \p1 = (h1.south), \p2 = (h2.south), \n1 = {min(\y1, \y2)} in coordinate (A2) at (0, \n1);
 \node[cell, text width=8.6cm] (h3) at (A2) {%
   {\footnotesize\bfseries Piano: 32 prompts, 1,000 new notes each}\\[3pt]
   \usebox{\curveHHp}\\[2pt]
-  Solo-piano prompts from our held-out split of Aria-MIDI (Aria may have seen these files in training). For solo
-  piano D reduces to notes per second and runaway.};
+  $\bullet$ the first 1,000 new notes, $\circ$ the first 200. Solo-piano prompts from our held-out split of Aria-MIDI
+  (Aria may have seen these files in training). For solo piano D reduces to notes per second and runaway.};
 \node[cell, text width=16.4cm] (h4) at (h3.north east) {%
   {\footnotesize\bfseries The row metrics behind D (mean over the 32 rows)}\\[5pt]
   \usebox{\hhPiano}\\[6pt]
@@ -466,17 +484,19 @@ guidance \rcite{9} & classifier-free guidance: logits pushed away from the capti
 \node[cell, text width=8.6cm] (h5) at (A3) {%
   {\footnotesize\bfseries Text to MIDI: 27 captions + no caption, 16 pieces each, from the first note}\\[3pt]
   \usebox{\curveHHt}\\[2pt]
-  \textcolor{black!85}{$\bullet$} English pairs, \textcolor{black!85}{$\circ$} Ukrainian pairs. Every caption-reading
-  model of ours follows the captions better than both other open text-to-MIDI models, in both languages.};
+  \textcolor{black!85}{$\bullet$} English pairs, \textcolor{black!85}{$\circ$} Ukrainian pairs. Every caption
+  path of ours follows the captions better than both other open text-to-MIDI models, in both languages.};
 \node[cell, text width=16.4cm] (h6) at (h5.north east) {%
-  {\footnotesize\bfseries The scores behind F (mean over the 448 pieces of each system)}\\[5pt]
+  {\footnotesize\bfseries The scores behind F (mean over the 448 pieces of each system; 447 for MIDI-LLM and the band fine-tune: one file did not decode)}\\[5pt]
   \usebox{\textTable}\\[6pt]
   F over 9 English and 8 Ukrainian contrasts: \capt{fast} / \capt{slow}, \capt{minor} / \capt{major},
   \capt{loud} / \capt{soft}, \capt{high} / \capt{low} as caption pairs; \capt{solo piano}, \capt{a drum beat},
   \capt{without drums}, \capt{string ensemble}, \capt{electric guitar} each against no caption (no guitar prompt in
   Ukrainian). Caption match: see the glossary. Each model at its authors' sampling (MIDI-LLM $T$ 1.0, top-p 0.98;
-  Text2midi $T$ 1.0); musicar-L-caption with the app's f1 preset and a 60-s length; s50 keeps the best of 4 candidates
-  by caption match, so its row is not a single-sample score. The 471M LaBSE encoder (frozen) is not counted in our
+  Text2midi $T$ 1.0); musicar-L-caption with the app's f1 preset and a 60-s length; with \texttt{-{}-retrieve} the caption also
+  picks a real 128-note GigaMIDI opening that it continues (not in the file, hence 49 s; for the empty prompt a random
+  opening of the same files). s50 and the band fine-tune of musicar-L (multi\_control: no text input, the caption
+  picks the opening) keep the best of 4 candidates by caption match, so their rows are not single-sample scores. The 471M LaBSE encoder (frozen) is not counted in our
   parameters, Text2midi's FLAN-T5 encoder is.\\[4pt]
   \textbf{Ukrainian.} MIDI-LLM and Text2midi hardly move for Ukrainian captions (F 0.09 and 0.06): both learned text to
   MIDI from MidiCaps' English captions (MIDI-LLM: one Llama 3.2 1B with MIDI tokens added; Text2midi: FLAN-T5 +
