@@ -3,7 +3,7 @@ Anticipatory Music Transformer large (stanford-crfm/music-large-800k, 780M) on t
 prompts. The authors' sampler (anticipation.sample.add_token: top-p, a 1,017-token sliding window, no KV cache) in
 autoregressive mode, as sample.generate runs it, until --notes new notes or --max-seconds of new music.
 
-    .venv/bin/python eval/compare/h2h_baselines/amt.py [--prompts 1 --notes 50 --name amt_smoke]
+    .venv/bin/python eval/compare/h2h_baselines/amt.py [--task cont96] [--prompts 1 --notes 50 --name amt_smoke]
 """
 
 import argparse
@@ -44,6 +44,7 @@ def continue_events(model, events, notes, top_p, max_seconds):
 
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument('--task', choices=['cont', 'cont96'], default='cont')
     p.add_argument('--name', default='amt')
     p.add_argument('--prompts', type=int, default=0)
     p.add_argument('--notes', type=int, default=1000)
@@ -54,10 +55,10 @@ def main():
 
     weights = BASE / 'amt'
     model = AutoModelForCausalLM.from_pretrained(weights, dtype=torch.bfloat16).cuda().eval()
-    rows = prompts('cont', args.prompts)
-    d = out_dir('cont', args.name, dict(model='stanford-crfm/music-large-800k', weights=str(weights), dtype='bf16',
-                                        top_p=args.top_p, notes=args.notes, max_seconds=args.max_seconds,
-                                        seed=args.seed, sampler='anticipation.sample.add_token, AUTOREGRESS'))
+    rows = prompts(args.task, args.prompts)
+    d = out_dir(args.task, args.name, dict(model='stanford-crfm/music-large-800k', weights=str(weights), dtype='bf16',
+                                           top_p=args.top_p, notes=args.notes, max_seconds=args.max_seconds,
+                                           seed=args.seed, sampler='anticipation.sample.add_token, AUTOREGRESS'))
     prog = Progress(len(rows), args.name)
     for i, r in enumerate(rows):
         path = d / f"{r['id']}_0.mid"

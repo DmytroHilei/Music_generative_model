@@ -4,7 +4,8 @@ the 'large' of the SkyTNT Space) or tv2o-medium (skytnt/midi-model-tv2o-medium).
 Space's 'midi' tab does (cc / tempo eps 4, remap tracks and channels, default instruments), the trailing EOS
 dropped, then MIDIModel.generate with the Space's defaults (T 1.0, top-p 0.94, top-k 20) for --events new events.
 
-    .venv/bin/python eval/compare/h2h_baselines/skytnt.py --model large [--prompts 1 --events 50 --name sky_smoke]
+    .venv/bin/python eval/compare/h2h_baselines/skytnt.py --model large [--task cont96]
+        [--prompts 1 --events 50 --name sky_smoke]
 """
 
 import argparse
@@ -73,6 +74,7 @@ def load(weights):
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument('--model', choices=sorted(MODELS), required=True)
+    p.add_argument('--task', choices=['cont', 'cont96'], default='cont')
     p.add_argument('--name', default=None, help='default skytnt_<model>')
     p.add_argument('--prompts', type=int, default=0)
     p.add_argument('--events', type=int, default=1200, help='new MIDI events (notes + control / tempo changes)')
@@ -86,9 +88,9 @@ def main():
     name = args.name or f'skytnt_{args.model}'
     model = load(weights)
     tokenizer = model.tokenizer
-    rows = prompts('cont', args.prompts)
-    d = out_dir('cont', name, dict(model=repo, weights=str(weights), dtype='bf16', events=args.events,
-                                   temperature=args.temperature, top_p=args.top_p, top_k=args.top_k, seed=args.seed))
+    rows = prompts(args.task, args.prompts)
+    d = out_dir(args.task, name, dict(model=repo, weights=str(weights), dtype='bf16', events=args.events,
+                                      temperature=args.temperature, top_p=args.top_p, top_k=args.top_k, seed=args.seed))
     prog = Progress(len(rows), name)
     for i, r in enumerate(rows):
         path = d / f"{r['id']}_0.mid"

@@ -4,7 +4,8 @@ authors' CUDA sampler (aria.inference.sample_cuda.sample_batch, bf16 weights + a
 (T 0.98, min-p 0.035); the whole prompt file is the prompt (get_inference_prompt), then --tokens new tokens (~3.4 per
 note with the time tokens: 4,000 for 1,000 notes), cut after --notes new notes.
 
-    .venv/bin/python eval/compare/h2h_baselines/aria.py [--prompts 1 --notes 50 --tokens 200 --name aria_smoke]
+    .venv/bin/python eval/compare/h2h_baselines/aria.py [--task piano96]
+        [--prompts 1 --notes 50 --tokens 200 --name aria_smoke]
 """
 
 import argparse
@@ -56,6 +57,7 @@ def cut_after(seq, start, notes):
 
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument('--task', choices=['piano', 'piano96'], default='piano')
     p.add_argument('--name', default='aria')
     p.add_argument('--prompts', type=int, default=0)
     p.add_argument('--notes', type=int, default=1000)
@@ -67,11 +69,11 @@ def main():
 
     tokenizer = AbsTokenizer()
     model = load(tokenizer)
-    rows = prompts('piano', args.prompts)
-    d = out_dir('piano', args.name, dict(model='loubb/aria-medium-base (model-gen)', weights=str(WEIGHTS),
-                                         dtype='bf16, bf16 autocast', notes=args.notes, tokens=args.tokens,
-                                         temperature=args.temperature, min_p=args.min_p, seed=args.seed,
-                                         sampler='aria.inference.sample_cuda.sample_batch'))
+    rows = prompts(args.task, args.prompts)
+    d = out_dir(args.task, args.name, dict(model='loubb/aria-medium-base (model-gen)', weights=str(WEIGHTS),
+                                           dtype='bf16, bf16 autocast', notes=args.notes, tokens=args.tokens,
+                                           temperature=args.temperature, min_p=args.min_p, seed=args.seed,
+                                           sampler='aria.inference.sample_cuda.sample_batch'))
     prog = Progress(len(rows), args.name)
     for i, r in enumerate(rows):
         path = d / f"{r['id']}_0.mid"
