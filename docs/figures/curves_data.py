@@ -18,6 +18,11 @@ h2h_cont.dat                        system, D of the head-to-head continuations 
                                     1,000 new notes) and D200 (scores_first200.json: the first 200)
 h2h_text.dat                        system, F over the EN / UK pairs of the head-to-head text task (scores.json)
 h2h_piano.dat                       system, D and D200 of the head-to-head piano continuations (as h2h_cont.dat)
+h2h_cont96.dat                      system, D and D200 of the 96-prompt continuations (scores_96.json,
+                                    scores_96_first200.json), also over the published 32, the new 64 and the two folders
+h2h_piano96.dat                     system, D and D200 of the 96-prompt piano continuations
+h2h_midicaps.dat                    one row per score, one column per system: MidiCaps test set (midicaps/scores.json,
+                                    midicaps/clamp3.json, first segment)
 """
 import json
 import re
@@ -72,6 +77,36 @@ def head2head():
           [(s, round(piano[s]['D'], 3), round(piano200[s]['D'], 3)) for s in H2H_PIANO if s in piano])
 
 
+H2H_GROUPS = dict(pub='published', new='new', nd='no_drums', wd='with_drums')
+H2H_MIDICAPS = ('f1', 'midi_llm', 'text2midi', 'real', 'real_shuffled')
+H2H_MIDICAPS_ROWS = dict(tb='TB', ck='CK', recall='recall', match='match')
+
+
+def head2head_96():
+    scores = json.loads((ROOT / 'results/head2head/scores_96.json').read_text())
+    first200 = json.loads((ROOT / 'results/head2head/scores_96_first200.json').read_text())
+    keys = [f'{k}{n}' for k in H2H_GROUPS for n in ('', '200')]
+    rows = []
+    for s in H2H_CONT:
+        if s in scores['cont96']:
+            row = [s, round(scores['cont96'][s]['D'], 3), round(first200['cont96'][s]['D'], 3)]
+            for group in H2H_GROUPS.values():
+                row += [round(table[f'cont96 {group}'][s]['D'], 3) for table in (scores, first200)]
+            rows.append(row)
+    write('h2h_cont96.dat', ('system', 'D', 'D200', *keys), rows)
+    write('h2h_piano96.dat', ('system', 'D', 'D200'), [(s, round(scores['piano96'][s]['D'], 3),
+                                                        round(first200['piano96'][s]['D'], 3)) for s in H2H_PIANO])
+
+
+def head2head_midicaps():
+    scores = json.loads((ROOT / 'results/head2head/midicaps/scores.json').read_text())['scores']
+    clamp = json.loads((ROOT / 'results/head2head/midicaps/clamp3.json').read_text())['caption']['en']['first']
+    rows = [[name, *(round(scores[k]['rows'][s]['mean'], 3) for s in H2H_MIDICAPS)]
+            for k, name in H2H_MIDICAPS_ROWS.items()]
+    rows.append(['MRR', *(round(clamp['mrr']['rows'][s]['mean'], 3) for s in H2H_MIDICAPS)])
+    write('h2h_midicaps.dat', ('score', *H2H_MIDICAPS), rows)
+
+
 def main():
     for arm in ('base', 'newblock'):
         seeds = []
@@ -113,6 +148,8 @@ def main():
               [(t, ce) for t, ce in evals(LOGS / f'muon_{arm}_s1337.log', 'gigamidi_heldout') if t > 0])
     f1_run()
     head2head()
+    head2head_96()
+    head2head_midicaps()
 
 
 if __name__ == '__main__':

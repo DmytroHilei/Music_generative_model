@@ -1,0 +1,114 @@
+{
+ "task": "piano",
+ "draws": 10000,
+ "seed": 0,
+ "limitation": "D is a sum of absolute gaps: it stops at 0 and a gap near 0 can only grow under resampling, so the draws lean above D (mean draw - D) and D need not be central in their 95%. That range is the spread over the prompts, not a confidence interval for the true D, and its low end is no lower bound. A difference of two Ds keeps what the two inflations do not cancel (mean draw - difference), so read it with that column; the share of draws closer is no p-value. Only the files this prompt set drew from are covered.",
+ "notes": {
+  "1000": {
+   "prompts": 32,
+   "of": 32,
+   "systems": {
+    "aria": {
+     "D": 0.0956949449452101,
+     "low": 0.0069668733528623775,
+     "high": 0.23180665517642074,
+     "bias": 0.00046591605576977446
+    },
+    "long_450m": {
+     "D": 0.04011441710339923,
+     "low": 0.011067994082688482,
+     "high": 0.07102974477754612,
+     "bias": 0.00022251334233988618
+    },
+    "piano": {
+     "D": 0.17662418153099732,
+     "low": 0.13608903696981003,
+     "high": 0.217117599208477,
+     "bias": 2.8454439575914536e-05
+    },
+    "ua_2048_v2": {
+     "D": 0.01762087403062587,
+     "low": 0.0008794024261367002,
+     "high": 0.04824643277813678,
+     "bias": 0.002134171034890466
+    }
+   },
+   "pairs": {
+    "long_450m vs aria": {
+     "diff": -0.05558052784181086,
+     "low": -0.18089882710843044,
+     "high": 0.02513242258043374,
+     "bias": -0.00024340271342989522,
+     "closer": 0.8416
+    },
+    "piano vs aria": {
+     "diff": 0.08092923658578723,
+     "low": -0.051239054602154964,
+     "high": 0.17688642704383228,
+     "bias": -0.0004374616161938738,
+     "closer": 0.0985
+    },
+    "ua_2048_v2 vs aria": {
+     "diff": -0.07807407091458422,
+     "low": -0.2150276790115435,
+     "high": 0.020596279865881542,
+     "bias": 0.0016682549791206952,
+     "closer": 0.9084
+    }
+   }
+  },
+  "200": {
+   "prompts": 32,
+   "of": 32,
+   "systems": {
+    "aria": {
+     "D": 0.0665742425885043,
+     "low": 0.012208217103989458,
+     "high": 0.13990934876565142,
+     "bias": -0.0002464512379661138
+    },
+    "long_450m": {
+     "D": 0.019257371261532336,
+     "low": 0.0015059234659690808,
+     "high": 0.041099782421667765,
+     "bias": 0.0002825144976366205
+    },
+    "piano": {
+     "D": 0.07821555853975451,
+     "low": 0.038019571736432375,
+     "high": 0.12268433859953541,
+     "bias": 0.00027608349872036697
+    },
+    "ua_2048_v2": {
+     "D": 0.00643802435025684,
+     "low": 0.0005912012479984475,
+     "high": 0.04040812874088281,
+     "bias": 0.008477177258969593
+    }
+   },
+   "pairs": {
+    "long_450m vs aria": {
+     "diff": -0.047316871326971974,
+     "low": -0.11685600289039885,
+     "high": 0.0017910687475549965,
+     "bias": 0.0005289657356027447,
+     "closer": 0.9661
+    },
+    "piano vs aria": {
+     "diff": 0.011641315951250203,
+     "low": -0.05764030403506048,
+     "high": 0.07339215916285695,
+     "bias": 0.0005225347366865033,
+     "closer": 0.3424
+    },
+    "ua_2048_v2 vs aria": {
+     "diff": -0.06013621823824747,
+     "low": -0.12381007092213404,
+     "high": 0.004469048041471578,
+     "bias": 0.008723628496935726,
+     "closer": 0.9612
+    }
+   }
+  }
+ }
+}

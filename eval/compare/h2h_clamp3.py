@@ -63,9 +63,9 @@ LABELS = dict(first='first segment', own='own cosine', contrast='contrast', mrr=
 
 
 def prompts_of(task, n=0):
-    """The prompts with a caption ('' = unconditioned has none to match), first n if n > 0."""
+    """The prompts with a caption ('' = unconditioned has none to match), first n if n > 0; not the `excluded` ones."""
     rows = json.loads((OUT / task / 'prompts.json').read_text())['prompts']
-    return [p for p in rows if p['caption']][:n or None]
+    return [p for p in rows if p['caption'] and not p.get('excluded')][:n or None]
 
 
 def systems_of(task, only=()):
@@ -93,16 +93,24 @@ def write_emb(path, **arrays):
     os.replace(tmp, path)
 
 
+def pool_excluded(task_dir):
+    """The file stems of the real pool that may not enter it (h2h_midicaps eligible)."""
+    path = task_dir / 'eligible.json'
+    return set(json.loads(path.read_text())['excluded']) if path.exists() else set()
+
+
 def normalize(args):
     sys.path[:0] = [str(ROOT), str(ROOT / 'eval' / 'compare')]
     from head2head import read_midi, write_midi
 
     task_dir = OUT / args.task
     ids = {p['id'] for p in prompts_of(args.task, args.prompts)}
+    left_out = pool_excluded(task_dir)
     for system in systems_of(args.task, args.systems):
         done = set(read_emb(task_dir / 'clamp3_emb' / f'{system}.npz').get('ids', np.array([])).tolist())
         tmp = task_dir / 'clamp3_tmp' / system
-        files = [f for f in sorted((task_dir / system).glob('*.mid')) if system == POOL or prompt_id(f.stem) in ids]
+        files = [f for f in sorted((task_dir / system).glob('*.mid'))
+                 if (f.stem not in left_out if system == POOL else prompt_id(f.stem) in ids)]
         todo = [f for f in files if f.stem not in done and not (tmp / f.name).exists()]
         t0, bad = time.time(), []
         for f in todo:

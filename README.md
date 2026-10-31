@@ -48,13 +48,13 @@ links (`…/?invite=…`) work as well.
   - growing a trained model 2.5–4× faster than training from scratch;
   - the fine-tuned 450M halves the distance to real piano covers vs the earlier best model;
   - head-to-head with other open MIDI models on the same prompts ([comparison](#comparison-with-other-open-models)):
-        continuing 32 real multi-instrument prompts, musicar-L and musicar-L-caption stay closer to the real
-    continuations in density and instrument use than AMT large, SkyTNT, Music-Llama and Moonbeam over 1,000 new notes
-    (distance D 0.121 and 0.218 vs 0.289–0.703, Moonbeam at T 0.9; 1.316 at T 0.6; over the first 200, musicar-L
-    0.090 stays closest and SkyTNT medium, 0.184, passes musicar-L-caption, 0.198); on solo piano musicar-L's note rate
-    is closer to the real one than Aria's (D 0.040 vs 0.096); from text, musicar-L-caption follows captions better than
-    MIDI-LLM and Text2midi (F 1.07 vs 0.60 / 0.54 in English, 0.95 vs 0.09 / 0.06 in Ukrainian; with `--retrieve`
-    1.08 / 1.15).
+    continuing 96 real multi-instrument prompts over 1,000 new notes, musicar-L (distance D 0.144), musicar-L-caption
+    (0.179) and AMT large (0.097) are too close to rank, since the order changes with the prompt subset (on the first 32
+    prompts 0.121, 0.218 and 0.289); musicar-L stays closer than SkyTNT medium (0.280) and Music-Llama (0.561). On solo
+    piano musicar-L's note rate is closer to the real one than Aria's (D 0.035 vs 0.074). From short captions,
+    musicar-L-caption follows better than MIDI-LLM and Text2midi (F 1.07 vs 0.60 / 0.54 in English, 0.95 vs 0.09 / 0.06
+    in Ukrainian), but on 495 long MidiCaps test captions it is last on tempo, key and CLaMP 3 (exact key 0.042, at the
+    shuffled floor, vs 0.317 / 0.309).
 - **Rejected after testing:** mixture of experts, a bigger pitch head, future-prediction heads, velocity augmentation
   (kept in [`musicar/model/rejected.py`](musicar/model/rejected.py) with their results).
 
@@ -135,6 +135,38 @@ except in 2 files that stack notes on one onset, and it copies more (46% of its 
 of 16 or more chords). Over the first 200 notes every model is closer to the real continuations; SkyTNT, Music-Llama
 and Moonbeam gain most.
 
+**The same continuation on 96 prompts.** The published 32 all come from GigaMIDI's no-drums folder, so 64 prompts were
+added, 33 from it and 31 from the with-drums folder, which is the two folders' share of the eligible files. Moonbeam was
+not run on these. Each row of the second table is scored against its own real continuations:
+
+| System | Notes / s | Instruments | Out of band | Takeover | Runaway | Copies | D | D, first 200 |
+|---|---|---|---|---|---|---|---|---|
+| real continuation | 24.5 | 6.9 | 0.12 | 0.02 | 0.11 | 0.12 | 0 | 0 |
+| **musicar-L** | 25.1 | 6.0 | 0.07 | 0.02 | 0.13 | 0.14 | 0.144 | **0.084** |
+| **musicar-L-caption** (no caption) | 16.4 | 7.1 | 0.13 | 0.02 | 0.05 | 0.01 | 0.179 | 0.205 |
+| AMT large | 23.3 | 7.4 | 0.16 | 0.03 | 0.09 | 0.05 | **0.097** | 0.099 |
+| SkyTNT tv2o-medium | 25.4 | 4.9 | 0 | 0.03 | 0.18 | 0.15 | 0.280 | 0.161 |
+| Music-Llama | 38.2 | 5.0 | 0.02 | 0.04 | 0.38 | 0.12 | 0.561 | 0.219 |
+
+| Prompts | musicar-L | musicar-L-caption | AMT large | SkyTNT medium | Music-Llama |
+|---|---|---|---|---|---|
+| all 96 | 0.144 | 0.179 | **0.097** | 0.280 | 0.561 |
+| the published 32 | **0.121** | 0.218 | 0.289 | 0.314 | 0.357 |
+| the new 64 | 0.181 | **0.159** | 0.224 | 0.295 | 0.693 |
+| no-drums folder, 65 (most of these have drums) | 0.137 | 0.200 | **0.094** | 0.286 | 0.485 |
+| with-drums folder, 31 | 0.246 | **0.199** | 0.371 | 0.316 | 0.846 |
+| all 96, first 200 notes | **0.084** | 0.205 | 0.099 | 0.161 | 0.219 |
+| the published 32, first 200 | **0.090** | 0.198 | 0.239 | 0.184 | 0.218 |
+| the new 64, first 200 | 0.098 | 0.215 | **0.047** | 0.155 | 0.264 |
+
+The published ranking does not hold on the wider set, and no system leads every row. D is a gap between means, so errors
+can cancel over a wider set: AMT's 0.097 is below both its 0.289 and its 0.224. In a paired bootstrap over the prompts,
+musicar-L is closer than AMT in 26% of the draws (59% at 200 notes) and closer than SkyTNT medium and Music-Llama in all
+of them, at both lengths; musicar-L-caption is closer than AMT in 6%, SkyTNT medium in 93% (24% at 200) and Music-Llama
+in 100% (54% at 200). These shares are no p-values. musicar-L-caption's gap is density again: 24 notes per second over the
+first 200 new notes, 16.4 over 1,000. AMT keeps the prompt's instruments least, which D does not score (0.77 vs real
+0.92, musicar-L 0.89).
+
 **Piano continuation** of 32 solo-piano prompts from our held-out split of Aria-MIDI (which Aria may have seen in
 training), up to 1,000 new notes each. With one instrument, D here only measures how close the note rate is to the real
 one (and runaway):
@@ -149,6 +181,16 @@ one (and runaway):
 
 The 450M piano-cover fine-tune writes short covers that end (every row ends inside the 1,000 notes), so it is the one
 model of ours further from the real note rate than Aria.
+
+On 96 prompts (the 32 + 64 new ones) the order holds at both lengths:
+
+| System | Notes / s | Runaway | Ended | D | D, first 200 | Draws closer than Aria |
+|---|---|---|---|---|---|---|
+| real continuation | 8.31 | 0 | 0 | 0 | 0 | |
+| **108M piano-cover fine-tune** (ua_2048_v2, not released) | 8.61 | 0 | 0.29 | **0.012** | **0.003** | 98% |
+| **musicar-L** | 9.19 | 0 | 0.48 | **0.035** | **0.016** | 93% |
+| Aria medium | 9.93 | 0.02 | 0.20 | 0.074 | 0.044 | |
+| 450M piano-cover fine-tune (not released) | 3.75 | 0 | 0.91 | 0.182 | 0.081 | 0.1% |
 
 **Text to MIDI** from the first note: 28 prompts (15 English and 12 Ukrainian captions and the empty prompt), 16 pieces
 each. F = caption following over 9 English and 8 Ukrainian contrasts (higher = follows); caption match = how well a
@@ -168,8 +210,39 @@ musicar-L-caption reads both languages through LaBSE. With `--retrieve` the capt
 GigaMIDI opening that the model continues (not in the file, hence the shorter pieces; for the empty prompt a random
 opening of the same files). Two unreleased paths that keep the best of 4 candidates by caption match score higher: our
 107M caption pilot (s50, F 1.16 / 1.16, caption match 0.972) and the band fine-tune of musicar-L without text input,
-whose caption only picks the opening and ranks the candidates (1.12 / 1.22, 0.981). Raw scores:
-`results/head2head/scores.md` and `scores_first200.md` (not tracked).
+whose caption only picks the opening and ranks the candidates (1.12 / 1.22, 0.981).
+
+**Text to MIDI on MidiCaps test captions.** The prompts above are short and suit our models; these are long English
+captions of [MidiCaps](https://arxiv.org/abs/2406.02255), the data both other models learned text to MIDI from. 500 rows
+were drawn from the 1,374 test rows outside GigaMIDI's train split, the replay store and any train file with the same
+notes; 5 later turned out to share notes with the replay store, so 495 are scored, one file each, on the first 40 s
+([`eval/compare/h2h_midicaps.py`](eval/compare/h2h_midicaps.py)). TB to CKD follow
+[Text2midi's paper](https://arxiv.org/abs/2412.16526), with tempo and key estimated from the notes because our files
+carry no tempo event. That puts even the real files at 0.608 and 0.586, so compare these numbers with each other, not
+with the papers'. real = the true files against their own targets (ceiling); shuffled = against another prompt's
+(floor). [CLaMP 3](https://arxiv.org/abs/2502.10362) MRR = how well a caption finds its own piece among 100 others;
+Fréchet = distance of the files to real ones in CLaMP 3's space ([`eval/compare/h2h_clamp3.py`](eval/compare/h2h_clamp3.py)):
+
+| Score | musicar-L-caption | MIDI-LLM | Text2midi | real | shuffled |
+|---|---|---|---|---|---|
+| TB: tempo in the asked bin | 0.244 | **0.400** | 0.345 | 0.608 | 0.248 |
+| TBT: or a neighbouring bin | 0.620 | **0.640** | **0.640** | 0.739 | 0.600 |
+| CK: exact key | 0.042 | **0.317** | 0.309 | 0.586 | 0.051 |
+| CKD: or the relative major / minor | 0.075 | **0.420** | 0.378 | 0.636 | 0.099 |
+| Instrument recall | 0.425 | **0.664** | 0.426 | 0.809 | 0.167 |
+| Family recall | 0.728 | **0.812** | 0.685 | 0.856 | 0.392 |
+| Instrument Jaccard | 0.250 | **0.554** | 0.221 | 0.671 | 0.093 |
+| Caption match (our thresholds) | 0.526 | **0.609** | 0.557 | 0.711 | 0.388 |
+| CLaMP 3 MRR | 0.122 | **0.276** | 0.156 | 0.469 | 0.052 |
+| CLaMP 3 Fréchet (lower = closer) | 193 | **112** | 154 | 33 | |
+| Runaway (10-s windows) | **0.036** | 0.148 | 0.072 | 0.059 | |
+
+musicar-L-caption is last on tempo, key, caption match and CLaMP 3, and at the floor on tempo bins and key; on instruments
+it is level with Text2midi and behind MIDI-LLM. Text2midi's 3 unusable files score 0. On the short English prompts above
+CLaMP 3 gives the opposite order (MRR 0.321 vs 0.239 MIDI-LLM, 0.257 Text2midi). The f1 preset was tuned on short prompts and
+never on key or tempo words inside long prose, so better settings may recover part of this; that is not tested yet.
+
+Raw scores: [`docs/head2head/`](docs/head2head/README.md).
 
 ## Pretrained models
 
@@ -229,7 +302,7 @@ Other folders:
 | `config/` | run configs: `pretrain/`, `finetune/`, `pilots/`, `f1/`, `smoke.py` (stacks on any of them); `generate/` = generation presets (TOML); `serve/engine.toml` = the app engine's settings |
 | `data/` | datasets, token stores and their metadata (see [`data/README.md`](data/README.md)); `skryabin/` = the hand-picked songs |
 | `data_prep/` | `datasets/` (downloads, tokenization into stores, store splits), `songs/` (song search, download, audio → MIDI, fine-tune CSVs), `labels/` (features, labels, pseudo-labels, caption text) |
-| `docs/` | experiment results (`experiments.md`), `figures/` (the architecture and findings sheets, per-model diagrams, chart data), `model_cards/` (the Hugging Face model cards) |
+| `docs/` | experiment results (`experiments.md`), `head2head/` (raw comparison scores), `figures/` (the architecture and findings sheets, per-model diagrams, chart data), `model_cards/` (the Hugging Face model cards) |
 | `eval/` | `settings/` (sampling sweeps, settings search), `compare/` (seeded comparisons, text control, sample statistics, the head-to-head with other open models), `probes/` (hidden-state probes, label coverage) |
 | `tools/` | `status.py` (dashboard), `sweeps/` (fine-tune sweeps), `bench/` (GPU / CPU throughput), `checkpoints/` (bf16 export, weight interpolation, checkpoint averaging) |
 | `cloud/` | rented-GPU pipeline: `setup/` (instance setup, preflight), `run/` (launch, auto-resume, stop), `sync/` (Hugging Face Hub checkpoints and data), `status/` |

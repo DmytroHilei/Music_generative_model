@@ -206,3 +206,19 @@ notes with half the windows at piece starts (f1_cap). Text follow F from text_ev
   instruments, 1,000 new notes; D = distance to the real continuations, lower = closer):
   musicar-L 0.121, musicar-L-caption 0.218, AMT large (780M) 0.289, SkyTNT midi-model tv2o-medium (234M) 0.314,
   Music-Llama (457M) 0.357.
+- **The same on 96 prompts** (the 32 + 33 from the no-drums folder + 31 from the with-drums folder, 2026-10-31):
+  AMT large 0.097, musicar-L 0.144, musicar-L-caption 0.179, SkyTNT medium 0.280, Music-Llama 0.561. The order is not
+  stable: musicar-L leads on the published 32 (0.121), musicar-L-caption on the new 64 (0.159, AMT 0.224), and AMT's pooled
+  0.097 is below both its subsets (0.289, 0.224) because D is a gap between means and its errors cancel. Over the first
+  200 notes: musicar-L 0.084, AMT 0.099, SkyTNT medium 0.161, musicar-L-caption 0.205, Music-Llama 0.219. Paired bootstrap:
+  musicar-L closer than AMT in 26% of the draws (59% at 200), closer than SkyTNT medium and Music-Llama in 100%.
+- **Piano on 96 prompts:** ua_2048_v2 0.012, musicar-L 0.035, Aria 0.074, 450M piano-cover fine-tune 0.182; the order of the
+  32 prompts holds (closer than Aria in 98%, 93% and 0.1% of the draws).
+- **Text on MidiCaps test captions** (495 long English captions unseen by F1, first 40 s, tempo and key estimated from the
+  notes; musicar-L-caption / MIDI-LLM / Text2midi / real / shuffled): tempo bin 0.244 / 0.400 / 0.345 / 0.608 / 0.248,
+  exact key 0.042 / 0.317 / 0.309 / 0.586 / 0.051, instrument recall 0.425 / 0.664 / 0.426 / 0.809 / 0.167, CLaMP 3 MRR
+  0.122 / 0.276 / 0.156 / 0.469 / 0.052, CLaMP 3 Fréchet 193 / 112 / 154 / 33. musicar-L-caption ignores the key here
+  (tonic right in 8.1% of the files, chance 8.3%; major / minor 54%), although the same preset follows short prompts
+  (minor 54% vs 12% of pieces, fast 72 vs slow 11 notes per second). Its tempo does move with the asked one (rank correlation 0.21,
+  MIDI-LLM 0.07, Text2midi 0.06, real 0.34). On our own short prompts CLaMP 3 keeps the order of F (MRR 0.321 vs 0.239 / 0.257).
+  Not tested: settings tuned for such captions. Raw tables: [`docs/head2head/`](head2head/README.md).

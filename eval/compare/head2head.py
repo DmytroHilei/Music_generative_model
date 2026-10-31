@@ -22,11 +22,15 @@ Tasks (results/head2head/<task>/):
         may have seen in training) with at least 128 + 1,000 notes, so every real continuation is complete, from 64
         evenly spaced files.
   cont96, piano96  the same stores at 96 prompts, supersets of the published sets: p00-p31 are cont's / piano's rows,
-        byte for byte, p32-p95 are new. cont96 goes on along cont's grid; piano's grid ends at its 32 rows, so piano96
-        adds 64 files evenly spaced over the eligible files left. `reuse` hard-links the published files of the systems
+        byte for byte, p32-p95 are new. All of cont's rows sit in GigaMIDI's no-drums folder, so cont96 adds 33 rows from
+        that folder and 31 from the with-drums folder (FOLDERS), one per equal part of its range: 65 / 31 rows, the
+        folders' shares of the files with >= 3 instruments (67.5 / 32.5%). `score` and `boot` also report each folder,
+        with its own real rows as the reference. piano's grid ends at its 32 rows, so piano96 adds 64 files evenly
+        spaced over the eligible files left. `reuse` hard-links the published files of the systems
         in CONT_TASKS (prompt i has seed + i in both sets, so they are the same runs) and a run writes p32+ only. Never
         write through such a link: it is the published file. Not part of a bare `prompts` or `score`.
   text  text_eval's prompts (EN + UK pairs and '' = unconditioned) from the start. prompts.json.
+  midicaps  500 test captions of MidiCaps that F1 cannot have seen; prompts and scores in h2h_midicaps.py.
 
 A system = a folder <task>/<system>/ of MIDI files <prompt id>_<k>.mid (cont: the prompt + the continuation in one
 file; text: the piece). Other models get adapters in their own environments that write the same names. Ours run here
@@ -78,10 +82,14 @@ CONT_TASKS = {'cont': dict(store='gigamidi_clean_validation', min_instruments=3,
               'piano': dict(store='aria_validation', min_instruments=1, min_notes=PROMPT_NOTES + REAL_NOTES,
                             candidates=64, n_rows=ROWS)}
 BASE_TASKS = list(CONT_TASKS)  # the published sets: a bare `prompts` and `score` stay on these
+# gigamidi_clean_validation keeps the archive's order: file ranges of its folders (the rest of the store is drums only,
+# which the 3-instrument filter rejects). The published rows are all in no_drums, whose name misleads: most have drums.
+FOLDERS = dict(no_drums=(0, 49623), with_drums=(49623, 62821))
 # supersets: base = the published set of their first rows, systems = what `reuse` links from it, grid_rows = rows taken
-# from the grid, the rest evenly spaced over the eligible files (piano's 64 candidates end at 32 rows)
+# from the grid, the rest from `fill` = {folder: rows} evenly spaced over the folder, else evenly spaced over the
+# eligible files (piano's 64 candidates end at 32 rows)
 CONT_TASKS.update(
-    cont96=dict(CONT_TASKS['cont'], n_rows=96, base='cont',
+    cont96=dict(CONT_TASKS['cont'], n_rows=96, grid_rows=ROWS, base='cont', fill=dict(no_drums=33, with_drums=31),
                 systems=('long_450m', 'f1', 'skytnt_medium', 'skytnt_large', 'amt')),
     piano96=dict(CONT_TASKS['piano'], n_rows=96, grid_rows=ROWS, base='piano',
                  systems=('long_450m', 'ua_2048_v2', 'piano', 'aria')))
@@ -90,7 +98,8 @@ COPY_LEN = 16
 # system -> generate presets (config/generate/*.toml, exactly as the app / generate.py use them) and options on top:
 # 'all' for every task, then the task's own; --set overrides them all
 SYSTEMS = {
-    'f1': dict(presets=['f1'], text=dict(length_seconds=60)),  # the app's default: f1_cap, guidance 2.5, T 1.1, DRY 3
+    # the app's default: f1_cap, guidance 2.5, T 1.1, DRY 3
+    'f1': dict(presets=['f1'], text=dict(length_seconds=60), midicaps=dict(length_seconds=60)),
     'long_450m': dict(presets=[], all=dict(checkpoint='checkpoints/long_450m_final', temperature=0.9,
                                            sample_instruments=True)),  # musicar-L at sample_eval's temperature
     's50': dict(presets=['s50']),  # the 107M caption pilot
@@ -158,7 +167,14 @@ def spaced_files(lengths, min_notes, used, n):
     return eligible[np.linspace(0, len(eligible) - 1, n).astype(int)]
 
 
-def export_cont(task, store, min_instruments, min_notes, candidates, n_rows, grid_rows=None, **_):
+def folder_files(folder, n, used, try_file):
+    """One file per each of n equal parts of the folder's range: the first one not in `used` that try_file accepts."""
+    edges = np.linspace(*FOLDERS[folder], n + 1).astype(int)
+    for lo, hi in zip(edges, edges[1:]):
+        next(i for i in range(lo, hi) if i not in used and try_file(i))
+
+
+def export_cont(task, store, min_instruments, min_notes, candidates, n_rows, grid_rows=None, fill=None, **_):
     out = OUT / task
     offsets, read = open_store(store)
     rows = []
@@ -166,10 +182,10 @@ def export_cont(task, store, min_instruments, min_notes, candidates, n_rows, gri
     def add(i):
         a, b = int(offsets[i]), int(offsets[i + 1])
         if b - a < min_notes:
-            return
+            return False
         tok, prog = read(a, min(b, a + PROMPT_NOTES + REAL_NOTES))
         if len(set(prog[:PROMPT_NOTES].tolist())) < min_instruments:
-            return
+            return False
         pid = f'p{len(rows):02d}'
         write_midi(out / 'prompts' / f'{pid}.mid', tok[:PROMPT_NOTES], prog[:PROMPT_NOTES])
         write_midi(out / 'real' / f'{pid}_0.mid', tok, prog)
@@ -182,13 +198,18 @@ def export_cont(task, store, min_instruments, min_notes, candidates, n_rows, gri
                          round_trip=same))
         print(f'{pid}: file {i}, {len(tok) - PROMPT_NOTES} real notes, '
               f'{piece.instrument_names(prog[:PROMPT_NOTES])}' + ('' if same else '  (MIDI round trip differs)'))
+        return True
 
     for i in np.linspace(0, len(offsets) - 2, candidates).astype(int):  # sample_eval.fixed_prompts' order and filters
         add(i)
         if len(rows) == (grid_rows or n_rows):
             break
-    if grid_rows:
-        for i in spaced_files(np.diff(offsets), min_notes, {r['file'] for r in rows}, n_rows - grid_rows):
+    used = {r['file'] for r in rows}
+    if fill:
+        for folder, n in fill.items():
+            folder_files(folder, n, used, add)
+    elif grid_rows:
+        for i in spaced_files(np.diff(offsets), min_notes, used, n_rows - grid_rows):
             add(i)
     meta = dict(store=store, rows=n_rows, prompt_notes=PROMPT_NOTES, min_instruments=min_instruments,
                 min_notes=min_notes, candidates=candidates, real_notes=REAL_NOTES, prompts=rows)
@@ -374,6 +395,34 @@ def score_name(tasks, out):
     return out or 'scores'
 
 
+def prompt_groups(task, prompts):
+    """{'<task> <group>': prompt ids} of a task with `fill`: its folders by the rows' store file, then its published
+    rows and the rows added to them; {} otherwise."""
+    spec = CONT_TASKS[task]
+    fill = spec.get('fill', ())
+    groups = {f'{task} {name}': {p['id'] for p in prompts if FOLDERS[name][0] <= p['file'] < FOLDERS[name][1]}
+              for name in fill}
+    if fill:
+        groups[f'{task} published'] = {p['id'] for p in prompts[:spec['grid_rows']]}
+        groups[f'{task} new'] = {p['id'] for p in prompts[spec['grid_rows']:]}
+    return groups
+
+
+def cont_scores(by_system):
+    """{system: CONT_KEYS means, rows, D to the 'real' rows given}."""
+    real = by_system.get('real')
+    ref = None
+    if real:
+        ref = mean(real, sample_eval.DIST_WEIGHTS)
+        ref['sd'] = {k: float(np.std([r[k] for r in real], ddof=1)) for k in sample_eval.DIST_WEIGHTS}
+    scores = {}
+    for name, rows in by_system.items():
+        m = dict(mean(rows, CONT_KEYS), rows=len(rows))
+        m['D'] = sample_eval.distance(m, ref) if ref and rows else np.nan
+        scores[name] = m
+    return scores
+
+
 def score(args):
     stem = score_name(args.task, args.out)
     tasks = args.task or [*BASE_TASKS, 'text']
@@ -385,21 +434,14 @@ def score(args):
         prompts = json.loads((cont_dir / 'prompts.json').read_text())['prompts']
         by_system = {d.name: cont_rows(d, prompts, args.notes) for d in sorted(cont_dir.iterdir())
                      if d.is_dir() and d.name != 'prompts'}
-        real = by_system.get('real')
-        ref = None
-        if real:
-            ref = mean(real, sample_eval.DIST_WEIGHTS)
-            ref['sd'] = {k: float(np.std([r[k] for r in real], ddof=1)) for k in sample_eval.DIST_WEIGHTS}
-        results[task] = {}
-        for name, rows in by_system.items():
-            m = dict(mean(rows, CONT_KEYS), rows=len(rows))
-            m['D'] = sample_eval.distance(m, ref) if ref and rows else np.nan
-            results[task][name] = m
+        results[task] = cont_scores(by_system)
+        for group, ids in prompt_groups(task, prompts).items():
+            results[group] = cont_scores({s: [r for r in rows if r['id'] in ids] for s, rows in by_system.items()})
     text_dir = OUT / 'text'
     if 'text' in tasks and (text_dir / 'prompts.json').exists():
         prompts = json.loads((text_dir / 'prompts.json').read_text())['prompts']
         results['text'] = {}
-        for d in sorted(x for x in text_dir.iterdir() if x.is_dir()):
+        for d in sorted(x for x in text_dir.iterdir() if x.is_dir() and not x.name.startswith('clamp3_')):
             rows = text_rows(d, prompts)
             contrasts = text_eval.pair_contrasts(text_eval.prompt_means(rows))
             m = dict(mean(rows, TEXT_KEYS), rows=len(rows))
@@ -474,20 +516,27 @@ def boot(args):
         res = dict(task=task, draws=args.draws, seed=args.seed, limitation=BOOT_NOTE, notes={})
         lines = [f'# Head-to-head bootstrap of D: {task} ({time.strftime("%Y-%m-%d %H:%M")}, {args.draws:,} draws, '
                  f'seed {args.seed})', '', BOOT_NOTE, '']
+        groups = prompt_groups(task, prompts)
         for notes in args.notes:
-            tables = {s: prompt_table(cont_rows(task_dir / s, prompts, notes)) for s in [*names, 'real']}
-            ids, point, per_draw = bootstrap(tables, args.draws, args.seed)
-            systems, pairs = boot_table(point, per_draw, [s for s in names if s in SYSTEMS])
-            res['notes'][notes] = dict(prompts=len(ids), of=len(prompts), systems=systems, pairs=pairs)
-            lines += [f'## First {notes} new notes, {len(ids)} of {len(prompts)} prompts', '',
-                      '| system | D | 95% of draws | mean draw - D |', '|---|---|---|---|']
-            lines += [f"| {s} | {m['D']:.3f} | {m['low']:.3f} to {m['high']:.3f} | {m['bias']:+.3f} |"
-                      for s, m in systems.items()]
-            lines += ['', '| pair | D difference | 95% of draws | mean draw - difference | share of draws closer |',
-                      '|---|---|---|---|---|']
-            lines += [f"| {p} | {m['diff']:+.3f} | {m['low']:+.3f} to {m['high']:+.3f} | {m['bias']:+.3f} | "
-                      f"{m['closer']:.3f} |" for p, m in pairs.items()]
-            lines.append('')
+            all_rows = {s: prompt_table(cont_rows(task_dir / s, prompts, notes)) for s in [*names, 'real']}
+            for group, keep in [(task, None), *groups.items()]:
+                tables = {s: {i: v for i, v in t.items() if keep is None or i in keep} for s, t in all_rows.items()}
+                ids, point, per_draw = bootstrap(tables, args.draws, args.seed)
+                systems, pairs = boot_table(point, per_draw, [s for s in names if s in SYSTEMS])
+                of = len(keep) if keep else len(prompts)
+                res.setdefault('groups', {}).setdefault(group, {})[notes] = dict(prompts=len(ids), of=of,
+                                                                                  systems=systems, pairs=pairs)
+                if keep is None:
+                    res['notes'][notes] = res['groups'][group][notes]
+                lines += [f'## {group}, first {notes} new notes, {len(ids)} of {of} prompts', '',
+                          '| system | D | 95% of draws | mean draw - D |', '|---|---|---|---|']
+                lines += [f"| {s} | {m['D']:.3f} | {m['low']:.3f} to {m['high']:.3f} | {m['bias']:+.3f} |"
+                          for s, m in systems.items()]
+                lines += ['', '| pair | D difference | 95% of draws | mean draw - difference | share of draws closer |',
+                          '|---|---|---|---|---|']
+                lines += [f"| {p} | {m['diff']:+.3f} | {m['low']:+.3f} to {m['high']:+.3f} | {m['bias']:+.3f} | "
+                          f"{m['closer']:.3f} |" for p, m in pairs.items()]
+                lines.append('')
         (OUT / f'bootstrap_{task}.json').write_text(json.dumps(res, indent=1))
         (OUT / f'bootstrap_{task}.md').write_text('\n'.join(lines))
         print('\n'.join(lines))
@@ -500,7 +549,7 @@ def main():
     pr.add_argument('--task', choices=[*CONT_TASKS, 'text'], default=None, help='one task only (default: all)')
     o = sub.add_parser('ours', help='generate with one of SYSTEMS')
     o.add_argument('--system', choices=sorted(SYSTEMS), required=True)
-    o.add_argument('--task', choices=[*CONT_TASKS, 'text'], required=True)
+    o.add_argument('--task', choices=[*CONT_TASKS, 'text', 'midicaps'], required=True)
     o.add_argument('--name', default=None, help='output folder name (default: the system)')
     o.add_argument('--prompts', type=int, default=0, help='> 0: only the first N prompts (smoke tests)')
     o.add_argument('--samples', type=int, default=1, help='files per prompt')

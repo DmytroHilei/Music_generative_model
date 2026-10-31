@@ -84,6 +84,41 @@ def test_export_superset():
         assert [r['file'] for r in grid['prompts']] == [i for i in grid_files.tolist() if i % 2 == 0][:3]
 
 
+def test_cont96_fill_matches_the_folders():
+    spec = h.CONT_TASKS['cont96']
+    assert spec['grid_rows'] + sum(spec['fill'].values()) == spec['n_rows']
+    assert h.FOLDERS['no_drums'][1] == h.FOLDERS['with_drums'][0]
+    assert abs((spec['grid_rows'] + spec['fill']['no_drums']) / spec['n_rows'] - 0.675) < 0.005
+
+
+def test_folder_files():
+    saved = h.FOLDERS
+    h.FOLDERS = dict(a=(10, 40))
+    try:
+        got = []
+        h.folder_files('a', 3, {10, 20}, lambda i: i % 2 == 1 and not got.append(i))
+    finally:
+        h.FOLDERS = saved
+    assert got == [11, 21, 31], 'one file per part, past the used and the rejected ones'
+
+
+def test_prompt_groups():
+    rows = [dict(id='p00', file=5), dict(id='p01', file=49622), dict(id='p02', file=49623), dict(id='p03', file=62820)]
+    rows = [*[dict(id=f'g{i}', file=5) for i in range(h.ROWS - 2)], *rows]
+    groups = h.prompt_groups('cont96', rows)
+    assert groups['cont96 with_drums'] == {'p02', 'p03'} and 'p01' in groups['cont96 no_drums']
+    assert groups['cont96 new'] == {'p02', 'p03'} and len(groups['cont96 published']) == h.ROWS
+    assert h.prompt_groups('piano96', rows) == {}
+
+
+def test_cont_scores_uses_the_rows_given():
+    keys = sample_eval.DIST_WEIGHTS
+    near, far = {k: 1.0 for k in keys}, {k: 3.0 for k in keys}
+    real = [dict(near, id='p00'), dict(near, id='p01')]
+    scores = h.cont_scores(dict(real=real, a=[dict(near, id='p00')], b=[dict(far, id='p00')]))
+    assert scores['a']['D'] < scores['b']['D'] and scores['a']['rows'] == 1
+
+
 def test_shared_prompts_refuses():
     with tempfile.TemporaryDirectory() as tmp:
         out = Path(tmp)
