@@ -338,6 +338,31 @@ hf download Dimitri-206265/musicar-L --local-dir checkpoints/musicar-L
 The diagrams are [`docs/figures/base_*.tex`](docs/figures) (`figstyle.tex` is the shared style), the cards are in
 [`docs/model_cards/`](docs/model_cards).
 
+### Hardware and speed
+
+At one row, generating a note reads every weight once plus the cached keys and values of the notes in view, so the
+speed is capped by memory bandwidth B:
+
+    notes/s  <=  B / (P * b_w  +  r * 2 * L * d * n * b_kv)
+
+P = parameters, b_w = bytes per weight (bf16 2, int8 1, int4 0.5), r = rows (one per sample; guidance doubles them),
+L = layers, d = width (every head keeps its keys and values: full attention), n = notes in view, b_kv = bytes per
+cached value. For musicar-L (P = 464M, L = 28, d = 1,152) that is 0.93 GB of bf16 weights and 129 KB of cache per
+note and row. The bound counts memory traffic only: at one row a GPU waits on kernel launches and the Python loop more
+than on memory, so the measured speed stays below it. Real time needs about 24 notes per second for multi-instrument
+music and about 8 for solo piano (the real continuations of the head-to-head).
+
+| Model | Minimum | Laptop RTX 5060 (384 GB/s), measured, 1 row | Ceiling there, 1,024 notes in view | Raspberry Pi 5 (≈ 8 GB/s), ceiling |
+|---|---|---|---|---|
+| musicar-L-caption | 4 GB GPU (3.04 GiB peak with LaBSE) | 90 notes/s, f1 preset with guidance | ≈ 315 with guidance | int8 ≈ 11, int4 + int8 cache ≈ 20 with guidance |
+| musicar-L | 2 GB GPU (1.09 GiB peak) or ≈ 3 GB RAM | 127 notes/s; laptop CPU (Ryzen AI 9 HX 370, fp32) 14.3 | ≈ 360 | int8 ≈ 13, int4 + int8 cache ≈ 24 |
+| musicar-S | 1 GB GPU (0.35 GiB peak) | 432 notes/s | ≈ 1,500 | int8 ≈ 50, int4 + int8 cache ≈ 100 |
+| musicar-S-piano | 1 GB GPU (0.33 GiB peak) | 628 notes/s | ≈ 1,600 (its 512-note window) | int8 ≈ 60, int4 + int8 cache ≈ 120 |
+
+The Pi numbers are the bound at the 5.4–7.8 GB/s measured with STREAM, not measurements of the models (the Pi port is
+planned). On the rented RTX 5090 (1,792 GB/s) the bound is ≈ 1,700 notes/s for musicar-L, not measured. The cards
+give the same per model.
+
 ## Layout
 
 Entry points at the root:
