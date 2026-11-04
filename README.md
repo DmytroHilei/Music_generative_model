@@ -167,6 +167,36 @@ in 100% (54% at 200). These shares are no p-values. musicar-L-caption's gap is d
 first 200 new notes, 16.4 over 1,000. AMT keeps the prompt's instruments least, which D does not score (0.77 vs real
 0.92, musicar-L 0.89).
 
+**A second score for the continuations: CLaMP 3.** D is six row statistics, and it is also the metric our checkpoints
+were picked by. [CLaMP 3](https://arxiv.org/abs/2502.10362)'s symbolic encoder gives a score that is neither: each file
+is cut after its prompt, and its first 1,000 (or 200) new notes are compared with the real continuation of the same
+prompt. Closeness = cosine of the two embeddings; contrast = closeness minus the mean cosine to the other 95 prompts'
+real continuations, so a model that sounds like every file gains nothing; MRR = reciprocal rank of the own real
+continuation among the 96. "Prompt only" scores the 128-note prompt itself as the continuation; shuffled = another
+prompt's real continuation (the floor). First 512-patch segment of each file
+([`eval/compare/h2h_clamp3.py`](eval/compare/h2h_clamp3.py)):
+
+| System | Closeness | Contrast | MRR | Contrast, first 200 | MRR, first 200 |
+|---|---|---|---|---|---|
+| **musicar-L** | **0.715** | **0.317** | **0.811** | **0.305** | **0.899** |
+| **musicar-L-caption** (no caption) | 0.597 | 0.213 | 0.563 | 0.254 | 0.747 |
+| AMT large | 0.648 | 0.247 | 0.640 | 0.261 | 0.799 |
+| SkyTNT tv2o-medium | 0.648 | 0.260 | 0.666 | 0.275 | 0.831 |
+| Music-Llama | 0.583 | 0.200 | 0.537 | 0.235 | 0.697 |
+| prompt only | 0.645 | 0.258 | 0.669 | 0.292 | 0.891 |
+| shuffled | 0.385 | -0.014 | 0.043 | -0.010 | 0.042 |
+
+musicar-L is ahead of AMT and SkyTNT medium in all of 10,000 paired draws over the prompts, on closeness and contrast,
+at both lengths. In each prompt group (the two folders, the published 32, the new 64) it stays ahead of AMT in at least
+99.4% of the draws and of SkyTNT medium in at least 78% (with-drums folder, first 200 notes). musicar-L-caption is
+behind AMT and SkyTNT medium over 1,000 notes (ahead of AMT in 0.8% of the draws on contrast) and level with AMT over
+200 (28%). The prompt alone scores about as well as AMT and SkyTNT medium, so CLaMP 3 rewards staying in the prompt's
+style; musicar-L is above it over 1,000 notes in every draw, over 200 in 92% on contrast (level on the published 32).
+Copying does not explain the lead: 14% of musicar-L's new pitched notes sit in exact copies of 16 or more chords, real
+continuations 12%, SkyTNT medium 15%. The Fréchet distance to the 96 real continuations in the same space puts the same
+three on top (musicar-L 110, AMT 130, SkyTNT medium 140 over 1,000 notes), but 96 files in 768 dimensions make it a side
+number.
+
 **Piano continuation** of 32 solo-piano prompts from our held-out split of Aria-MIDI (which Aria may have seen in
 training), up to 1,000 new notes each. With one instrument, D here only measures how close the note rate is to the real
 one (and runaway):
@@ -191,6 +221,21 @@ On 96 prompts (the 32 + 64 new ones) the order holds at both lengths:
 | **musicar-L** | 9.19 | 0 | 0.48 | **0.035** | **0.016** | 93% |
 | Aria medium | 9.93 | 0.02 | 0.20 | 0.074 | 0.044 | |
 | 450M piano-cover fine-tune (not released) | 3.75 | 0 | 0.91 | 0.182 | 0.081 | 0.1% |
+
+CLaMP 3 does not keep this order (the same score as for the continuations above, on the same 96 prompts):
+
+| System | Closeness | Contrast | MRR | Contrast, first 200 | MRR, first 200 |
+|---|---|---|---|---|---|
+| **108M piano-cover fine-tune** (ua_2048_v2, not released) | 0.649 | 0.152 | 0.424 | 0.154 | 0.482 |
+| **musicar-L** | **0.689** | 0.211 | 0.547 | 0.181 | 0.545 |
+| Aria medium | 0.658 | **0.216** | **0.578** | **0.208** | 0.682 |
+| 450M piano-cover fine-tune (not released) | 0.604 | 0.154 | 0.428 | 0.170 | 0.500 |
+| prompt only | 0.576 | 0.165 | 0.519 | 0.206 | **0.694** |
+| shuffled | 0.492 | 0.009 | 0.052 | 0.003 | 0.047 |
+
+Over 1,000 notes musicar-L and Aria are level on contrast (musicar-L ahead in 33% of the draws, on closeness in 99%);
+over the first 200 Aria leads (99% on contrast). The 108M fine-tune, the closest in note rate, is behind both on
+contrast at both lengths, as is the 450M fine-tune.
 
 **Text to MIDI** from the first note: 28 prompts (15 English and 12 Ukrainian captions and the empty prompt), 16 pieces
 each. F = caption following over 9 English and 8 Ukrainian contrasts (higher = follows); caption match = how well a
@@ -239,8 +284,26 @@ Fréchet = distance of the files to real ones in CLaMP 3's space ([`eval/compare
 
 musicar-L-caption is last on tempo, key, caption match and CLaMP 3, and at the floor on tempo bins and key; on instruments
 it is level with Text2midi and behind MIDI-LLM. Text2midi's 3 unusable files score 0. On the short English prompts above
-CLaMP 3 gives the opposite order (MRR 0.321 vs 0.239 MIDI-LLM, 0.257 Text2midi). The f1 preset was tuned on short prompts and
-never on key or tempo words inside long prose, so better settings may recover part of this; that is not tested yet.
+CLaMP 3 gives the opposite order (MRR 0.321 vs 0.239 MIDI-LLM, 0.257 Text2midi).
+
+The f1 preset was tuned on short prompts. Four other settings were tried on 100 more eligible test captions, the next
+ones after the 500 (so the 495 stay untouched), with the preset on the same 100 as the paired control (MRR here among
+99 other captions):
+
+| musicar-L-caption, 100 spare captions | TB | CK | CKD | Instrument recall | Caption match | CLaMP 3 MRR | Runaway |
+|---|---|---|---|---|---|---|---|
+| f1 preset | 0.24 | 0.06 | 0.10 | 0.46 | 0.548 | 0.118 | 0.050 |
+| top-p 0.9 | 0.20 | 0.06 | 0.09 | 0.42 | 0.512 | 0.141 | 0.163 |
+| keep-style and lock-instruments off | 0.25 | 0.04 | 0.09 | 0.47 | 0.545 | 0.090 | 0.035 |
+| guidance 4.0 (preset 2.5) | 0.18 | 0.05 | 0.09 | 0.49 | 0.543 | 0.123 | 0.057 |
+| `--retrieve gigamidi_replay_train` | **0.26** | **0.20** | **0.27** | 0.47 | **0.607** | **0.150** | **0.030** |
+| real | 0.55 | 0.63 | 0.66 | 0.87 | 0.742 | 0.454 | 0.037 |
+| shuffled | 0.23 | 0.06 | 0.17 | 0.20 | 0.388 | 0.042 | |
+
+The three decoding settings leave tempo and key at the shuffled floor, so the gap is in reading long captions, not in
+decoding; top-p 0.9 also adds runaway (5 of the 100 files stack their notes). `--retrieve` raises the exact key from 0.06
+to 0.20 and caption match from 0.548 to 0.607 (each above the preset in 99.9% of the draws) and leaves tempo where it was:
+the key comes with the real opening the caption picks, which the model continues. It was not run on the 495.
 
 Raw scores: [`docs/head2head/`](docs/head2head/README.md).
 

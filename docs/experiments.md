@@ -221,4 +221,14 @@ notes with half the windows at piece starts (f1_cap). Text follow F from text_ev
   (tonic right in 8.1% of the files, chance 8.3%; major / minor 54%), although the same preset follows short prompts
   (minor 54% vs 12% of pieces, fast 72 vs slow 11 notes per second). Its tempo does move with the asked one (rank correlation 0.21,
   MIDI-LLM 0.07, Text2midi 0.06, real 0.34). On our own short prompts CLaMP 3 keeps the order of F (MRR 0.321 vs 0.239 / 0.257).
-  Not tested: settings tuned for such captions. Raw tables: [`docs/head2head/`](head2head/README.md).
+  Raw tables: [`docs/head2head/`](head2head/README.md).
+- **Settings on 100 spare MidiCaps captions** (the next eligible rows after the 500; preset as the paired control): tempo
+  bin / exact key 0.24 / 0.06 with the preset, 0.20 / 0.06 top-p 0.9, 0.25 / 0.04 keep-style + lock-instruments off,
+  0.18 / 0.05 guidance 4.0, 0.26 / 0.20 `--retrieve` (real 0.55 / 0.63, shuffled 0.23 / 0.06). The decoding settings stay at
+  the floor, so the gap is in reading long captions; the key gain of `--retrieve` comes with the real opening it picks.
+  top-p 0.9 raised runaway 0.05 -> 0.16.
+- **CLaMP 3 on the 96-prompt continuations** (each file's new notes against the real continuation of its prompt;
+  contrast = cosine minus the mean cosine to the other prompts' real continuations): musicar-L 0.317, SkyTNT medium 0.260,
+  AMT 0.247, musicar-L-caption 0.213, Music-Llama 0.200, the prompt alone 0.258 over 1,000 notes; musicar-L ahead of AMT
+  and SkyTNT medium in all 10,000 draws at 1,000 and 200 notes. Piano: Aria 0.216, musicar-L 0.211, 450M fine-tune 0.154,
+  ua_2048_v2 0.152 (Aria ahead over 200 notes, 0.208 vs 0.181), so D's piano order does not carry over.

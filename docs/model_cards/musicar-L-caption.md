@@ -312,9 +312,79 @@ continuations; SkyTNT, Music-Llama and Moonbeam gain most.
 
 Without a caption or a length this model writes shorter, sparser pieces than the real continuations (12.8 vs 24.0
 notes per second; 53% of the rows end inside the 1,000 notes), which is most of its distance; its base musicar-L is
-closer (0.121). Over the first 1,000 notes both are closer to the real continuations on these statistics than every
-other model in the table; over the first 200, SkyTNT tv2o-medium (0.184) comes ahead of this model (0.198), and
-musicar-L stays closest (0.090).
+closer (0.121). On these 32 prompts and over the first 1,000 notes both are closer to the real continuations on these
+statistics than every other model in the table; over the first 200, SkyTNT tv2o-medium (0.184) comes ahead of this
+model (0.198), and musicar-L stays closest (0.090).
+
+**The wider test: 96 prompts.** The 32 prompts above all come from GigaMIDI's no-drums folder, so 64 were added, 33
+from it and 31 from the with-drums folder (Moonbeam not run). On D the published ranking does not hold and no system
+leads every group:
+
+| Prompts | musicar-L | musicar-L-caption | AMT large | SkyTNT medium | Music-Llama |
+|---|---|---|---|---|---|
+| all 96 | 0.144 | 0.179 | **0.097** | 0.280 | 0.561 |
+| all 96, first 200 notes | **0.084** | 0.205 | 0.099 | 0.161 | 0.219 |
+| no-drums folder, 65 | 0.137 | 0.200 | **0.094** | 0.286 | 0.485 |
+| with-drums folder, 31 | 0.246 | **0.199** | 0.371 | 0.316 | 0.846 |
+
+D is a gap between means, so errors cancel over a wider set (AMT's 0.097 is below both its groups' values). D is also
+the metric the project's checkpoints were picked by, so the same files were scored with
+CLaMP 3 ([arXiv:2502.10362](https://arxiv.org/abs/2502.10362)) as well: each file cut
+after its prompt, its new notes compared with the real continuation of the same prompt. Closeness = cosine of the two
+embeddings; contrast = closeness minus the mean cosine to the other 95 prompts' real continuations; MRR = reciprocal
+rank of the own real continuation among the 96. "Prompt only" scores the prompt itself as the continuation:
+
+| System | Closeness | Contrast | MRR | Contrast, first 200 notes | MRR, first 200 notes |
+|---|---|---|---|---|---|
+| musicar-L | **0.715** | **0.317** | **0.811** | **0.305** | **0.899** |
+| musicar-L-caption (no caption) | 0.597 | 0.213 | 0.563 | 0.254 | 0.747 |
+| AMT large | 0.648 | 0.247 | 0.640 | 0.261 | 0.799 |
+| SkyTNT tv2o-medium | 0.648 | 0.260 | 0.666 | 0.275 | 0.831 |
+| Music-Llama | 0.583 | 0.200 | 0.537 | 0.235 | 0.697 |
+| prompt only | 0.645 | 0.258 | 0.669 | 0.292 | 0.891 |
+| another prompt's real continuation | 0.385 | -0.014 | 0.043 | -0.010 | 0.042 |
+
+musicar-L is ahead of AMT and SkyTNT medium in all of 10,000 paired bootstrap draws over the prompts, on closeness and
+contrast, at both lengths, and ahead of AMT in at least 99.4% of the draws inside each prompt group. The prompt alone
+scores about as well as AMT and SkyTNT medium, so CLaMP 3 rewards staying in the prompt's style; musicar-L is above it
+over 1,000 notes in every draw. Its copies (14% of new pitched notes in exact copies of 16 or more chords) are near the
+real continuations' 12% and SkyTNT medium's 15%.
+
+On CLaMP 3 this model is behind AMT and SkyTNT medium over 1,000 notes (ahead of AMT in 0.8% of the draws on contrast)
+and level with AMT over the first 200 (28%).
+
+**Text to MIDI on MidiCaps test captions.** The prompts above are short and suit this model; these are long English
+captions of [MidiCaps](https://arxiv.org/abs/2406.02255), the data both other models learned text to MIDI from. 500 test
+rows outside GigaMIDI's train split, the replay store and any train file with the same notes; 495 scored, one file each,
+first 40 s. TB / TBT (tempo bin, or a neighbouring one) and CK / CKD (key, or its relative) follow Text2midi's paper,
+with tempo and key estimated from the notes, which puts even the real files at 0.61 and 0.59:
+
+| Score | musicar-L-caption | MIDI-LLM | Text2midi | real | shuffled |
+|---|---|---|---|---|---|
+| TB | 0.244 | **0.400** | 0.345 | 0.608 | 0.248 |
+| CK | 0.042 | **0.317** | 0.309 | 0.586 | 0.051 |
+| CKD | 0.075 | **0.420** | 0.378 | 0.636 | 0.099 |
+| Instrument recall | 0.425 | **0.664** | 0.426 | 0.809 | 0.167 |
+| Caption match (our thresholds) | 0.526 | **0.609** | 0.557 | 0.711 | 0.388 |
+| CLaMP 3 MRR (among 100 other captions) | 0.122 | **0.276** | 0.156 | 0.469 | 0.052 |
+
+This model is last on tempo, key, caption match and CLaMP 3, at the floor on tempo bins and key. Four other settings
+were tried on 100 more eligible test captions (the next ones after the 500), with the preset on the same 100 as the
+paired control:
+
+| This model, 100 spare captions | TB | CK | CKD | Caption match | CLaMP 3 MRR | Runaway (10-s windows) |
+|---|---|---|---|---|---|---|
+| `--config f1` | 0.24 | 0.06 | 0.10 | 0.548 | 0.118 | 0.050 |
+| top-p 0.9 | 0.20 | 0.06 | 0.09 | 0.512 | 0.141 | 0.163 |
+| keep-style and lock-instruments off | 0.25 | 0.04 | 0.09 | 0.545 | 0.090 | 0.035 |
+| guidance 4.0 (preset 2.5) | 0.18 | 0.05 | 0.09 | 0.543 | 0.123 | 0.057 |
+| `--retrieve gigamidi_replay_train` | **0.26** | **0.20** | **0.27** | **0.607** | **0.150** | **0.030** |
+| real | 0.55 | 0.63 | 0.66 | 0.742 | 0.454 | 0.037 |
+
+The decoding settings leave tempo and key at the floor, so the gap is in reading long captions, not in decoding.
+`--retrieve` lifts the exact key from 0.06 to 0.20 (above the preset in 99.9% of the draws) and leaves tempo where it was:
+the key comes with the real opening the caption picks. Code and raw tables: `eval/compare/h2h_midicaps.py`,
+[`docs/head2head/`](https://github.com/DmytroHilei/Music_generative_model/blob/transformer-v2/docs/head2head/README.md).
 
 ## Limitations and biases
 

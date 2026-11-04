@@ -222,6 +222,56 @@ On the same prompts the project's 108M piano-cover fine-tune (not released) is c
 over the first 200 notes); its 450M piano-cover fine-tune of this model (not released), which writes short covers
 that end, is further (0.177; 0.078).
 
+**The wider test: 96 prompts.** The 32 prompts above all come from GigaMIDI's no-drums folder, so 64 were added, 33
+from it and 31 from the with-drums folder (Moonbeam not run). On D the published ranking does not hold and no system
+leads every group:
+
+| Prompts | musicar-L | musicar-L-caption | AMT large | SkyTNT medium | Music-Llama |
+|---|---|---|---|---|---|
+| all 96 | 0.144 | 0.179 | **0.097** | 0.280 | 0.561 |
+| all 96, first 200 notes | **0.084** | 0.205 | 0.099 | 0.161 | 0.219 |
+| no-drums folder, 65 | 0.137 | 0.200 | **0.094** | 0.286 | 0.485 |
+| with-drums folder, 31 | 0.246 | **0.199** | 0.371 | 0.316 | 0.846 |
+
+D is a gap between means, so errors cancel over a wider set (AMT's 0.097 is below both its groups' values). D is also
+the metric the project's checkpoints were picked by, so the same files were scored with
+CLaMP 3 ([arXiv:2502.10362](https://arxiv.org/abs/2502.10362)) as well: each file cut
+after its prompt, its new notes compared with the real continuation of the same prompt. Closeness = cosine of the two
+embeddings; contrast = closeness minus the mean cosine to the other 95 prompts' real continuations; MRR = reciprocal
+rank of the own real continuation among the 96. "Prompt only" scores the prompt itself as the continuation:
+
+| System | Closeness | Contrast | MRR | Contrast, first 200 notes | MRR, first 200 notes |
+|---|---|---|---|---|---|
+| musicar-L | **0.715** | **0.317** | **0.811** | **0.305** | **0.899** |
+| musicar-L-caption (no caption) | 0.597 | 0.213 | 0.563 | 0.254 | 0.747 |
+| AMT large | 0.648 | 0.247 | 0.640 | 0.261 | 0.799 |
+| SkyTNT tv2o-medium | 0.648 | 0.260 | 0.666 | 0.275 | 0.831 |
+| Music-Llama | 0.583 | 0.200 | 0.537 | 0.235 | 0.697 |
+| prompt only | 0.645 | 0.258 | 0.669 | 0.292 | 0.891 |
+| another prompt's real continuation | 0.385 | -0.014 | 0.043 | -0.010 | 0.042 |
+
+musicar-L is ahead of AMT and SkyTNT medium in all of 10,000 paired bootstrap draws over the prompts, on closeness and
+contrast, at both lengths, and ahead of AMT in at least 99.4% of the draws inside each prompt group. The prompt alone
+scores about as well as AMT and SkyTNT medium, so CLaMP 3 rewards staying in the prompt's style; musicar-L is above it
+over 1,000 notes in every draw. Its copies (14% of new pitched notes in exact copies of 16 or more chords) are near the
+real continuations' 12% and SkyTNT medium's 15%.
+
+On 96 piano prompts (the 32 + 64 new) D keeps this order (108M fine-tune 0.012, musicar-L 0.035, Aria 0.074, 450M
+fine-tune 0.182). CLaMP 3, scored as for the multi-instrument continuations, does not:
+
+| System | Closeness | Contrast | MRR | Contrast, first 200 notes | MRR, first 200 notes |
+|---|---|---|---|---|---|
+| musicar-L | **0.689** | 0.211 | 0.547 | 0.181 | 0.545 |
+| Aria medium | 0.658 | **0.216** | **0.578** | **0.208** | **0.682** |
+| 108M piano-cover fine-tune (not released) | 0.649 | 0.152 | 0.424 | 0.154 | 0.482 |
+| 450M piano-cover fine-tune (not released) | 0.604 | 0.154 | 0.428 | 0.170 | 0.500 |
+| prompt only | 0.576 | 0.165 | 0.519 | 0.206 | 0.694 |
+
+Over 1,000 notes musicar-L and Aria are level on contrast (musicar-L ahead in 33% of the draws, on closeness in 99%);
+over the first 200 Aria leads (99% on contrast).
+
+Raw tables of every run: [`docs/head2head/`](https://github.com/DmytroHilei/Music_generative_model/blob/transformer-v2/docs/head2head/README.md) in the code repository.
+
 ## Limitations and biases
 
 - The data lean toward Western popular and classical music in General MIDI instrumentation; other traditions, and

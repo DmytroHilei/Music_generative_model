@@ -6,6 +6,8 @@ trained on the MidiCaps train rows. 500 captions, one file each from F1, Text2mi
     .venv/bin/python eval/compare/h2h_midicaps.py fetch --archive data/midicaps/archive/midicaps.tar.gz
     .venv/bin/python eval/compare/h2h_midicaps.py prompts     # prompts.json, real/, real_all/
     .venv/bin/python eval/compare/h2h_midicaps.py score       # scores.md / scores.json
+    .venv/bin/python eval/compare/h2h_midicaps.py prompts --spare 100    # midicaps_spare/: settings trials
+    .venv/bin/python eval/compare/h2h_midicaps.py score --task midicaps_spare
 
 eligible  test_set rows F1 cannot have seen: in GigaMIDI's validation or test split, not in the store the 107M pilots and
   f1_local trained on (gigamidi_replay_train), and with notes that occur in no train file of GigaMIDI or Discover (F1
@@ -19,7 +21,9 @@ fetch  only the eligible names are read from the archive, by their bytes, and ke
 prompts  the first --rows eligible rows with a parseable file, a tempo and a key: ids m000.., real/<id>_0.mid; 495 of the
   500 are scored. programs = the instruments the caption names: instrument_summary is unique by name and
   instrument_numbers_sorted is not (it repeats a program per track, and Piano covers programs 0-7), so each name gets its
-  first program, through the program -> name table of the rows where the two lists line up.
+  first program, through the program -> name table of the rows where the two lists line up. --spare N: the next N
+  rows of the same order after the last of those prompts, without the `excluded` ones, into midicaps_spare/ (ids
+  s000..; real/ only, the Frechet pool stays in midicaps/), so settings can be tried without the test set.
 
 Scores. The definitions of Text2midi (arXiv 2412.16526, Table 2): TB = the tempo falls in the bin of the row's tempo,
 bin borders 40, 60, 70, 90, 110, 140, 160, 210 bpm; TBT = in that bin or a neighbouring one; CK = the key is the row's;
@@ -60,6 +64,7 @@ from musicar.generation.repetition import copy_share  # noqa: E402
 from prepare_discover import note_hashes  # noqa: E402
 
 TASK_DIR = OUT / 'midicaps'
+SPARE_DIR = OUT / 'midicaps_spare'
 CAPTIONS = ROOT / 'data' / 'midicaps' / 'train.json'
 ROWS, SECONDS = 500, 40.0
 TEMPO_EDGES = (40, 60, 70, 90, 110, 140, 160, 210)
@@ -224,23 +229,28 @@ def export_prompts(args):
     pool = json.loads((TASK_DIR / 'eligible.json').read_text())
     everything = caption_rows()
     rows, names = test_rows(everything), program_names(everything)
+    order, out, tag, n_rows = pool['md5'], TASK_DIR, 'm', args.rows
+    if args.spare:
+        last = json.loads((TASK_DIR / 'prompts.json').read_text())['prompts'][-1]['md5']
+        order = [m for m in order[order.index(last) + 1:] if m not in pool['excluded']]
+        out, tag, n_rows = SPARE_DIR, 's', args.spare
     prompts = []
-    (TASK_DIR / 'real').mkdir(exist_ok=True)
-    for md5 in pool['md5']:
+    (out / 'real').mkdir(parents=True, exist_ok=True)
+    for md5 in order:
         r, path = rows[md5], TASK_DIR / 'real_all' / f'{md5}.mid'
         if not (r.get('tempo') and r.get('key') and path.exists()) or read_midi(path) is None:
             continue
-        pid = f'm{len(prompts):03d}'
+        pid = f'{tag}{len(prompts):03d}'
         programs = asked_programs(r['instrument_numbers_sorted'], r['instrument_summary'], names)
         prompts.append(dict(id=pid, name=pid, md5=md5, caption=r['caption'], tempo=r['tempo'], key=key_index(r['key']),
                             programs=programs, **({'excluded': True} if md5 in pool['excluded'] else {})))
-        shutil.copyfile(path, TASK_DIR / 'real' / f'{pid}_0.mid')
-        if len(prompts) == args.rows:
+        shutil.copyfile(path, out / 'real' / f'{pid}_0.mid')
+        if len(prompts) == n_rows:
             break
-    tmp = TASK_DIR / 'prompts.tmp'
+    tmp = out / 'prompts.tmp'
     tmp.write_text(json.dumps(dict(seed=args.seed, rows=len(prompts), prompts=prompts), indent=1, ensure_ascii=False))
-    os.replace(tmp, TASK_DIR / 'prompts.json')  # a queue reads this file when each of its steps starts
-    print(f'{len(prompts)} prompts -> {TASK_DIR}')
+    os.replace(tmp, out / 'prompts.json')  # a queue reads this file when each of its steps starts
+    print(f'{len(prompts)} prompts -> {out}')
 
 
 def missing_row(target):
@@ -264,7 +274,7 @@ def system_rows(folder, prompts, targets):
 
 
 def report(res):
-    lines = [f"# MidiCaps test set ({res['date']})", '',
+    lines = [f"# MidiCaps test set: {res['task']} ({res['date']})", '',
              f"{res['prompts']} captions, one file each, first {SECONDS:.0f} s, tempo and key estimated from the notes "
              f"(h2h_midicaps.py). {res['draws']} bootstrap draws over prompts, 95% percentile interval. A missing file "
              'scores 0. real = the same estimators on the true files (ceiling); real_shuffled = against another '
@@ -282,13 +292,14 @@ def report(res):
 
 
 def score(args):
-    prompts = [p for p in json.loads((TASK_DIR / 'prompts.json').read_text())['prompts'] if not p.get('excluded')]
-    names = sorted(d.name for d in TASK_DIR.iterdir()
+    task_dir = OUT / args.task
+    prompts = [p for p in json.loads((task_dir / 'prompts.json').read_text())['prompts'] if not p.get('excluded')]
+    names = sorted(d.name for d in task_dir.iterdir()
                    if d.is_dir() and d.name not in ('real_all', 'clamp3_tmp', 'clamp3_emb') and next(d.glob('*.mid'), None))
-    tables = {n: system_rows(TASK_DIR / n, prompts, prompts) for n in names}
+    tables = {n: system_rows(task_dir / n, prompts, prompts) for n in names}
     swap = deranged(len(prompts), args.seed)
-    tables['real_shuffled'] = system_rows(TASK_DIR / 'real', prompts, [prompts[j] for j in swap])
-    res = dict(date=time.strftime('%Y-%m-%d %H:%M'), prompts=len(prompts), draws=args.draws, seed=args.seed, scores={},
+    tables['real_shuffled'] = system_rows(task_dir / 'real', prompts, [prompts[j] for j in swap])
+    res = dict(task=args.task, date=time.strftime('%Y-%m-%d %H:%M'), prompts=len(prompts), draws=args.draws, seed=args.seed, scores={},
                systems={})
     columns = (*SCORES, *SHAPE)
     for name, t in tables.items():
@@ -296,8 +307,8 @@ def score(args):
                                     **{k: float(np.nanmean(t[:, j])) for j, k in enumerate(columns) if j >= len(SCORES)})
     for j, k in enumerate(SCORES):
         res['scores'][k] = bootstrap({n: t[:, j] for n, t in tables.items()}, args.draws, args.seed)
-    (TASK_DIR / 'scores.json').write_text(json.dumps(res, indent=1))
-    (TASK_DIR / 'scores.md').write_text(report(res))
+    (task_dir / 'scores.json').write_text(json.dumps(res, indent=1))
+    (task_dir / 'scores.md').write_text(report(res))
     print(report(res))
 
 
@@ -310,8 +321,10 @@ def main():
     f.add_argument('--archive', required=True)
     r = sub.add_parser('prompts', help='freeze the prompts')
     r.add_argument('--rows', type=int, default=ROWS)
+    r.add_argument('--spare', type=int, default=0, help='> 0: this many rows after the prompts, into midicaps_spare/')
     s = sub.add_parser('score', help='scores.md / scores.json')
     s.add_argument('--draws', type=int, default=10000)
+    s.add_argument('--task', choices=['midicaps', 'midicaps_spare'], default='midicaps')
     args = p.parse_args()
     {'eligible': eligible, 'fetch': fetch, 'prompts': export_prompts, 'score': score}[args.cmd](args)
 

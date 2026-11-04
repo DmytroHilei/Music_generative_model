@@ -31,6 +31,7 @@ Tasks (results/head2head/<task>/):
         write through such a link: it is the published file. Not part of a bare `prompts` or `score`.
   text  text_eval's prompts (EN + UK pairs and '' = unconditioned) from the start. prompts.json.
   midicaps  500 test captions of MidiCaps that F1 cannot have seen; prompts and scores in h2h_midicaps.py.
+  midicaps_spare  100 more eligible captions after those 500, for trying F1 settings without touching the test set.
 
 A system = a folder <task>/<system>/ of MIDI files <prompt id>_<k>.mid (cont: the prompt + the continuation in one
 file; text: the piece). Other models get adapters in their own environments that write the same names. Ours run here
@@ -99,7 +100,8 @@ COPY_LEN = 16
 # 'all' for every task, then the task's own; --set overrides them all
 SYSTEMS = {
     # the app's default: f1_cap, guidance 2.5, T 1.1, DRY 3
-    'f1': dict(presets=['f1'], text=dict(length_seconds=60), midicaps=dict(length_seconds=60)),
+    'f1': dict(presets=['f1'], text=dict(length_seconds=60), midicaps=dict(length_seconds=60),
+               midicaps_spare=dict(length_seconds=60)),
     'long_450m': dict(presets=[], all=dict(checkpoint='checkpoints/long_450m_final', temperature=0.9,
                                            sample_instruments=True)),  # musicar-L at sample_eval's temperature
     's50': dict(presets=['s50']),  # the 107M caption pilot
@@ -433,7 +435,7 @@ def score(args):
             continue
         prompts = json.loads((cont_dir / 'prompts.json').read_text())['prompts']
         by_system = {d.name: cont_rows(d, prompts, args.notes) for d in sorted(cont_dir.iterdir())
-                     if d.is_dir() and d.name != 'prompts'}
+                     if d.is_dir() and d.name != 'prompts' and not d.name.startswith('clamp3_')}
         results[task] = cont_scores(by_system)
         for group, ids in prompt_groups(task, prompts).items():
             results[group] = cont_scores({s: [r for r in rows if r['id'] in ids] for s, rows in by_system.items()})
@@ -512,7 +514,8 @@ def boot(args):
     for task in args.task:
         task_dir = OUT / task
         prompts = json.loads((task_dir / 'prompts.json').read_text())['prompts']
-        names = [d.name for d in sorted(task_dir.iterdir()) if d.is_dir() and d.name not in ('prompts', 'real')]
+        names = [d.name for d in sorted(task_dir.iterdir())
+                 if d.is_dir() and d.name not in ('prompts', 'real') and not d.name.startswith('clamp3_')]
         res = dict(task=task, draws=args.draws, seed=args.seed, limitation=BOOT_NOTE, notes={})
         lines = [f'# Head-to-head bootstrap of D: {task} ({time.strftime("%Y-%m-%d %H:%M")}, {args.draws:,} draws, '
                  f'seed {args.seed})', '', BOOT_NOTE, '']
@@ -549,7 +552,7 @@ def main():
     pr.add_argument('--task', choices=[*CONT_TASKS, 'text'], default=None, help='one task only (default: all)')
     o = sub.add_parser('ours', help='generate with one of SYSTEMS')
     o.add_argument('--system', choices=sorted(SYSTEMS), required=True)
-    o.add_argument('--task', choices=[*CONT_TASKS, 'text', 'midicaps'], required=True)
+    o.add_argument('--task', choices=[*CONT_TASKS, 'text', 'midicaps', 'midicaps_spare'], required=True)
     o.add_argument('--name', default=None, help='output folder name (default: the system)')
     o.add_argument('--prompts', type=int, default=0, help='> 0: only the first N prompts (smoke tests)')
     o.add_argument('--samples', type=int, default=1, help='files per prompt')

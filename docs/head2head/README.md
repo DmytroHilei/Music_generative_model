@@ -12,6 +12,8 @@ write to `results/head2head/` (not tracked, with the generated MIDI files). Each
 | `bootstrap_cont96`, `bootstrap_piano96` | 2026-10-31 | paired bootstrap of D on the 96 prompts and the groups |
 | `midicaps_scores`, `midicaps_clamp3` | 2026-10-31 | MidiCaps test captions: TB, TBT, CK, CKD, instrument scores, CLaMP 3 |
 | `text_clamp3` | 2026-10-31 | CLaMP 3 on the 32-prompt run's text outputs |
+| `cont96_clamp3_n1000`, `cont96_clamp3_n200`, `piano96_clamp3_n1000`, `piano96_clamp3_n200` | 2026-11-04 | CLaMP 3 continuation scores on the 96 prompts: closeness, contrast and MRR to the real continuation, per group, Fréchet |
+| `midicaps_spare_scores`, `midicaps_spare_clamp3` | 2026-11-04 | F1 settings on 100 spare MidiCaps test captions after the 500: preset, top-p 0.9, keep-style + lock off, guidance 4.0, `--retrieve` |
 
 Other checks of the MidiCaps run, on the same note-based estimators (not in these files): musicar-L-caption's tonic is right
 in 8.1% of the files (chance 8.3%) and major / minor in 54%; MIDI-LLM 36% and 69%, Text2midi 38% and 67%, real files 62% and 81%.

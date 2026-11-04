@@ -5,6 +5,7 @@ midicaps how near its files lie to real ones, in the space of CLaMP 3's C2 check
     .venv/bin/python eval/compare/h2h_clamp3.py normalize --task text
     checkpoints/baselines/env_clamp3/bin/python eval/compare/h2h_clamp3.py embed --task text
     checkpoints/baselines/env_clamp3/bin/python eval/compare/h2h_clamp3.py score --task text
+    .venv/bin/python eval/compare/h2h_clamp3.py normalize --task cont96 --notes 1000    # then embed / score alike
 
 The authors' pipeline, written out here (checkpoints/baselines/clamp3/repo_clamp3 is the reference and is not run):
 midi_to_mtf = batch_midi2mtf.load_midi with m3_compatible, mtf_patches = M3Patchilizer.encode, Clamp3 = the text and
@@ -33,6 +34,17 @@ songs for minutes. So every score comes twice: first = the file's first segment 
 rows (the headline), global = the authors' feature of the whole file. A file under 512 patches stays shorter, which
 cannot be avoided without cutting every file to the shortest: the same songs at 256 instead of 512 patches lost 0.004
 contrast and 0.017 MRR. clamp3.md gives the patches per row.
+
+Continuation tasks (head2head's CONT_TASKS: cont, piano, cont96, piano96): a second score next to D, which is six row
+statistics and was the checkpoint-selection metric. normalize cuts every file after its prompt's note count and keeps
+the first --notes new notes (the split of head2head.cont_rows), real/ too, and writes the prompt itself as the row
+'prompt' (what copying the prompt's style alone would reach; 128 notes, so shorter). The target of a prompt is the
+embedding of its real continuation: own = cosine to it, contrast = own minus the mean cosine to the other prompts'
+real continuations, MRR = the reciprocal rank of it among them. real_shuffled = another prompt's real continuation
+(the floor; there is no ceiling, real against itself is 1). Bootstrap over prompts, one resampling for all rows, per
+task and per head2head.prompt_groups group (cont96: no_drums / with_drums, published / new). Frechet of each row to
+the real continuations: at 96 files in 768 dimensions the covariances are rank 95, so it is a side number. Folders and
+outputs carry the cut: clamp3_tmp_n<notes>, clamp3_emb_n<notes>, clamp3_n<notes>.json / .md.
 """
 
 import argparse
@@ -62,6 +74,24 @@ LABELS = dict(first='first segment', own='own cosine', contrast='contrast', mrr=
               **{'global': 'whole file (the authors\' feature)'})
 
 
+def cont_task(task):
+    """Whether a task is one of head2head's continuation tasks (imported here: the module needs the main code)."""
+    sys.path[:0] = [str(ROOT), str(ROOT / 'eval' / 'compare')]
+    from head2head import CONT_TASKS
+    return task in CONT_TASKS
+
+
+def paths(args):
+    """(tmp, emb, output stem) of a task; a continuation task's carry the cut, one set per --notes."""
+    task_dir = OUT / args.task
+    tag = f'_n{args.notes}' if cont_task(args.task) else ''
+    return task_dir / f'clamp3_tmp{tag}', task_dir / f'clamp3_emb{tag}', task_dir / f'clamp3{tag}'
+
+
+def all_prompts(task):
+    return json.loads((OUT / task / 'prompts.json').read_text())['prompts']
+
+
 def prompts_of(task, n=0):
     """The prompts with a caption ('' = unconditioned has none to match), first n if n > 0; not the `excluded` ones."""
     rows = json.loads((OUT / task / 'prompts.json').read_text())['prompts']
@@ -70,7 +100,8 @@ def prompts_of(task, n=0):
 
 def systems_of(task, only=()):
     """The folders of <task>/ that hold .mid files."""
-    found = sorted(d.name for d in (OUT / task).iterdir() if d.is_dir() and next(d.glob('*.mid'), None))
+    found = sorted(d.name for d in (OUT / task).iterdir()
+                   if d.is_dir() and d.name != 'prompts' and next(d.glob('*.mid'), None))
     return [s for s in found if s in only] if only else found
 
 
@@ -103,12 +134,15 @@ def normalize(args):
     sys.path[:0] = [str(ROOT), str(ROOT / 'eval' / 'compare')]
     from head2head import read_midi, write_midi
 
+    if cont_task(args.task):
+        return normalize_cont(args, read_midi, write_midi)
     task_dir = OUT / args.task
+    tmp_dir, emb_dir, _ = paths(args)
     ids = {p['id'] for p in prompts_of(args.task, args.prompts)}
     left_out = pool_excluded(task_dir)
     for system in systems_of(args.task, args.systems):
-        done = set(read_emb(task_dir / 'clamp3_emb' / f'{system}.npz').get('ids', np.array([])).tolist())
-        tmp = task_dir / 'clamp3_tmp' / system
+        done = set(read_emb(emb_dir / f'{system}.npz').get('ids', np.array([])).tolist())
+        tmp = tmp_dir / system
         files = [f for f in sorted((task_dir / system).glob('*.mid'))
                  if (f.stem not in left_out if system == POOL else prompt_id(f.stem) in ids)]
         todo = [f for f in files if f.stem not in done and not (tmp / f.name).exists()]
@@ -121,6 +155,35 @@ def normalize(args):
             write_midi(tmp / f.name, *res)
         print(f'{system}: {len(todo) - len(bad)} of {len(files)} files normalised in {time.time() - t0:.0f} s'
               + (f', unreadable: {bad}' if bad else ''), flush=True)
+
+
+def normalize_cont(args, read_midi, write_midi):
+    """Continuation tasks: the first --notes new notes of every file of every system and of real/, and each prompt as
+    the row 'prompt' (<id>_0.mid)."""
+    task_dir = OUT / args.task
+    tmp_dir, emb_dir, _ = paths(args)
+    prompts = all_prompts(args.task)[:args.prompts or None]
+    done = lambda system: set(read_emb(emb_dir / f'{system}.npz').get('ids', np.array([])).tolist())
+    lengths, seen = {}, done('prompt')
+    for p in prompts:
+        res = read_midi(task_dir / 'prompts' / f"{p['id']}.mid")
+        lengths[p['id']] = len(res[0])
+        out = tmp_dir / 'prompt' / f"{p['id']}_0.mid"
+        if (not args.systems or 'prompt' in args.systems) and f"{p['id']}_0" not in seen and not out.exists():
+            write_midi(out, *res)
+    for system in systems_of(args.task, args.systems):
+        seen, tmp = done(system), tmp_dir / system
+        files = [f for f in sorted((task_dir / system).glob('*.mid')) if prompt_id(f.stem) in lengths]
+        todo = [f for f in files if f.stem not in seen and not (tmp / f.name).exists()]
+        t0, bad = time.time(), []
+        for f in todo:
+            res, n0 = read_midi(f), lengths[prompt_id(f.stem)]
+            if res is None or len(res[0]) <= n0:
+                bad.append(f.name)
+                continue
+            write_midi(tmp / f.name, res[0][n0:n0 + args.notes], res[1][n0:n0 + args.notes])
+        print(f'{system}: {len(todo) - len(bad)} of {len(files)} files cut and normalised in {time.time() - t0:.0f} s'
+              + (f', unreadable or no new notes: {bad}' if bad else ''), flush=True)
 
 
 def midi_to_mtf(path):
@@ -225,19 +288,19 @@ class Clamp3:
 
 
 def embed(args):
-    task_dir = OUT / args.task
-    tmp, emb = task_dir / 'clamp3_tmp', task_dir / 'clamp3_emb'
+    tmp, emb, _ = paths(args)
     emb.mkdir(exist_ok=True)
     model = Clamp3(args.device)
 
-    old = read_emb(emb / '_captions.npz')
-    done = dict(zip(old.get('ids', np.array([])).tolist(), old.get('vectors', [])))
-    t0 = time.time()
-    for p in prompts_of(args.task):
-        if p['id'] not in done:
-            done[p['id']] = model.text(p['caption'])
-    write_emb(emb / '_captions.npz', ids=np.array(list(done)), vectors=np.stack(list(done.values())))
-    print(f'{len(done)} captions embedded in {time.time() - t0:.1f} s', flush=True)
+    if not cont_task(args.task):
+        old = read_emb(emb / '_captions.npz')
+        done = dict(zip(old.get('ids', np.array([])).tolist(), old.get('vectors', [])))
+        t0 = time.time()
+        for p in prompts_of(args.task):
+            if p['id'] not in done:
+                done[p['id']] = model.text(p['caption'])
+        write_emb(emb / '_captions.npz', ids=np.array(list(done)), vectors=np.stack(list(done.values())))
+        print(f'{len(done)} captions embedded in {time.time() - t0:.1f} s', flush=True)
 
     for folder in sorted(d for d in tmp.iterdir() if d.is_dir()) if tmp.exists() else []:
         old = read_emb(emb / f'{folder.name}.npz')
@@ -419,6 +482,8 @@ def report(res):
 
 
 def score(args):
+    if cont_task(args.task):
+        return cont_score(args)
     task_dir, emb = OUT / args.task, OUT / args.task / 'clamp3_emb'
     stored = read_emb(emb / '_captions.npz')
     vectors = dict(zip(stored['ids'].tolist(), unit(stored['vectors'].astype(np.float64))))
@@ -453,6 +518,90 @@ def score(args):
     print(report(res))
 
 
+def length_table(rows):
+    return {k: dict(files=len(r['ids']), patches=float(r['patches'].mean()), segments=float(r['segments'].mean()),
+                    over=float((r['segments'] > 1).mean())) for k, r in rows.items()}
+
+
+def cont_score(args):
+    """clamp3_n<notes>.json / .md of a continuation task (module docstring)."""
+    from head2head import prompt_groups
+
+    _, emb, stem = paths(args)
+    prompts = all_prompts(args.task)
+    rows = {p.stem: read_emb(p) for p in sorted(emb.glob('*.npz'))}
+    real = rows.pop('real')
+    place = {s: i for i, s in enumerate(real['ids'].tolist())}
+    ids = [p['id'] for p in prompts if f"{p['id']}_0" in place]
+    index = {p: i for i, p in enumerate(ids)}
+    others = comparators(len(ids), args.others, args.seed)
+    swap = deranged(len(ids), args.seed)
+    groups = {args.task: set(ids), **prompt_groups(args.task, prompts)}
+    masks = {g: np.array([i in keep for i in ids]) for g, keep in groups.items()}
+    res = dict(task=args.task, notes=args.notes, date=time.strftime('%Y-%m-%d %H:%M'), draws=args.draws,
+               seed=args.seed, others=int(others.shape[1]), prompts=len(ids),
+               length=length_table({**rows, 'real': real}), windows={}, frechet={},
+               frechet_draws=args.frechet_draws)
+    shared = sorted(set.intersection(*[set(map(prompt_id, r['ids'].tolist())) for r in rows.values()]) & set(ids),
+                    key=index.get)
+    for window, field in WINDOWS.items():
+        raw = real[field][[place[f'{i}_0'] for i in ids]].astype(np.float64)
+        target = unit(raw)
+        table = {}
+        for name, e in rows.items():
+            keep = [n for n, s in enumerate(e['ids'].tolist()) if prompt_id(s) in index]
+            own = np.array([index[prompt_id(s)] for s in e['ids'][keep].tolist()], int)
+            scores = file_scores(unit(e[field][keep].astype(np.float64)), target, own, others)
+            table[name] = {m: per_prompt(scores[m], own, len(ids)) for m in METRICS}
+        floor = file_scores(target, target, swap, others)
+        table['real_shuffled'] = {m: per_prompt(floor[m], swap, len(ids)) for m in METRICS}
+        res['windows'][window] = {g: {m: bootstrap({r: np.where(mask, t[m], np.nan) for r, t in table.items()},
+                                                   args.draws, args.seed) for m in METRICS}
+                                  for g, mask in masks.items()}
+        firsts = {name: e[field][[{s: n for n, s in enumerate(e['ids'].tolist())}[f'{i}_0'] for i in shared]]
+                  for name, e in rows.items()}
+        res['frechet'][window] = dict(frechet_boot({k: v.astype(np.float64) for k, v in firsts.items()}, raw,
+                                                   args.frechet_draws, args.seed), n=len(shared), reference=len(ids))
+    (stem.parent / f'{stem.name}.json').write_text(json.dumps(res, indent=1))
+    (stem.parent / f'{stem.name}.md').write_text(cont_report(res))
+    print(cont_report(res))
+
+
+def cont_report(res):
+    """clamp3_n<notes>.md of a cont_score result."""
+    lines = [f"# CLaMP 3 continuation scores, {res['task']}, first {res['notes']} new notes ({res['date']})", '',
+             f"C2 checkpoint, every file cut after its prompt and normalised (h2h_clamp3.py). Target = the embedding "
+             f"of the prompt's real continuation: own = cosine to it, contrast = own minus the mean cosine to "
+             f"{res['others']} other prompts' real continuations, MRR = its reciprocal rank among them. prompt = the "
+             "prompt itself (128 notes), real_shuffled = another prompt's real continuation (floor). "
+             f"{res['draws']} bootstrap draws over the {res['prompts']} prompts, 95% percentile interval. first = the "
+             "first segment of 512 patches; global = the authors' whole-file feature.", '',
+             '## Length', '', '| system | files | patches | segments | files over one segment |',
+             '|---|---|---|---|---|']
+    lines += [f"| {k} | {v['files']} | {v['patches']:.0f} | {v['segments']:.2f} | {v['over']:.3f} |"
+              for k, v in res['length'].items()]
+    lines.append('')
+    for window, groups in res['windows'].items():
+        for group, metrics in groups.items():
+            names = list(metrics['own']['rows'])
+            lines += [f'## {group}, {LABELS[window]}', '', '| system | ' + ' | '.join(LABELS[m] for m in METRICS) + ' |',
+                      '|---' * (len(METRICS) + 1) + '|']
+            lines += [f'| {n} | ' + ' | '.join(stat(metrics[m]['rows'][n]) for m in METRICS) + ' |' for n in names]
+            lines.append('')
+            if window == 'first':
+                for m in ('own', 'contrast'):
+                    lines += win_table(f'{group}, {LABELS[window]}, {LABELS[m]}', metrics[m])
+    for window, f in res['frechet'].items():
+        lines += [f"## Frechet to the real continuations, {LABELS[window]} (lower is better; side number)", '',
+                  f"N = {f['n']} files per row against the {f['reference']} real continuations, raw features: at this "
+                  f"N the covariances are rank N - 1 of 768. {res['frechet_draws']} draws over files, each row's draws "
+                  'centred on its value.', '', '| system | Frechet |', '|---|---|']
+        lines += [f'| {n} | {stat(s)} |' for n, s in f['rows'].items()]
+        lines.append('')
+        lines += win_table(f'Frechet, {LABELS[window]}', f)
+    return '\n'.join(lines)
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest='cmd', required=True)
@@ -469,6 +618,8 @@ def main():
     s.add_argument('--frechet-draws', type=int, default=1000, help='bootstrap draws over files (33 ms each per row)')
     s.add_argument('--others', type=int, default=100, help='other captions per prompt, at most the language\'s rest')
     s.add_argument('--seed', type=int, default=1234)
+    for q in (n, e, s):
+        q.add_argument('--notes', type=int, default=1000, help='continuation tasks: new notes kept per file')
     args = p.parse_args()
     {'normalize': normalize, 'embed': embed, 'score': score}[args.cmd](args)
 
