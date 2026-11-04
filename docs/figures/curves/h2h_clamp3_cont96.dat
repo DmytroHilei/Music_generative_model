@@ -1,0 +1,8 @@
+system contrast contrast200
+real_shuffled -0.014 -0.01
+prompt 0.258 0.292
+long_450m 0.317 0.305
+f1 0.213 0.254
+amt 0.247 0.261
+skytnt_medium 0.26 0.275
+skytnt_large 0.2 0.235

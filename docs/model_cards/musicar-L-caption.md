@@ -135,6 +135,31 @@ model.eval()
 `musicar.generation.sampling.generate`, the whole path (caption, length, best-of, retrieval) is
 `musicar.generation.piece.Generator`.
 
+## Hardware and speed
+
+**Minimum.** Any CUDA GPU with 4 GB of memory (peak 3.04 GiB measured with the f1 preset: guidance, DRY and the fp32 LaBSE encoder on the GPU), or a CPU with about 6 GB of free RAM. PyTorch 2.7 or newer, `transformers` for LaBSE (downloaded on first use) and the code repository's `generate.py` / `musicar` package.
+
+At one row, generating a note reads every weight once plus the cached keys and values of the notes in view, so
+the speed is capped by memory bandwidth B:
+
+    notes/s  <=  B / (P * b_w  +  r * 2 * L * d * n * b_kv)
+
+P = parameters, b_w = bytes per weight (bf16 2, int8 1, int4 0.5), r = rows (one per sample; guidance doubles them),
+L = layers, d = width (every head keeps its keys and values: full attention), n = notes in view, b_kv = bytes per
+cached value. It counts memory traffic only: at one row a GPU waits on kernel launches and the Python loop more than
+on memory, so the measured speed stays below it. For real time, multi-instrument music needs about 24 notes per
+second and solo piano about 8 (the real continuations of the head-to-head).
+
+For this model P = 477M, L = 28, d = 1,152: bf16 weights 0.95 GB, the cache 129 KB per note and row; LaBSE (471M) runs once per caption, not per note, so it adds memory but no per-note traffic. With guidance r = 2: 0.95 + 2 × 0.13 GB per note at 1,024 notes in view.
+
+| Hardware (the project's) | Bandwidth | Ceiling, 1,024 notes in view | Measured |
+|---|---|---|---|
+| Laptop RTX 5060, 8 GB GDDR7 (128-bit, 24 Gbps) | 384 GB/s | ≈ 350 notes/s at 1 row, ≈ 315 with guidance (bf16) | **90 notes/s** with the f1 preset (guidance, DRY; 740 notes in 8.2 s) |
+| Rented RTX 5090 | 1,792 GB/s | ≈ 1,450 notes/s with guidance | not measured |
+| Raspberry Pi 5, 8 GB (STREAM 5.4–7.8 GB/s) | ≈ 8 GB/s | int8 ≈ 11, int4 weights + int8 cache ≈ 20 notes/s with guidance | not measured yet (port planned) |
+
+On the laptop GPU a 60-s piece of about 1,000 notes takes about 11 s.
+
 ## Intended use
 
 - Research on text-conditioned symbolic music generation: caption following, guidance, length control.

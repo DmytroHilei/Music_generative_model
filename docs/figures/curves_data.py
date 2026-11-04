@@ -23,6 +23,8 @@ h2h_cont96.dat                      system, D and D200 of the 96-prompt continua
 h2h_piano96.dat                     system, D and D200 of the 96-prompt piano continuations
 h2h_midicaps.dat                    one row per score, one column per system: MidiCaps test set (midicaps/scores.json,
                                     midicaps/clamp3.json, first segment)
+h2h_clamp3_cont96.dat               system, CLaMP 3 contrast of the 96-prompt continuations over the first 1,000 and 200
+                                    new notes (cont96/clamp3_n1000.json, clamp3_n200.json, first segment)
 """
 import json
 import re
@@ -107,6 +109,16 @@ def head2head_midicaps():
     write('h2h_midicaps.dat', ('score', *H2H_MIDICAPS), rows)
 
 
+H2H_CLAMP3 = ('real_shuffled', 'prompt', 'long_450m', 'f1', 'amt', 'skytnt_medium', 'skytnt_large')
+
+
+def head2head_clamp3():
+    runs = [json.loads((ROOT / f'results/head2head/cont96/clamp3_n{n}.json').read_text())['windows']['first']['cont96']
+            for n in (1000, 200)]
+    write('h2h_clamp3_cont96.dat', ('system', 'contrast', 'contrast200'),
+          [(s, *(round(r['contrast']['rows'][s]['mean'], 3) for r in runs)) for s in H2H_CLAMP3])
+
+
 def main():
     for arm in ('base', 'newblock'):
         seeds = []
@@ -150,6 +162,7 @@ def main():
     head2head()
     head2head_96()
     head2head_midicaps()
+    head2head_clamp3()
 
 
 if __name__ == '__main__':

@@ -61,14 +61,14 @@
 \setlength{\panelW}{\dimexpr 16.8cm + 9.2cm + 18pt\relax}
 \begin{document}
 %% ================= small drawings inside text panels =================
-\newsavebox{\spliceBox}
+\newsavebox{\spliceBox}%
 \sbox{\spliceBox}{\begin{tikzpicture}
   \node[draw=black, fill=white, minimum width=36mm, minimum height=5mm, font=\scriptsize] (sa) at (0, 0) {file A notes};
   \node[draw=pinkL, fill=pinkF, minimum width=7mm, minimum height=5mm, font=\scriptsize, anchor=west] (sb) at (sa.east) {S$_B$};
   \node[draw=black, fill=white, minimum width=36mm, minimum height=5mm, font=\scriptsize, anchor=west, densely dashed] at (sb.east) {file B section};
 \end{tikzpicture}}%
 
-\newsavebox{\repeatBox}
+\newsavebox{\repeatBox}%
 \sbox{\repeatBox}{\begin{tikzpicture}
   \foreach \i in {0,1,2} {
     \node[draw=pinkL, fill=pinkF, minimum width=4mm, minimum height=5mm, inner sep=0pt] at (2.8*\i, 0) {};
@@ -86,7 +86,7 @@
 
 % head-to-head: D of each system's continuations (rows of curves/h2h_cont.dat: real, ours x 2, other models x 5;
 % filled = the first 1,000 new notes, hollow = the first 200; Moonbeam at T 0.6 is off the scale at 1,000)
-\newsavebox{\curveHH}
+\newsavebox{\curveHH}%
 \sbox{\curveHH}{\begin{tikzpicture}
 \begin{axis}[dots, width=4.6cm, height=5.6cm, ymax=7.6, xmin=0, xmax=0.75, xtick={0,0.2,0.4,0.6}, ytick={0,...,7},
     xlabel={D: distance to the real continuations (lower = closer)},
@@ -116,7 +116,7 @@
 \end{axis}
 \end{tikzpicture}}%
 
-\newsavebox{\hhTable}
+\newsavebox{\hhTable}%
 \sbox{\hhTable}{\scriptsize\renewcommand{\arraystretch}{1.3}\setlength{\tabcolsep}{4.5pt}%
 \begin{tabular}{@{}lrrrrrrrrrrr@{}}
 system & notes / s & instr. & out of band & top share & takeover & runaway & copies & ended & D & D, 200 & params\\\hline
@@ -130,7 +130,7 @@ Moonbeam \rcite{21}, $T$ 0.9 & 49.5 & 8.88 & 0.140 & 0.491 & 0.156 & 0.312 & 0.2
 Moonbeam, $T$ 0.6 & 85.9 & 5.25 & 0.018 & 0.533 & 0.125 & 0.063 & 0.456 & 0 & 1.316 & 0.525 & 839M\\
 \end{tabular}}%
 
-\newsavebox{\curveHHp}
+\newsavebox{\curveHHp}%
 \sbox{\curveHHp}{\begin{tikzpicture}
 \begin{axis}[dots, width=4.3cm, height=3.6cm, ymax=4.6, xmin=0, xmax=0.2, xtick={0,0.05,0.1,0.15,0.2}, ytick={0,...,4},
     xlabel={D: distance to the real continuations (lower = closer)},
@@ -153,7 +153,7 @@ Moonbeam, $T$ 0.6 & 85.9 & 5.25 & 0.018 & 0.533 & 0.125 & 0.063 & 0.456 & 0 & 1.
 \end{axis}
 \end{tikzpicture}}%
 
-\newsavebox{\hhPiano}
+\newsavebox{\hhPiano}%
 \sbox{\hhPiano}{\scriptsize\renewcommand{\arraystretch}{1.3}\setlength{\tabcolsep}{4.5pt}%
 \begin{tabular}{@{}lrrrrrrrr@{}}
 system & notes / s & runaway & ended & copies & prompt check & D & D, 200 & params\\\hline
@@ -164,7 +164,7 @@ Aria medium, continuation \rcite{20} & 9.99 & 0.031 & 0.31 & 0.007 & 1 & 0.096 &
 \us{450M piano-cover fine-tune} (not released) & 3.53 & 0 & 1.00 & 0 & 1 & 0.177 & 0.078 & 464M\\
 \end{tabular}}%
 
-\newsavebox{\curveHHn}
+\newsavebox{\curveHHn}%
 \sbox{\curveHHn}{\begin{tikzpicture}
 \begin{axis}[dots, width=4.6cm, height=4.0cm, ymax=5.6, xmin=0, xmax=0.62, xtick={0,0.2,0.4,0.6}, ytick={0,...,5},
     xlabel={D: distance to the real continuations (lower = closer)},
@@ -189,7 +189,7 @@ Aria medium, continuation \rcite{20} & 9.99 & 0.031 & 0.31 & 0.007 & 1 & 0.096 &
 \end{axis}
 \end{tikzpicture}}%
 
-\newsavebox{\hhGroups}
+\newsavebox{\hhGroups}%
 \sbox{\hhGroups}{\scriptsize\renewcommand{\arraystretch}{1.3}\setlength{\tabcolsep}{4.5pt}%
 \begin{tabular}{@{}lrrrrr@{}}
 prompts & \us{musicar-L} & \us{musicar-L-caption} & AMT large & SkyTNT medium & Music-Llama\\\hline
@@ -203,7 +203,7 @@ all 96, first 200 notes & \textbf{0.084} & 0.205 & 0.099 & 0.161 & 0.219\\
 \quad the new 64 & 0.098 & 0.215 & \textbf{0.047} & 0.155 & 0.264\\
 \end{tabular}}%
 
-\newsavebox{\hhPianoN}
+\newsavebox{\hhPianoN}%
 \sbox{\hhPianoN}{\scriptsize\renewcommand{\arraystretch}{1.3}\setlength{\tabcolsep}{4.5pt}%
 \begin{tabular}{@{}lrrrrrr@{}}
 piano, 96 prompts & notes / s & runaway & ended & D & D, 200 & closer than Aria\\\hline
@@ -214,7 +214,64 @@ Aria medium, continuation \rcite{20} & 9.93 & 0.021 & 0.20 & 0.074 & 0.044 & \\
 \us{450M piano-cover fine-tune} (not released) & 3.75 & 0 & 0.91 & 0.182 & 0.081 & 0.1\%\\
 \end{tabular}}%
 
-\newsavebox{\curveHHt}
+% CLaMP 3 contrast of the 96-prompt continuations (rows of curves/h2h_clamp3_cont96.dat: shuffled, prompt only, ours x 2,
+% other models x 3), first 1,000 (filled) and 200 (open) new notes
+\newsavebox{\curveHHc}%
+\sbox{\curveHHc}{\begin{tikzpicture}
+\begin{axis}[dots, width=4.6cm, height=4.4cm, ymax=6.6, xmin=-0.05, xmax=0.36, xtick={0,0.1,0.2,0.3}, ytick={0,...,6},
+    xlabel={CLaMP 3 contrast to the own real continuation (higher = closer)},
+    yticklabels={{another prompt's real\\continuation (floor)}, {the prompt itself}, {musicar-L (464M)}, {musicar-L-caption (477M)},
+                 {AMT large (780M)}, {SkyTNT medium (234M)}, {Music-Llama, SkyTNT\\architecture (457M)}}]
+  \draw[black!25, line width=1.2pt] (axis cs:-0.014, 0) -- (axis cs:-0.010, 0);
+  \draw[black!25, line width=1.2pt] (axis cs:0.258, 1) -- (axis cs:0.292, 1);
+  \draw[black!25, line width=1.2pt] (axis cs:0.305, 2) -- (axis cs:0.317, 2);
+  \draw[black!25, line width=1.2pt] (axis cs:0.213, 3) -- (axis cs:0.254, 3);
+  \draw[black!25, line width=1.2pt] (axis cs:0.247, 4) -- (axis cs:0.261, 4);
+  \draw[black!25, line width=1.2pt] (axis cs:0.260, 5) -- (axis cs:0.275, 5);
+  \draw[black!25, line width=1.2pt] (axis cs:0.200, 6) -- (axis cs:0.235, 6);
+  \addplot[black, only marks, mark=*, mark size=2.4pt] table[x=contrast, y expr=\coordindex, skip coords between index={2}{7}] {curves/h2h_clamp3_cont96.dat};
+  \addplot[tealT, only marks, mark=*, mark size=2.8pt] table[x=contrast, y expr=\coordindex, skip coords between index={0}{2}, skip coords between index={4}{7}] {curves/h2h_clamp3_cont96.dat};
+  \addplot[altG, only marks, mark=*, mark size=2.4pt] table[x=contrast, y expr=\coordindex, skip coords between index={0}{4}] {curves/h2h_clamp3_cont96.dat};
+  \addplot[black, only marks, mark=o, mark size=2.4pt, line width=1pt, fill=white] table[x=contrast200, y expr=\coordindex, skip coords between index={2}{7}] {curves/h2h_clamp3_cont96.dat};
+  \addplot[tealT, only marks, mark=o, mark size=2.8pt, line width=1pt, fill=white] table[x=contrast200, y expr=\coordindex, skip coords between index={0}{2}, skip coords between index={4}{7}] {curves/h2h_clamp3_cont96.dat};
+  \addplot[altG, only marks, mark=o, mark size=2.4pt, line width=1pt, fill=white] table[x=contrast200, y expr=\coordindex, skip coords between index={0}{4}] {curves/h2h_clamp3_cont96.dat};
+\end{axis}
+\end{tikzpicture}}%
+
+\newsavebox{\hhClamp}%
+\sbox{\hhClamp}{\scriptsize\renewcommand{\arraystretch}{1.3}\setlength{\tabcolsep}{4.5pt}%
+\begin{tabular}{@{}lrrrrr@{}}
+continuation, 96 prompts & closeness & contrast & MRR & contrast, 200 & MRR, 200\\\hline
+\us{musicar-L} & \textbf{0.715} & \textbf{0.317} & \textbf{0.811} & \textbf{0.305} & \textbf{0.899}\\
+\us{musicar-L-caption} (no caption) & 0.597 & 0.213 & 0.563 & 0.254 & 0.747\\
+AMT large & 0.648 & 0.247 & 0.640 & 0.261 & 0.799\\
+SkyTNT tv2o-medium & 0.648 & 0.260 & 0.666 & 0.275 & 0.831\\
+Music-Llama & 0.583 & 0.200 & 0.537 & 0.235 & 0.697\\
+the prompt itself & 0.645 & 0.258 & 0.669 & 0.292 & 0.891\\
+another prompt's real continuation & 0.385 & $-$0.014 & 0.043 & $-$0.010 & 0.042\\[3pt]
+piano, 96 prompts & & & & & \\\hline
+\us{108M piano covers} (ua\_2048\_v2, not released) & 0.649 & 0.152 & 0.424 & 0.154 & 0.482\\
+\us{musicar-L} & \textbf{0.689} & 0.211 & 0.547 & 0.181 & 0.545\\
+Aria medium, continuation \rcite{20} & 0.658 & \textbf{0.216} & \textbf{0.578} & \textbf{0.208} & 0.682\\
+\us{450M piano-cover fine-tune} (not released) & 0.604 & 0.154 & 0.428 & 0.170 & 0.500\\
+the prompt itself & 0.576 & 0.165 & 0.519 & 0.206 & \textbf{0.694}\\
+another prompt's real continuation & 0.492 & 0.009 & 0.052 & 0.003 & 0.047\\
+\end{tabular}}%
+
+\newsavebox{\hhSpare}%
+\sbox{\hhSpare}{\scriptsize\renewcommand{\arraystretch}{1.3}\setlength{\tabcolsep}{4.5pt}%
+\begin{tabular}{@{}lrrrrrr@{}}
+\us{musicar-L-caption}, 100 spare captions & TB & CK & CKD & caption match & CLaMP 3 MRR & runaway\\\hline
+app's f1 preset (the paired control) & 0.24 & 0.06 & 0.10 & 0.548 & 0.118 & 0.050\\
+top-p 0.9 & 0.20 & 0.06 & 0.09 & 0.512 & 0.141 & 0.163\\
+keep-style and lock-instruments off & 0.25 & 0.04 & 0.09 & 0.545 & 0.090 & 0.035\\
+guidance 4.0 (preset 2.5) & 0.18 & 0.05 & 0.09 & 0.543 & 0.123 & 0.057\\
+\texttt{-{}-retrieve gigamidi\_replay\_train} & \textbf{0.26} & \textbf{0.20} & \textbf{0.27} & \textbf{0.607} & \textbf{0.150} & \textbf{0.030}\\
+real files (ceiling) & 0.55 & 0.63 & 0.66 & 0.742 & 0.454 & 0.037\\
+shuffled (floor) & 0.23 & 0.06 & 0.17 & 0.388 & 0.042 & \\
+\end{tabular}}%
+
+\newsavebox{\curveHHt}%
 \sbox{\curveHHt}{\begin{tikzpicture}
 \begin{axis}[dots, width=4.6cm, height=4.1cm, ymax=5.6, xmin=0, xmax=1.3, xtick={0,0.25,0.5,0.75,1,1.25}, ytick={0,...,5},
     xlabel={F: caption following (higher = follows)},
@@ -233,7 +290,7 @@ Aria medium, continuation \rcite{20} & 9.93 & 0.021 & 0.20 & 0.074 & 0.044 & \\
 \end{axis}
 \end{tikzpicture}}%
 
-\newsavebox{\textTable}
+\newsavebox{\textTable}%
 \sbox{\textTable}{\scriptsize\renewcommand{\arraystretch}{1.3}\setlength{\tabcolsep}{4.5pt}%
 \begin{tabular}{@{}lrrrrrrrrr@{}}
 system & F, EN & F, UK & caption match & runaway & copies & notes / s & instr. & seconds & params\\\hline
@@ -245,7 +302,7 @@ MIDI-LLM \rcite{18} & 0.60 & 0.09 & 0.553 & 0.141 & 0.021 & 24.6 & 3.0 & 35.0 & 
 Text2midi \rcite{19} & 0.54 & 0.06 & 0.554 & 0.090 & 0.016 & 23.3 & 11.4 & 25.2 & 250M\\
 \end{tabular}}%
 
-\newsavebox{\curveHHm}
+\newsavebox{\curveHHm}%
 \sbox{\curveHHm}{\begin{tikzpicture}
 \begin{axis}[dots, width=4.9cm, height=3.3cm, ymax=4.6, xmin=0, xmax=0.85, xtick={0,0.2,0.4,0.6,0.8}, ytick={0,...,4},
     xlabel={score (higher = closer to the caption)},
@@ -263,7 +320,7 @@ Text2midi \rcite{19} & 0.54 & 0.06 & 0.554 & 0.090 & 0.016 & 23.3 & 11.4 & 25.2 
 \end{axis}
 \end{tikzpicture}}%
 
-\newsavebox{\hhMidicaps}
+\newsavebox{\hhMidicaps}%
 \sbox{\hhMidicaps}{\scriptsize\renewcommand{\arraystretch}{1.3}\setlength{\tabcolsep}{4.5pt}%
 \begin{tabular}{@{}lrrrrr@{}}
 score & \us{musicar-L-caption} & MIDI-LLM \rcite{18} & Text2midi \rcite{19} & real files (ceiling) & shuffled (floor)\\\hline
@@ -281,7 +338,7 @@ seconds, notes / s in the first 40 s & 40.4, 13.6 & 28.8, 25.3 & 22.2, 22.4 & 37
 runaway (10-s windows) & \textbf{0.036} & 0.148 & 0.072 & 0.059 & \\
 \end{tabular}}%
 
-\newsavebox{\curveFone}
+\newsavebox{\curveFone}%
 \sbox{\curveFone}{\begin{tikzpicture}
 \begin{axis}[cplot, clip=true, clip mode=individual, xmin=0, xmax=2.1, ymin=1.72, ymax=1.98,
     xtick={0,0.5,1,1.5,2}, ytick={1.75,1.8,1.85,1.9,1.95}, xlabel={notes seen in F1 (billions)},
@@ -297,7 +354,7 @@ runaway (10-s windows) & \textbf{0.036} & 0.148 & 0.072 & 0.059 & \\
 \end{axis}
 \end{tikzpicture}}%
 
-\newsavebox{\capTable}
+\newsavebox{\capTable}%
 \sbox{\capTable}{\scriptsize\renewcommand{\arraystretch}{1.3}\setlength{\tabcolsep}{5pt}%
 \begin{tabular}{@{}lrr@{}}
  & F1 & \us{f1\_cap}\\\hline
@@ -311,7 +368,7 @@ text follow F, guidance 2 & 0.82 & \textbf{1.03}\\
 \quad EN / UK pairs at guidance 2 & 0.79 / 0.86 & 1.07 / 0.97\\
 \end{tabular}}%
 
-\newsavebox{\lenTable}
+\newsavebox{\lenTable}%
 \sbox{\lenTable}{\scriptsize\renewcommand{\arraystretch}{1.3}\setlength{\tabcolsep}{5pt}%
 \begin{tabular}{@{}lrrr@{}}
 asked for & F1 & \us{f1\_cap} & f1\_cap, ramp 1$^*$\\\hline
@@ -321,7 +378,7 @@ nothing: median end & 142 s & 66 s & 68 s\\
 120 s & 0.91, 44\% & 0.97, 56\% & 0.98, \textbf{81\%}\\
 \end{tabular}}%
 
-\newsavebox{\curveBlock}
+\newsavebox{\curveBlock}%
 \sbox{\curveBlock}{\begin{tikzpicture}
 \begin{axis}[cplot, xmin=250, xmax=1500, ymin=2.8, ymax=7.8, xtick={250,500,750,1000,1250,1500},
     xlabel={training step}, ylabel={val CE (nats / note)}]
@@ -336,7 +393,7 @@ nothing: median end & 142 s & 66 s & 68 s\\
 \end{axis}
 \end{tikzpicture}}%
 
-\newsavebox{\curveBase}
+\newsavebox{\curveBase}%
 \sbox{\curveBase}{\begin{tikzpicture}
 \begin{axis}[cplot, xmin=0, xmax=8.3, ymin=1.6, ymax=2.9, xtick={0,2,4,6,8}, ytick={1.6,1.8,2.0,2.2,2.4,2.6,2.8},
     xlabel={notes seen (billions)}, ylabel={val CE (nats / note)}]
@@ -349,7 +406,7 @@ nothing: median end & 142 s & 66 s & 68 s\\
 \end{axis}
 \end{tikzpicture}}%
 
-\newsavebox{\curveArms}
+\newsavebox{\curveArms}%
 \sbox{\curveArms}{\begin{tikzpicture}
 \pgfplotsset{arms/.style={cplot, width=2.5cm, height=4.6cm, ymin=-0.6, ymax=6.6, ytick={0,1,2,3,4,5,6}, grid=none,
     xmajorgrids, axis y line*=none, y axis line style={draw=none}, ytick style={draw=none},
@@ -380,7 +437,7 @@ nothing: median end & 142 s & 66 s & 68 s\\
 \end{axis}
 \end{tikzpicture}}%
 
-\newsavebox{\curveGQA}
+\newsavebox{\curveGQA}%
 \sbox{\curveGQA}{\begin{tikzpicture}
 \begin{axis}[cplot, clip=true, clip mode=individual, xmin=-300, xmax=1500, ymin=2.74, ymax=3.2,
     xtick={-300,0,500,1000,1500}, ytick={2.8,2.9,3.0,3.1,3.2}, xlabel={training step (transfer at $-300$ to 0)},
@@ -398,7 +455,7 @@ nothing: median end & 142 s & 66 s & 68 s\\
 \end{axis}
 \end{tikzpicture}}%
 
-\newsavebox{\curveHeads}
+\newsavebox{\curveHeads}%
 \sbox{\curveHeads}{\begin{tikzpicture}
 \begin{axis}[cplot, xmin=250, xmax=1500, ymin=2.6, ymax=7.6, xtick={250,500,750,1000,1250,1500},
     xlabel={training step}, ylabel={held-out CE (nats / note)}]
@@ -414,7 +471,7 @@ nothing: median end & 142 s & 66 s & 68 s\\
 \end{axis}
 \end{tikzpicture}}%
 
-\newsavebox{\setupBox}
+\newsavebox{\setupBox}%
 \sbox{\setupBox}{\footnotesize\renewcommand{\arraystretch}{1.25}%
 \begin{tabularx}{\panelW}{@{\hspace{7pt}}>{\raggedright}p{2.2cm}>{\raggedright}X>{\raggedright}X>{\raggedright\arraybackslash}X@{\hspace{7pt}}}
 \rowcolor{tealF}\textcolor{tealT}{\textbf{Setting}} & \textcolor{tealT}{\textbf{Base pretraining (done: musicar-L)}} &
@@ -445,7 +502,7 @@ Schedule & WSD \rcite{7}: warmup, stable (constant LR), $1-\sqrt{\cdot}$ decay o
 Precision & bf16 with fp8 matmuls, torch.compile & same & same\\
 \end{tabularx}}%
 
-\newsavebox{\audioBox}
+\newsavebox{\audioBox}%
 \sbox{\audioBox}{\begin{tikzpicture}
   \node[box, minimum height=10mm] (mp3) at (0, 0) {Song\\[-2pt] {\scriptsize (mp3)}};
   \node[box, minimum height=10mm] (dm) at (2.55, 0) {Demucs \rcite{11}\\[-2pt] {\scriptsize htdemucs\_6s, 6 stems}};
@@ -470,7 +527,7 @@ Precision & bf16 with fp8 matmuls, torch.compile & same & same\\
   \draw[arr, dashed, black!60, rounded corners=4pt] (mp3.south) |- (plan.west);
 \end{tikzpicture}}%
 
-\newsavebox{\glossBox}
+\newsavebox{\glossBox}%
 \sbox{\glossBox}{\scriptsize\renewcommand{\arraystretch}{1.2}%
 \begin{tabular}{@{}>{\bfseries}l>{\raggedright}p{4.4cm}@{\hspace{12pt}}>{\bfseries}l>{\raggedright\arraybackslash}p{4.4cm}@{}}
 CE & cross-entropy of the true notes (nats per note), the sum over the note's heads & D & distance to real music: weighted sum over takeover, top share, notes/s (0.20 each), out of band, instruments (0.15), runaway (0.10) of $|$system $-$ real$|$ / the real rows' spread\\
@@ -484,7 +541,7 @@ Muon \rcite{6} & optimizer that orthogonalises the update of each weight matrix 
 guidance \rcite{9} & classifier-free guidance: logits pushed away from the caption-free ones & stem & one separated part of a recording (vocals, bass, drums, ...)\\
 \end{tabular}}%
 
-\newsavebox{\refBox}
+\newsavebox{\refBox}%
 \sbox{\refBox}{\scriptsize\renewcommand{\arraystretch}{1.1}%
 \newcommand{\rf}[3]{[#1] & #2, \href{https://arxiv.org/abs/#3}{\texttt{arXiv:#3}}\\}%
 \newcommand{\rh}[3]{[#1] & #2, \href{https://huggingface.co/#3}{\texttt{hf.co/#3}}\\}%
@@ -573,9 +630,9 @@ guidance \rcite{9} & classifier-free guidance: logits pushed away from the capti
 \node[cell, text width=8.6cm] (h3n) at (A3n) {%
   {\footnotesize\bfseries Continuation and piano on 96 prompts (2026-10-31)}\\[3pt]
   \usebox{\curveHHn}\\[2pt]
-  $\bullet$ the first 1,000 new notes, $\circ$ the first 200, all 96 prompts: the published 32 + 64 new ones. AMT, musicar-L
-  and musicar-L-caption sit too close together to rank; musicar-L stays ahead of SkyTNT and Music-Llama. Moonbeam was not
-  run on the 96.};
+  $\bullet$ the first 1,000 new notes, $\circ$ the first 200, all 96 prompts: the published 32 + 64 new ones. On D, AMT,
+  musicar-L and musicar-L-caption sit too close together to rank; musicar-L stays ahead of SkyTNT and Music-Llama. CLaMP 3
+  separates them (below). Moonbeam was not run on the 96.};
 \node[cell, text width=16.4cm] (h4n) at (h3n.north east) {%
   {\footnotesize\bfseries D by prompt set: the published ranking does not hold; each row against its own real continuations (bold = lowest)}\\[5pt]
   \usebox{\hhGroups}\\[6pt]
@@ -587,8 +644,33 @@ guidance \rcite{9} & classifier-free guidance: logits pushed away from the capti
   The share of draws is no p-value. musicar-L-caption's gap is density again: 24 notes per second over the first 200 new notes,
   16.4 over 1,000 (real 24.5). AMT keeps the prompt's instruments least, which D does not score (0.77 vs real 0.92, musicar-L 0.89).\\[5pt]
   \usebox{\hhPianoN}\\[3pt]
-  Piano: the order of the 32 prompts holds on 96, at both lengths. The percentages are draws closer than Aria at 1,000 notes.};
-\path let \p1 = (h3n.south), \p2 = (h4n.south), \n1 = {min(\y1, \y2)} in coordinate (A3) at (0, \n1);
+  Piano: on D the order of the 32 prompts holds on 96, at both lengths (CLaMP 3 does not keep it, below). The percentages are
+  draws closer than Aria at 1,000 notes.};
+\path let \p1 = (h3n.south), \p2 = (h4n.south), \n1 = {min(\y1, \y2)} in coordinate (A3c) at (0, \n1);
+\node[cell, text width=8.6cm] (h3c) at (A3c) {%
+  {\footnotesize\bfseries A second score on the 96 prompts: CLaMP 3 (2026-11-04)}\\[3pt]
+  \usebox{\curveHHc}\\[2pt]
+  $\bullet$ the first 1,000 new notes, $\circ$ the first 200. Contrast = CLaMP 3 \rcite{22} cosine of a continuation to the
+  real continuation of its prompt, minus its mean cosine to the other 95 prompts' real continuations: neither density
+  statistics nor the metric our checkpoints were picked by. musicar-L is ahead of AMT and SkyTNT medium in all 10,000
+  paired draws, at both lengths.};
+\node[cell, text width=16.4cm] (h4c) at (h3c.north east) {%
+  {\footnotesize\bfseries CLaMP 3 scores of the new notes, first 512-patch segment (bold = best system)}\\[5pt]
+  \usebox{\hhClamp}\\[6pt]
+  \textbf{Setup.} Each file is cut after its prompt and its first 1,000 (or 200) new notes are embedded, real continuations
+  too. Closeness = cosine to the own real continuation; contrast = closeness minus the mean cosine to the other prompts'
+  real continuations, so a model that sounds like every file gains nothing; MRR = reciprocal rank of the own real
+  continuation among the 96. The prompt itself (128 notes) and another prompt's real continuation are reference rows.\\[4pt]
+  \textbf{Reading.} In each prompt group (the two folders, the published 32, the new 64) musicar-L stays ahead of AMT in at
+  least 99.4\% of the draws and of SkyTNT medium in at least 78\% (with-drums folder, 200 notes). musicar-L-caption is behind
+  AMT over 1,000 notes (ahead in 0.8\% of the draws on contrast) and level over 200 (28\%). The prompt alone scores about as
+  well as AMT and SkyTNT medium, so CLaMP 3 rewards staying in the prompt's style; musicar-L is above it over 1,000 notes in
+  every draw, over 200 in 92\%. Copying does not explain the lead (copies: musicar-L 14\%, real 12\%, SkyTNT medium 15\%).
+  Fr\'echet to the 96 real continuations puts the same three on top (110, 130, 140), but 96 files in 768 dimensions make
+  it a side number. Piano: over 1,000 notes musicar-L and Aria are level on contrast (musicar-L ahead in 33\% of the
+  draws, on closeness in 99\%), over the first 200 Aria leads (99\%); the 108M piano covers, closest in note rate, are
+  behind both.};
+\path let \p1 = (h3c.south), \p2 = (h4c.south), \n1 = {min(\y1, \y2)} in coordinate (A3) at (0, \n1);
 \node[cell, text width=8.6cm] (h5) at (A3) {%
   {\footnotesize\bfseries Text to MIDI: 27 captions + no caption, 16 pieces each, from the first note}\\[3pt]
   \usebox{\curveHHt}\\[2pt]
@@ -630,13 +712,18 @@ guidance \rcite{9} & classifier-free guidance: logits pushed away from the capti
   other and not with the papers'. MIDI-LLM $T$ 1.0, top-p 0.98, Text2midi $T$ 1.0, musicar-L-caption the app's f1 preset and 60 s.\\[4pt]
   \textbf{Reading.} Both other models learned text to MIDI from MidiCaps' captions, so this is their home ground as the
   short prompts are ours. CLaMP 3 agrees with each: on the short English prompts above its MRR is 0.321 for musicar-L-caption vs
-  0.239 MIDI-LLM and 0.257 Text2midi, on MidiCaps 0.122 vs 0.276 and 0.156. The f1 preset was tuned on those short prompts, and
-  never for key or tempo words inside long prose, so better settings may recover part of this; not tested yet.};
+  0.239 MIDI-LLM and 0.257 Text2midi, on MidiCaps 0.122 vs 0.276 and 0.156.\\[5pt]
+  \usebox{\hhSpare}\\[3pt]
+  \textbf{Settings (2026-11-04).} The f1 preset was tuned on short prompts, so four other settings ran on 100 more eligible
+  test captions after the 500 (the 495 stay untouched), with the preset on the same 100 as the paired control. The decoding
+  settings leave tempo and key at the floor: the gap is in reading long captions, not in decoding; top-p 0.9 also adds
+  runaway (5 files stack their notes). \texttt{-{}-retrieve} lifts the exact key from 0.06 to 0.20 (above the preset in 99.9\%
+  of the draws) and leaves tempo where it was: the key comes with the real opening the caption picks. Not run on the 495.};
 \path let \p1 = (h7.south), \p2 = (h8.south), \n1 = {min(\y1, \y2)} in coordinate (As) at (0, \n1);
 \begin{scope}[on background layer]
   \draw[panel] (A) rectangle (R |- As);
 \end{scope}
-\node[ptitle] at (A) {\sect{1}{How it compares with other open MIDI models (head-to-head, 2026-10-29 to 31)}};
+\node[ptitle] at (A) {\sect{1}{How it compares with other open MIDI models (head-to-head, 2026-10-29 to 11-04)}};
 
 %% ================= 2: F1 =================
 \coordinate (B) at ($(As)+(0, -1.1)$);

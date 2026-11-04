@@ -108,6 +108,32 @@ model.eval()
 `musicar.model.checkpoint.load_model` does this for `model_bf16.pt`. Sampling with the KV cache is
 `musicar.generation.sampling.generate`.
 
+## Hardware and speed
+
+**Minimum.** Any CUDA GPU with 2 GB of memory (peak 1.09 GiB measured, bf16, one row), or a CPU with about 3 GB of free RAM (fp32 weights 1.86 GB). PyTorch 2.7 or newer and the code repository's `generate.py` / `musicar` package.
+
+At one row, generating a note reads every weight once plus the cached keys and values of the notes in view, so
+the speed is capped by memory bandwidth B:
+
+    notes/s  <=  B / (P * b_w  +  r * 2 * L * d * n * b_kv)
+
+P = parameters, b_w = bytes per weight (bf16 2, int8 1, int4 0.5), r = rows (one per sample; guidance doubles them),
+L = layers, d = width (every head keeps its keys and values: full attention), n = notes in view, b_kv = bytes per
+cached value. It counts memory traffic only: at one row a GPU waits on kernel launches and the Python loop more than
+on memory, so the measured speed stays below it. For real time, multi-instrument music needs about 24 notes per
+second and solo piano about 8 (the real continuations of the head-to-head).
+
+For this model P = 464M, L = 28, d = 1,152: bf16 weights 0.93 GB, and the cache 129 KB per note and row in bf16 (0.13 GB at 1,024 notes in view, 0.26 GB at the full 2,048).
+
+| Hardware (the project's) | Bandwidth | Ceiling, 1 row, 1,024 notes in view | Measured, 1 row |
+|---|---|---|---|
+| Laptop RTX 5060, 8 GB GDDR7 (128-bit, 24 Gbps) | 384 GB/s | ≈ 360 notes/s (bf16) | **127 notes/s** (791 notes in 6.3 s) |
+| Rented RTX 5090 | 1,792 GB/s | ≈ 1,700 notes/s (bf16) | not measured |
+| Laptop CPU, Ryzen AI 9 HX 370, fp32 | | | **14.3 notes/s** (96 notes; ≈ 27 GB/s of weights read) |
+| Raspberry Pi 5, 8 GB (STREAM 5.4–7.8 GB/s) | ≈ 8 GB/s | fp32 ≈ 4, int8 ≈ 13, int4 weights + int8 cache ≈ 24 notes/s | not measured yet (port planned) |
+
+So the laptop GPU writes multi-instrument music about 5× faster than it plays, the laptop CPU at about 0.6× real time.
+
 ## Intended use
 
 - Research on symbolic music generation: multi-instrument modelling, sampling, conditioning.

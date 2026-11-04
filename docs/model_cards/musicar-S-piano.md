@@ -96,6 +96,30 @@ model.eval()
 `musicar.model.checkpoint.load_model` does this for `model_bf16.pt`. Sampling with the KV cache is in
 `musicar/generation/sampling.py`.
 
+## Hardware and speed
+
+**Minimum.** Any CUDA GPU with 1 GB of memory (peak 0.33 GiB measured, bf16, one row), or a CPU with about 1 GB of free RAM. PyTorch 2.7 or newer and the code repository's `generate.py` / `musicar` package.
+
+At one row, generating a note reads every weight once plus the cached keys and values of the notes in view, so
+the speed is capped by memory bandwidth B:
+
+    notes/s  <=  B / (P * b_w  +  r * 2 * L * d * n * b_kv)
+
+P = parameters, b_w = bytes per weight (bf16 2, int8 1, int4 0.5), r = rows (one per sample; guidance doubles them),
+L = layers, d = width (every head keeps its keys and values: full attention), n = notes in view, b_kv = bytes per
+cached value. It counts memory traffic only: at one row a GPU waits on kernel launches and the Python loop more than
+on memory, so the measured speed stays below it. For real time, multi-instrument music needs about 24 notes per
+second and solo piano about 8 (the real continuations of the head-to-head).
+
+For this model P = 107M, L = 14, d = 768: bf16 weights 0.21 GB, the cache 43 KB per note and row in bf16 (0.02 GB at its full 512 notes).
+
+| Hardware (the project's) | Bandwidth | Ceiling, 1 row, 512 notes in view | Measured, 1 row |
+|---|---|---|---|
+| Laptop RTX 5060, 8 GB GDDR7 (128-bit, 24 Gbps) | 384 GB/s | ≈ 1,600 notes/s (bf16) | **628 notes/s** (1,024 notes in 1.6 s, the cache rebuilt every 128 notes past 512) |
+| Raspberry Pi 5, 8 GB (STREAM 5.4–7.8 GB/s) | ≈ 8 GB/s | int8 weights + bf16 cache ≈ 60, int4 + int8 cache ≈ 120 notes/s | not measured yet |
+
+Solo piano needs about 8 notes per second, so by the formula even fp32 on the Pi 5 (≈ 17 notes/s) keeps up.
+
 ## Intended use
 
 - Research on symbolic music generation: tokenization, output heads, scaling, sampling.
