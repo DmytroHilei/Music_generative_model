@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>musicar · samples</title>
+<meta name="description" content="Music written by musicar, an open MIDI model: from text prompts in English and Ukrainian, and continuations of real openings.">
+<style>
+:root {
+  --bg: #f6f6f4; --surf: #ffffff; --line: #dadad4; --text: #17181b; --muted: #595c64;
+  --acc-text: #8f5200; --acc-soft: rgba(238, 154, 46, 0.13); color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #121316; --surf: #1a1c20; --line: #2d3137; --text: #ecedef; --muted: #a0a5ad;
+    --acc-text: #f5b862; --acc-soft: rgba(240, 165, 60, 0.12); color-scheme: dark;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.5 system-ui, sans-serif; }
+main { max-width: 760px; margin: 0 auto; padding: 28px 16px 64px; }
+h1 { font-size: 26px; letter-spacing: -0.01em; margin: 0 0 6px; }
+h2 { font-size: 19px; margin: 32px 0 4px; }
+p { margin: 8px 0; }
+a { color: var(--acc-text); }
+.muted { color: var(--muted); }
+.small { font-size: 13px; }
+.brand { font-weight: 600; font-size: 17px; color: var(--text); text-decoration: none; display: inline-block; margin-bottom: 18px; }
+.card { background: var(--surf); border: 1px solid var(--line); border-radius: 14px; padding: 14px 16px; margin: 12px 0; }
+.head { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+.head b { font-size: 15px; }
+.tag { font-size: 12px; padding: 1px 8px; border-radius: 999px; background: var(--acc-soft); color: var(--acc-text); white-space: nowrap; }
+.prompt { font-style: italic; margin: 6px 0 2px; }
+.meta { font-size: 13px; color: var(--muted); margin: 2px 0 8px; }
+audio { width: 100%; height: 40px; }
+.links { display: flex; flex-wrap: wrap; gap: 8px 16px; margin: 12px 0 4px; }
+.note { font-size: 13px; color: var(--muted); border-left: 3px solid var(--line); padding-left: 10px; margin: 14px 0; }
+</style>
+</head>
+<body>
+<main>
+<a class="brand" href="/">musicar</a>
+<h1>What musicar sounds like</h1>
+<p>musicar is an open model that writes music as MIDI. It composes from a short text prompt (English or Ukrainian) or
+continues a piece you give it, for any mix of 129 instruments. The 464M-parameter model was trained from scratch on
+one rented RTX 5090. Audio is rendered with a standard General MIDI soundfont, so the sound is plain; the notes are the
+model's.</p>
+<div class="links small">
+  <a href="/compare">Side by side with other models</a>
+  <a href="/compare/index.html?test">Blind listening test</a>
+  <a href="https://huggingface.co/Dimitri-206265">Weights</a>
+  <a href="https://github.com/DmytroHilei/Music_generative_model">Code</a>
+</div>
+<p class="note">How these were picked: by a scoring model (CLaMP 3), not by listening. For each style the clip is the
+top-scoring of 8 candidates (32 for the string piece), so these are the model's best cases per style. For an unpicked
+random draw next to other models, see the <a href="/compare">side-by-side page</a>.</p>
+
+<h2>From a text prompt</h2>
+<p class="muted small">Music from the prompt alone, no opening, released settings. First 45 s of each.</p>
+<div id="captions"></div>
+<p class="note">Prompts that did not work: an epic orchestral film score (strings, but no brass or timpani), a
+Ukrainian folk song with accordion (the model never produced an accordion), and a slow, sad Ukrainian piano melody
+(drums and bass crept in). Long, detailed prompts with key and tempo are its weak spot.</p>
+
+<h2>Continuing a real piece</h2>
+<p class="muted small">The first seconds are a real opening, the rest (30 s) is musicar. Rank = where the scoring model
+puts musicar's continuation among 96 real ones when asked which is closest to the true continuation.</p>
+<div id="continuation"></div>
+<p class="note">The openings are short excerpts (synthesised from MIDI) of existing pieces from the GigaMIDI and
+Aria-MIDI research datasets, here only to show the model; the rights to the music stay with their authors. To have an
+excerpt removed, open an issue in the <a href="https://github.com/DmytroHilei/Music_generative_model/issues">repository</a>.</p>
+</main>
+<script>
+const CAPTIONS = [
+  ['piano_en', 'Solo piano', 'English', 'a gentle romantic solo piano piece', 'piano'],
+  ['acoustic_guitar_en', 'Acoustic guitar', 'English', 'a calm acoustic guitar piece without drums', 'steel-string guitar, flute, bass'],
+  ['jazz_en', 'Jazz trio', 'English', 'a lively jazz piece with piano, double bass and drums', 'piano, double bass, drums'],
+  ['jazz_uk', 'Jazz trio', 'Ukrainian', 'спокійний джаз для фортепіано, контрабаса і барабанів', 'piano, drums, double bass, guitar'],
+  ['electronic_en', 'Electronic', 'English', 'an upbeat electronic dance track with synthesizers and drums', 'synth pads, square lead, drums'],
+  ['rock_en', 'Rock', 'English', 'a fast, energetic rock song with drums, electric guitar and bass', 'overdriven guitar, drums, electric bass'],
+  ['strings_en', 'Strings', 'English', 'a slow, sad string quartet', 'string ensemble, flute, synth brass'],
+];
+const CONT = [
+  ['rock_cont96_p64', 'Rock', 'organ, overdriven and distortion guitar, bass, strings', '3 s', 1],
+  ['jazz_cont96_p76', 'Jazz', 'piano, bass, trumpet, alto sax, drums', '8 s', 1],
+  ['acoustic_cont96_p89', 'Acoustic', 'piano, steel-string guitar, bass, flute, drums', '7 s', 1],
+  ['cinematic_cont96_p55', 'Cinematic', 'bells, harp, timpani, synth strings, choir', '8 s', 2],
+  ['chamber_cont96_p58', 'Chamber', 'viola, cello, flute', '8 s', 1],
+  ['piano_piano96_p36', 'Piano', 'solo piano', '8 s', 1],
+  ['piano_piano96_p19', 'Piano', 'solo piano', '8 s', 1],
+];
+const esc = s => s.replace(/[&<>"]/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;'}[c]));
+const audio = f => `<audio controls preload="none" src="clips/${f}.mp3"></audio>`;
+document.getElementById('captions').innerHTML = CAPTIONS.map(([f, name, lang, prompt, ins]) => `
+  <div class="card"><div class="head"><b>${name}</b><span class="tag">${lang}</span></div>
+  <p class="prompt">“${esc(prompt)}”</p><p class="meta">The model chose: ${esc(ins)}</p>${audio(f)}</div>`).join('');
+document.getElementById('continuation').innerHTML = CONT.map(([f, name, ins, open, rank]) => `
+  <div class="card"><div class="head"><b>${name}</b><span class="tag">rank ${rank} of 96</span></div>
+  <p class="meta">Opening: ${esc(ins)} · real for the first ${open}, then musicar</p>${audio(f)}</div>`).join('');
+// one clip at a time
+document.addEventListener('play', e => document.querySelectorAll('audio').forEach(a => { if (a !== e.target) a.pause(); }), true);
+</script>
+</body>
+</html>

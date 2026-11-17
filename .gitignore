@@ -45,3 +45,11 @@ results/
 # curated generations to share (from scratch, no dataset openings): kept in git despite the *.mid / *.mp3 rules above
 !docs/listen/
 !docs/listen/**
+# side-by-side clips of the head-to-head (web/public/compare): real openings and real continuations, with the page's disclaimer
+!web/public/compare/clips/*.mp3
+!docs/compute_request/samples/
+!docs/compute_request/samples/**
+!web/public/samples/
+!web/public/samples/**
+# outreach drafts for the compute request stay local
+docs/compute_request/outreach.md

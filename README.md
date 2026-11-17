@@ -26,6 +26,18 @@ once it is labeled `approved`, open the page, go to Settings and press **Sign in
 Each browser signs in once and keeps its code; one person can have two pieces in progress at a time. Personal invite
 links (`…/?invite=…`) work as well.
 
+**Side by side.** [musicar-ivory.vercel.app/compare](https://musicar-ivory.vercel.app/compare) plays 12 real openings
+(8 multi-instrument, 4 piano) and what musicar-L, AMT large, SkyTNT medium and Aria medium wrote after each, next to the
+real continuation. The openings were drawn with a fixed seed from the scored head-to-head prompts, without listening
+([`eval/compare/h2h_listen.py`](eval/compare/h2h_listen.py) `clips`). The same page runs a blind test
+(`/compare/index.html?test`): 12 unlabelled pairs per listener, musicar-L against another system or the real piece, and
+a result code at the end; `h2h_listen.py tally <file with the codes>` counts the answers per pair with a 95% interval.
+The openings and the real continuations are excerpts of up to 38 s from GigaMIDI and Aria-MIDI files, shown only for this
+comparison, with a notice on the page; the rights stay with the music's authors.
+Style-picked clips (text prompts and continuations, chosen by CLaMP 3, with how they were picked):
+[musicar-ivory.vercel.app/samples](https://musicar-ivory.vercel.app/samples).
+One page for a compute request: [`docs/compute_request/pitch.md`](docs/compute_request/pitch.md).
+
 ## Overview
 
 - **Data built:**

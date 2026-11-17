@@ -6,6 +6,13 @@ const ENGINE = process.env.ENGINE_URL ?? 'http://127.0.0.1:8000';
 
 const nextConfig: NextConfig = {
   compress: false, // gzip would hold back the engine's event stream
+  async redirects() {
+    // the side-by-side clips and the blind test are a static page (public/compare, eval/compare/h2h_listen.py)
+    return [
+      { source: '/compare', destination: '/compare/index.html', permanent: false },
+      { source: '/samples', destination: '/samples/index.html', permanent: false },
+    ];
+  },
   async rewrites() {
     return [{ source: '/v1/:path*', destination: `${ENGINE}/v1/:path*` }];
   },

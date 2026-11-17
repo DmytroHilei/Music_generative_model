@@ -1,0 +1,459 @@
+{
+ "seed": 20261117,
+ "prompt_s": 8.0,
+ "cont_s": 30.0,
+ "names": {
+  "real": "real continuation",
+  "long_450m": "musicar-L",
+  "amt": "AMT large",
+  "skytnt_medium": "SkyTNT medium",
+  "aria": "Aria medium"
+ },
+ "pairs": {
+  "cont96": [
+   [
+    "long_450m",
+    "amt"
+   ],
+   [
+    "long_450m",
+    "skytnt_medium"
+   ],
+   [
+    "long_450m",
+    "real"
+   ]
+  ],
+  "piano96": [
+   [
+    "long_450m",
+    "aria"
+   ],
+   [
+    "long_450m",
+    "real"
+   ]
+  ]
+ },
+ "items": [
+  {
+   "id": "cont96_p03",
+   "task": "cont96",
+   "prompt": "p03",
+   "prompt_s": 1.92,
+   "instruments": [
+    30,
+    33,
+    73,
+    128
+   ],
+   "clips": {
+    "real": {
+     "file": "clips/e35a8c7f61c2.mp3",
+     "seconds": 20.84,
+     "ended": true
+    },
+    "long_450m": {
+     "file": "clips/d44ff1b3c155.mp3",
+     "seconds": 27.81,
+     "ended": true
+    },
+    "amt": {
+     "file": "clips/77dae935d671.mp3",
+     "seconds": 28.77,
+     "ended": true
+    },
+    "skytnt_medium": {
+     "file": "clips/93608931586b.mp3",
+     "seconds": 31.92,
+     "ended": true
+    }
+   }
+  },
+  {
+   "id": "cont96_p18",
+   "task": "cont96",
+   "prompt": "p18",
+   "prompt_s": 3.72,
+   "instruments": [
+    5,
+    25,
+    26,
+    33,
+    48,
+    51,
+    52,
+    59,
+    60,
+    66,
+    71,
+    72,
+    128
+   ],
+   "clips": {
+    "real": {
+     "file": "clips/04e742b33548.mp3",
+     "seconds": 33.72,
+     "ended": false
+    },
+    "long_450m": {
+     "file": "clips/0332906962d9.mp3",
+     "seconds": 33.72,
+     "ended": true
+    },
+    "amt": {
+     "file": "clips/97f486d143aa.mp3",
+     "seconds": 33.72,
+     "ended": false
+    },
+    "skytnt_medium": {
+     "file": "clips/cd57aeb93bf0.mp3",
+     "seconds": 20.69,
+     "ended": true
+    }
+   }
+  },
+  {
+   "id": "cont96_p25",
+   "task": "cont96",
+   "prompt": "p25",
+   "prompt_s": 8.0,
+   "instruments": [
+    0,
+    9,
+    11,
+    32,
+    47,
+    48,
+    57,
+    58,
+    59,
+    60,
+    68,
+    69,
+    70,
+    71,
+    73
+   ],
+   "clips": {
+    "real": {
+     "file": "clips/08f8f97cbcc1.mp3",
+     "seconds": 38.0,
+     "ended": false
+    },
+    "long_450m": {
+     "file": "clips/2506fbc41bea.mp3",
+     "seconds": 38.0,
+     "ended": false
+    },
+    "amt": {
+     "file": "clips/9d5ad9f08dc4.mp3",
+     "seconds": 38.0,
+     "ended": false
+    },
+    "skytnt_medium": {
+     "file": "clips/01e0e2d865d7.mp3",
+     "seconds": 35.67,
+     "ended": true
+    }
+   }
+  },
+  {
+   "id": "cont96_p27",
+   "task": "cont96",
+   "prompt": "p27",
+   "prompt_s": 8.0,
+   "instruments": [
+    0,
+    11,
+    13,
+    40,
+    41,
+    42,
+    43,
+    56,
+    57,
+    58,
+    60,
+    65,
+    68,
+    70,
+    71,
+    73,
+    128
+   ],
+   "clips": {
+    "real": {
+     "file": "clips/f5904259efc3.mp3",
+     "seconds": 38.0,
+     "ended": false
+    },
+    "long_450m": {
+     "file": "clips/c85ff614b2e8.mp3",
+     "seconds": 38.0,
+     "ended": false
+    },
+    "amt": {
+     "file": "clips/e183596e30d0.mp3",
+     "seconds": 38.0,
+     "ended": false
+    },
+    "skytnt_medium": {
+     "file": "clips/bc80d222412a.mp3",
+     "seconds": 38.0,
+     "ended": false
+    }
+   }
+  },
+  {
+   "id": "cont96_p29",
+   "task": "cont96",
+   "prompt": "p29",
+   "prompt_s": 8.0,
+   "instruments": [
+    0,
+    1,
+    2
+   ],
+   "clips": {
+    "real": {
+     "file": "clips/2ef86d2dd98a.mp3",
+     "seconds": 38.0,
+     "ended": false
+    },
+    "long_450m": {
+     "file": "clips/854d1200ba48.mp3",
+     "seconds": 38.0,
+     "ended": false
+    },
+    "amt": {
+     "file": "clips/899515b861e2.mp3",
+     "seconds": 38.0,
+     "ended": false
+    },
+    "skytnt_medium": {
+     "file": "clips/1d0d6dc425fd.mp3",
+     "seconds": 38.0,
+     "ended": false
+    }
+   }
+  },
+  {
+   "id": "cont96_p38",
+   "task": "cont96",
+   "prompt": "p38",
+   "prompt_s": 6.76,
+   "instruments": [
+    25,
+    32,
+    40
+   ],
+   "clips": {
+    "real": {
+     "file": "clips/480acf063260.mp3",
+     "seconds": 36.76,
+     "ended": false
+    },
+    "long_450m": {
+     "file": "clips/8206654ccd50.mp3",
+     "seconds": 36.76,
+     "ended": false
+    },
+    "amt": {
+     "file": "clips/7bd0bdbe0322.mp3",
+     "seconds": 36.76,
+     "ended": false
+    },
+    "skytnt_medium": {
+     "file": "clips/f310ccb893ab.mp3",
+     "seconds": 36.76,
+     "ended": false
+    }
+   }
+  },
+  {
+   "id": "cont96_p43",
+   "task": "cont96",
+   "prompt": "p43",
+   "prompt_s": 8.0,
+   "instruments": [
+    6,
+    40,
+    68,
+    70,
+    74
+   ],
+   "clips": {
+    "real": {
+     "file": "clips/bed44b2de96b.mp3",
+     "seconds": 38.0,
+     "ended": false
+    },
+    "long_450m": {
+     "file": "clips/0119ee65bb05.mp3",
+     "seconds": 38.0,
+     "ended": false
+    },
+    "amt": {
+     "file": "clips/105b9a664179.mp3",
+     "seconds": 38.0,
+     "ended": false
+    },
+    "skytnt_medium": {
+     "file": "clips/55bb65011e4e.mp3",
+     "seconds": 38.0,
+     "ended": false
+    }
+   }
+  },
+  {
+   "id": "cont96_p44",
+   "task": "cont96",
+   "prompt": "p44",
+   "prompt_s": 2.42,
+   "instruments": [
+    13,
+    33,
+    47,
+    56,
+    57,
+    58,
+    60,
+    65,
+    66,
+    67,
+    68,
+    70,
+    71,
+    73,
+    128
+   ],
+   "clips": {
+    "real": {
+     "file": "clips/8fc99df40cfc.mp3",
+     "seconds": 20.25,
+     "ended": true
+    },
+    "long_450m": {
+     "file": "clips/aff6e2ab13b8.mp3",
+     "seconds": 17.08,
+     "ended": true
+    },
+    "amt": {
+     "file": "clips/717863f7b4c9.mp3",
+     "seconds": 32.42,
+     "ended": false
+    },
+    "skytnt_medium": {
+     "file": "clips/3099f31fc0a1.mp3",
+     "seconds": 18.93,
+     "ended": true
+    }
+   }
+  },
+  {
+   "id": "piano96_p01",
+   "task": "piano96",
+   "prompt": "p01",
+   "prompt_s": 8.0,
+   "instruments": [
+    0
+   ],
+   "clips": {
+    "real": {
+     "file": "clips/d2f159a1f975.mp3",
+     "seconds": 38.0,
+     "ended": false
+    },
+    "long_450m": {
+     "file": "clips/7cc637ce7ed4.mp3",
+     "seconds": 38.0,
+     "ended": false
+    },
+    "aria": {
+     "file": "clips/208df9433640.mp3",
+     "seconds": 38.0,
+     "ended": false
+    }
+   }
+  },
+  {
+   "id": "piano96_p07",
+   "task": "piano96",
+   "prompt": "p07",
+   "prompt_s": 8.0,
+   "instruments": [
+    0
+   ],
+   "clips": {
+    "real": {
+     "file": "clips/8bac7bd58439.mp3",
+     "seconds": 38.0,
+     "ended": false
+    },
+    "long_450m": {
+     "file": "clips/da7ca6473578.mp3",
+     "seconds": 38.0,
+     "ended": false
+    },
+    "aria": {
+     "file": "clips/cb3ff1134744.mp3",
+     "seconds": 38.0,
+     "ended": false
+    }
+   }
+  },
+  {
+   "id": "piano96_p59",
+   "task": "piano96",
+   "prompt": "p59",
+   "prompt_s": 8.0,
+   "instruments": [
+    0
+   ],
+   "clips": {
+    "real": {
+     "file": "clips/c7f2e4289f85.mp3",
+     "seconds": 38.0,
+     "ended": false
+    },
+    "long_450m": {
+     "file": "clips/1ea86d5e786c.mp3",
+     "seconds": 38.0,
+     "ended": false
+    },
+    "aria": {
+     "file": "clips/552f36f1f135.mp3",
+     "seconds": 38.0,
+     "ended": false
+    }
+   }
+  },
+  {
+   "id": "piano96_p95",
+   "task": "piano96",
+   "prompt": "p95",
+   "prompt_s": 8.0,
+   "instruments": [
+    0
+   ],
+   "clips": {
+    "real": {
+     "file": "clips/87b8bb33792e.mp3",
+     "seconds": 38.0,
+     "ended": false
+    },
+    "long_450m": {
+     "file": "clips/b6a2daf595f5.mp3",
+     "seconds": 38.0,
+     "ended": false
+    },
+    "aria": {
+     "file": "clips/0450d475a2e9.mp3",
+     "seconds": 38.0,
+     "ended": false
+    }
+   }
+  }
+ ]
+}

@@ -1,0 +1,265 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>musicar · side by side</title>
+<style>
+:root {
+  --bg: #f6f6f4; --surf: #ffffff; --surf2: #f0f0ed; --line: #dadad4; --text: #17181b; --muted: #595c64;
+  --acc: #ee9a2e; --on-acc: #1b1206; --acc-soft: rgba(238, 154, 46, 0.13); --acc-text: #8f5200;
+  --prompt: rgba(0, 0, 0, 0.09); color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #121316; --surf: #1a1c20; --surf2: #24272c; --line: #2d3137; --text: #ecedef; --muted: #a0a5ad;
+    --acc: #f0a53c; --acc-soft: rgba(240, 165, 60, 0.12); --acc-text: #f5b862; --prompt: rgba(255, 255, 255, 0.13);
+    color-scheme: dark;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.5 system-ui, sans-serif; }
+main { max-width: 760px; margin: 0 auto; padding: 28px 16px 64px; }
+h1 { font-size: 26px; letter-spacing: -0.01em; margin: 0 0 6px; }
+h2 { font-size: 16px; margin: 0 0 2px; }
+p { margin: 8px 0; }
+a { color: var(--acc-text); }
+.muted { color: var(--muted); }
+.small { font-size: 13px; }
+.top { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 18px; }
+.brand { font-weight: 600; font-size: 17px; color: var(--text); text-decoration: none; }
+.card { background: var(--surf); border: 1px solid var(--line); border-radius: 14px; padding: 16px; margin: 14px 0; }
+.row { display: grid; grid-template-columns: 40px 1fr 44px; align-items: center; gap: 10px; padding: 7px 0; }
+.row + .row { border-top: 1px solid var(--line); }
+.name { font-size: 13px; margin-bottom: 4px; display: flex; justify-content: space-between; gap: 8px; }
+.name b { font-weight: 600; }
+.ours b { color: var(--acc-text); }
+button { font: inherit; color: inherit; cursor: pointer; }
+.play {
+  width: 40px; height: 40px; border-radius: 50%; border: 1px solid var(--line); background: var(--surf2);
+  display: grid; place-items: center; padding: 0;
+}
+.play.on { background: var(--acc); border-color: var(--acc); color: var(--on-acc); }
+.play svg { width: 16px; height: 16px; fill: currentColor; }
+.bar { position: relative; height: 12px; border-radius: 6px; background: var(--surf2); cursor: pointer; overflow: hidden; }
+.bar .pr { position: absolute; inset: 0 auto 0 0; background: var(--prompt); }
+.bar .fill { position: absolute; inset: 0 auto 0 0; width: 0; background: var(--acc); opacity: 0.85; }
+.time { font: 12px ui-monospace, monospace; color: var(--muted); text-align: right; }
+.btn {
+  min-height: 42px; padding: 0 18px; border-radius: 10px; border: 1px solid var(--line); background: var(--surf);
+}
+.btn.pri { background: var(--acc); border-color: var(--acc); color: var(--on-acc); font-weight: 600; }
+.btn.sel { border-color: var(--acc); background: var(--acc-soft); }
+.btn:disabled { opacity: 0.45; cursor: default; }
+.choices { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; }
+.choices .btn { flex: 1 1 120px; }
+.next { display: flex; justify-content: space-between; align-items: center; margin-top: 16px; gap: 12px; }
+.legend { display: inline-block; width: 22px; height: 10px; border-radius: 3px; background: var(--prompt); vertical-align: middle; }
+textarea { width: 100%; height: 120px; font: 12px ui-monospace, monospace; border-radius: 10px; border: 1px solid var(--line);
+  background: var(--surf2); color: var(--text); padding: 10px; }
+select { font: inherit; min-height: 38px; border-radius: 8px; border: 1px solid var(--line); background: var(--surf); color: var(--text); padding: 0 8px; }
+table { border-collapse: collapse; width: 100%; font-size: 13px; }
+td, th { text-align: left; padding: 5px 8px 5px 0; border-bottom: 1px solid var(--line); }
+</style>
+</head>
+<body>
+<main>
+<div class="top">
+  <a class="brand" href="/">musicar</a>
+  <span><button class="btn small" id="lang">Українська</button></span>
+</div>
+<div id="app"></div>
+</main>
+<script>
+const REPO = 'https://github.com/DmytroHilei/Music_generative_model';
+const T = {
+  en: {
+    title: 'Same opening, different models',
+    intro: 'Each card is one real multi-instrument or piano opening (128 notes) and what each model wrote after it. The files are the ones scored in the <a href="' + REPO + '#comparison-with-other-open-models">head-to-head tables</a>, each model with its authors\' sampling settings, first sample, no reruns.',
+    picked: 'The 12 openings were drawn with a fixed random seed from the 96 + 96 scored prompts, before listening. They are a sample, not a selection.',
+    rights: 'The openings and the clips marked "real continuation" are short excerpts (up to 38 s, synthesised from MIDI) of existing pieces from the GigaMIDI and Aria-MIDI research datasets. They are here only to compare the models; the rights to the music stay with its authors. To have an excerpt removed, open an issue in the <a href="' + REPO + '/issues">repository</a>.',
+    rights_t: 'The openings are short excerpts of existing pieces from research datasets, used only for this comparison.',
+    legend: 'the shared opening', band: 'Band opening', piano: 'Piano opening', drums: 'with drums', nodrums: 'no drums',
+    inst: 'instruments', ended: 'its 1,000 notes end here',
+    blind: 'Take the blind test (10 min)', listen: 'Back to the labelled clips',
+    t_title: 'Blind listening test',
+    t_intro: 'You will hear 12 pairs. Both clips of a pair start with the same few seconds of a real piece, then each continues in its own way. One may be the real piece, the others are written by different models. Pick the continuation you would rather keep listening to. There are no right answers.',
+    t_tips: 'Headphones or speakers, about 10 minutes. Listen to both clips (at least a few seconds past the shaded opening) before you answer.',
+    t_bg: 'Your music background', bg0: 'I just listen', bg1: 'I play or sing a bit', bg2: 'Musician / music education',
+    start: 'Start', pair: 'Pair', of: 'of', q: 'Which continuation do you prefer?', a: 'A', b: 'B', none: 'No preference',
+    next: 'Next', finish: 'Finish', hear: 'Listen to both clips first',
+    done: 'Thank you!', send: 'Please send this code back: paste it in a message to the person who invited you, or open a GitHub issue with one click.',
+    copy: 'Copy the code', copied: 'Copied', issue: 'Send as a GitHub issue', reveal: 'What you picked',
+    you: 'Your pick', vs: 'Pair',
+  },
+  uk: {
+    title: 'Той самий початок, різні моделі',
+    intro: 'Кожна картка: справжній початок твору (128 нот, ансамбль або фортепіано) і те, що після нього написала кожна модель. Це ті самі файли, що оцінені в <a href="' + REPO + '#comparison-with-other-open-models">таблицях порівняння</a>: кожна модель з налаштуваннями своїх авторів, перша спроба, без повторів.',
+    picked: '12 початків вибрано випадково (фіксоване зерно) з 96 + 96 оцінених, ще до прослуховування. Це вибірка, а не добірка найкращих.',
+    rights: 'Початки та записи з позначкою «real continuation» є короткими уривками (до 38 с, синтезованими з MIDI) наявних творів із дослідницьких наборів GigaMIDI та Aria-MIDI. Вони тут лише для порівняння моделей; права на музику належать її авторам. Щоб уривок прибрали, створіть issue в <a href="' + REPO + '/issues">репозиторії</a>.',
+    rights_t: 'Початки є короткими уривками наявних творів із дослідницьких наборів і використані лише для цього порівняння.',
+    legend: 'спільний початок', band: 'Ансамбль', piano: 'Фортепіано', drums: 'з барабанами', nodrums: 'без барабанів',
+    inst: 'інструментів', ended: 'тут закінчуються його 1000 нот',
+    blind: 'Пройти сліпий тест (10 хв)', listen: 'Назад до підписаних записів',
+    t_title: 'Сліпий тест на слух',
+    t_intro: 'Ви почуєте 12 пар. Обидва записи пари починаються з тих самих кількох секунд справжнього твору, а далі кожен продовжується по-своєму. Один може бути справжнім твором, інші написані різними моделями. Виберіть продовження, яке вам хотілося б слухати далі. Правильних відповідей немає.',
+    t_tips: 'Навушники або колонки, близько 10 хвилин. Перед відповіддю послухайте обидва записи (хоча б кілька секунд після затіненого початку).',
+    t_bg: 'Ваш музичний досвід', bg0: 'Просто слухаю', bg1: 'Трохи граю або співаю', bg2: 'Музикант / музична освіта',
+    start: 'Почати', pair: 'Пара', of: 'з', q: 'Яке продовження вам більше подобається?', a: 'A', b: 'B', none: 'Однаково',
+    next: 'Далі', finish: 'Завершити', hear: 'Спершу послухайте обидва записи',
+    done: 'Дякую!', send: 'Будь ласка, надішліть цей код: вставте його в повідомлення тому, хто вас запросив, або створіть GitHub issue одним кліком.',
+    copy: 'Скопіювати код', copied: 'Скопійовано', issue: 'Надіслати як GitHub issue', reveal: 'Що ви вибрали',
+    you: 'Ваш вибір', vs: 'Пара',
+  },
+};
+let lang = 'en';
+try { lang = localStorage.getItem('musicar-compare-lang') || (navigator.language.startsWith('uk') ? 'uk' : 'en'); } catch (e) {}
+const t = (k) => T[lang][k];
+const TRIALS = 12, MIN_HEARD = 5;
+const ICON = { play: '<svg viewBox="0 0 16 16"><path d="M4 2.5v11l9-5.5z"/></svg>', pause: '<svg viewBox="0 0 16 16"><path d="M3.5 2.5h3v11h-3zM9.5 2.5h3v11h-3z"/></svg>' };
+const app = document.getElementById('app');
+let data, players = [], state = null;
+const el = (tag, cls, html) => { const e = document.createElement(tag); if (cls) e.className = cls; if (html != null) e.innerHTML = html; return e; };
+const mmss = (s) => Math.floor(s / 60) + ':' + String(Math.floor(s % 60)).padStart(2, '0');
+
+function player(clip, promptS, label, ours, onHeard) {
+  const row = el('div', 'row' + (ours ? ' ours' : ''));
+  const audio = new Audio(); audio.preload = 'none'; audio.src = clip.file;
+  const btn = el('button', 'play', ICON.play); btn.setAttribute('aria-label', 'play');
+  const mid = el('div');
+  const name = el('div', 'name', '<b>' + label + '</b>' + (clip.note ? '<span class="muted">' + clip.note + '</span>' : ''));
+  const bar = el('div', 'bar'), pr = el('div', 'pr'), fill = el('div', 'fill');
+  pr.style.width = Math.min(100, 100 * promptS / clip.seconds) + '%';
+  bar.append(pr, fill); mid.append(name, bar);
+  const time = el('div', 'time', mmss(clip.seconds));
+  row.append(btn, mid, time);
+  let heard = 0, last = null;
+  btn.onclick = () => {
+    if (audio.paused) { players.forEach((p) => p !== audio && p.pause()); audio.play(); } else audio.pause();
+  };
+  audio.onplay = () => { btn.innerHTML = ICON.pause; btn.classList.add('on'); last = audio.currentTime; };
+  audio.onpause = () => { btn.innerHTML = ICON.play; btn.classList.remove('on'); };
+  audio.ontimeupdate = () => {
+    fill.style.width = 100 * audio.currentTime / clip.seconds + '%';
+    time.textContent = mmss(audio.currentTime);
+    if (last != null && audio.currentTime > last && audio.currentTime > promptS) heard += Math.min(audio.currentTime - last, 1);
+    last = audio.currentTime;
+    if (onHeard) onHeard(heard);
+  };
+  audio.onended = () => { fill.style.width = '0'; time.textContent = mmss(clip.seconds); };
+  bar.onclick = (e) => {
+    const r = bar.getBoundingClientRect();
+    audio.currentTime = clip.seconds * (e.clientX - r.left) / r.width; last = audio.currentTime;
+    if (audio.paused) btn.onclick();
+  };
+  players.push(audio);
+  return row;
+}
+
+function stop() { players.forEach((p) => p.pause()); players = []; }
+
+function itemTitle(it) {
+  const drums = it.instruments.includes(128), n = it.instruments.length;
+  return it.task === 'piano96' ? t('piano') + ' ' + it.prompt
+    : t('band') + ' ' + it.prompt + ' <span class="muted small">· ' + n + ' ' + t('inst') + ', ' + (drums ? t('drums') : t('nodrums')) + '</span>';
+}
+
+function listen() {
+  stop(); app.innerHTML = '';
+  app.append(el('h1', '', t('title')), el('p', '', t('intro')), el('p', 'muted small', t('picked')),
+    el('p', 'small', '<span class="legend"></span> ' + t('legend')));
+  const go = el('button', 'btn pri', t('blind')); go.onclick = () => { history.replaceState(null, '', '?test'); intro(); };
+  app.append(go);
+  for (const it of data.items) {
+    const card = el('div', 'card'); card.append(el('h2', '', itemTitle(it)));
+    for (const [sys, clip] of Object.entries(it.clips))
+      card.append(player({ ...clip, note: clip.ended ? t('ended') : '' }, it.prompt_s, data.names[sys], sys === 'long_450m'));
+    app.append(card);
+  }
+  app.append(el('p', 'muted small', t('rights')));
+}
+
+// blind test: 12 pairs per listener, round robin over the five kinds of pair, random order and random A / B
+function rng(seed) { return () => { seed = (seed + 0x6D2B79F5) | 0; let x = Math.imul(seed ^ (seed >>> 15), 1 | seed); x = (x + Math.imul(x ^ (x >>> 7), 61 | x)) ^ x; return ((x ^ (x >>> 14)) >>> 0) / 4294967296; }; }
+function shuffle(a, r) { for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(r() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; } return a; }
+function plan(listener) {
+  const r = rng(listener), kinds = {};
+  for (const it of data.items) for (const [x, y] of data.pairs[it.task]) (kinds[it.task + y] ||= []).push([it, x, y]);
+  const lists = shuffle(Object.values(kinds).map((l) => shuffle(l, r)), r), out = [];
+  for (let i = 0; out.length < TRIALS; i++) { const l = lists[i % lists.length]; if (l.length) out.push(l.pop()); }
+  return shuffle(out, r).map(([it, x, y]) => (r() < 0.5 ? [it, x, y] : [it, y, x]));
+}
+
+function intro() {
+  stop(); app.innerHTML = '';
+  app.append(el('h1', '', t('t_title')), el('p', '', t('t_intro')), el('p', 'muted', t('t_tips')));
+  app.append(el('p', 'muted small', t('rights_t')));
+  const sel = el('select', '', [0, 1, 2].map((i) => '<option value="' + i + '">' + t('bg' + i) + '</option>').join(''));
+  const lab = el('p', '', t('t_bg') + ': '); lab.append(sel);
+  const start = el('button', 'btn pri', t('start'));
+  start.onclick = () => {
+    const listener = (Math.random() * 2 ** 31) | 0;
+    state = { listener, bg: +sel.value, trials: plan(listener), answers: [], i: 0, t0: Date.now() };
+    trial();
+  };
+  const back = el('button', 'btn', t('listen')); back.onclick = () => { history.replaceState(null, '', location.pathname); listen(); };
+  const row = el('div', 'next'); row.append(back, start);
+  app.append(lab, row);
+}
+
+function trial() {
+  stop(); app.innerHTML = '';
+  const [it, a, b] = state.trials[state.i];
+  app.append(el('p', 'muted small', t('pair') + ' ' + (state.i + 1) + ' ' + t('of') + ' ' + state.trials.length +
+    ' · <span class="legend"></span> ' + t('legend')));
+  const card = el('div', 'card'), heard = [0, 0];
+  let choice = null;
+  const next = el('button', 'btn pri', state.i + 1 < state.trials.length ? t('next') : t('finish')); next.disabled = true;
+  const hint = el('span', 'muted small', t('hear'));
+  const gate = () => {
+    const ok = heard.every((h, k) => h >= Math.min(MIN_HEARD, it.clips[[a, b][k]].seconds - it.prompt_s - 1));
+    hint.style.visibility = ok ? 'hidden' : 'visible';
+    btns.forEach((x) => (x.disabled = !ok)); next.disabled = !ok || choice == null;
+  };
+  card.append(player(it.clips[a], it.prompt_s, t('a'), false, (h) => { heard[0] = h; gate(); }),
+    player(it.clips[b], it.prompt_s, t('b'), false, (h) => { heard[1] = h; gate(); }));
+  const ch = el('div', 'choices');
+  const btns = [['a', t('a')], ['none', t('none')], ['b', t('b')]].map(([v, label]) => {
+    const x = el('button', 'btn', label); x.disabled = true;
+    x.onclick = () => { choice = v; btns.forEach((y) => y.classList.toggle('sel', y === x)); gate(); };
+    ch.append(x); return x;
+  });
+  next.onclick = () => { state.answers.push([it.id, a, b, choice]); state.i++; state.i < state.trials.length ? trial() : done(); };
+  const row = el('div', 'next'); row.append(hint, next);
+  app.append(el('h2', '', t('q')), card, ch, row);
+}
+
+function done() {
+  stop(); app.innerHTML = '';
+  const rec = { v: 1, listener: state.listener, bg: state.bg, lang, minutes: Math.round((Date.now() - state.t0) / 6000) / 10, answers: state.answers };
+  const code = 'MUSICAR1:' + btoa(JSON.stringify(rec)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  try { localStorage.setItem('musicar-compare-last', code); } catch (e) {}
+  const ta = el('textarea'); ta.value = code; ta.readOnly = true;
+  const copy = el('button', 'btn pri', t('copy'));
+  copy.onclick = async () => { try { await navigator.clipboard.writeText(code); } catch (e) { ta.select(); document.execCommand('copy'); } copy.textContent = t('copied'); };
+  const issue = el('a', 'btn', t('issue'));
+  issue.href = REPO + '/issues/new?title=' + encodeURIComponent('Listening test result') + '&body=' + encodeURIComponent(code);
+  issue.target = '_blank'; issue.style.cssText = 'display:inline-flex;align-items:center;justify-content:center;text-decoration:none;color:inherit';
+  const row = el('div', 'choices'); row.append(copy, issue);
+  app.append(el('h1', '', t('done')), el('p', '', t('send')), ta, row);
+  const card = el('div', 'card'); card.append(el('h2', '', t('reveal')));
+  const tb = el('table', '', '<tr><th>#</th><th>' + t('vs') + '</th><th>' + t('you') + '</th></tr>');
+  state.answers.forEach(([id, a, b, c], i) => tb.append(el('tr', '', '<td>' + (i + 1) + '</td><td>' + data.names[a] + ' / ' + data.names[b] +
+    '</td><td>' + (c === 'none' ? t('none') : data.names[c === 'a' ? a : b]) + '</td>')));
+  card.append(tb); app.append(card);
+}
+
+function route() { state && state.i < state.trials.length ? trial() : new URLSearchParams(location.search).has('test') ? intro() : listen(); }
+const langBtn = document.getElementById('lang');
+function setLang() { langBtn.textContent = lang === 'en' ? 'Українська' : 'English'; document.documentElement.lang = lang; }
+langBtn.onclick = () => { lang = lang === 'en' ? 'uk' : 'en'; try { localStorage.setItem('musicar-compare-lang', lang); } catch (e) {} setLang(); route(); };
+setLang();
+fetch('clips.json').then((r) => r.json()).then((d) => { data = d; route(); });
+</script>
+</body>
+</html>
