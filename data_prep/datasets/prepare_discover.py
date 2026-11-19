@@ -169,7 +169,10 @@ def main():
     work_dir = Path(args.work_dir)
     work_dir.mkdir(parents=True, exist_ok=True)
     giga = giga_index(args)
-    giga_md5 = set(giga['md5'].tolist())
+    # hex strings, like the Discover member names: the index stores the md5 as 16 raw bytes (S16), and comparing
+    # those bytes objects with the str names never matched, so byte-identical files fell through to the exact check
+    # (numpy S16 drops trailing NUL bytes on tolist(): pad back to 16 before hex)
+    giga_md5 = {m.ljust(16, b'\0').hex() for m in giga['md5'].tolist()}
     seen = {kind: dict.fromkeys(giga[kind].tolist(), 'giga') for kind in ('exact', 'loose')}
     del giga
 
