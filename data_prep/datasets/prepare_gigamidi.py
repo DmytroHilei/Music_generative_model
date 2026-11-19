@@ -60,10 +60,15 @@ def parse_args():
     parser.add_argument('--min-free-gb', type=float, default=1.0, help='stop at a checkpoint when free disk is lower')
     parser.add_argument('--checkpoint', type=int, default=20_000, help='files between checkpoints')
     parser.add_argument('--workers', type=int, default=os.cpu_count())
+    parser.add_argument('--fast-tokenizer', action='store_true',
+                        help='use data_prep/census/fast_tokenize.py (C port, tested bit-identical to the loader tokenizers)')
     parser.add_argument('--failed-csv', action='store_true',
                         help='also write <work-dir>/<name>_failed.csv: md5, split, category, reason of every file not in '
                              'the store (unparsable/empty, or over --max-bytes), for the census manifests')
     return parser.parse_args()
+
+
+TOKENIZE = {'tracks': tokenize_tracks}  # swapped by --fast-tokenizer before the pool forks
 
 
 def work(item):
@@ -72,7 +77,7 @@ def work(item):
         data = zlib.decompress(raw, -15) if method == zipfile.ZIP_DEFLATED else raw
     except zlib.error:
         return key, None
-    return key, tokenize_tracks(data)
+    return key, TOKENIZE['tracks'](data)
 
 
 def iter_inner(outer, member, infos):
@@ -165,6 +170,11 @@ class ResumableStore:
 
 def main():
     args = parse_args()
+    if args.fast_tokenizer:
+        import sys
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'census'))
+        from fast_tokenize import fast_tokenize_tracks
+        TOKENIZE['tracks'] = fast_tokenize_tracks
     work_dir = Path(args.work_dir)
     work_dir.mkdir(parents=True, exist_ok=True)
     progress_path = work_dir / f'{args.name}_progress.json'

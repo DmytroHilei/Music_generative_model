@@ -18,6 +18,7 @@ import csv
 import hashlib
 import json
 import os
+import sys
 import tarfile
 import zlib
 from multiprocessing import Pool
@@ -38,6 +39,8 @@ def parse_args():
     parser.add_argument('--min-audio-score', type=float, default=0.0)
     parser.add_argument('--val-percent', type=int, default=1)
     parser.add_argument('--batch', type=int, default=4096, help='files read from the tar per parallel batch')
+    parser.add_argument('--fast-tokenizer', action='store_true',
+                        help='use data_prep/census/fast_tokenize.py (C port, tested bit-identical to the loader tokenizers)')
     parser.add_argument('--csv-dir', default=None, help='where <name>.csv goes (default: next to the tar)')
     parser.add_argument('--census', action='store_true',
                         help='csv also gets md5 (of the MIDI bytes) and a status column, with a row for every failed '
@@ -45,14 +48,17 @@ def parse_args():
     return parser.parse_args()
 
 
+TOKENIZE = {'midi': tokenize_midi}  # swapped by --fast-tokenizer before the pool forks
+
+
 def tokenize_bytes(item):
     name, data = item
-    return name, tokenize_midi(data)
+    return name, TOKENIZE['midi'](data)
 
 
 def tokenize_bytes_md5(item):
     name, data = item
-    return name, tokenize_midi(data), hashlib.md5(data).hexdigest()
+    return name, TOKENIZE['midi'](data), hashlib.md5(data).hexdigest()
 
 
 class StoreWriter:
@@ -77,6 +83,10 @@ class StoreWriter:
 
 def main():
     args = parse_args()
+    if args.fast_tokenizer:
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'census'))
+        from fast_tokenize import fast_tokenize_midi
+        TOKENIZE['midi'] = fast_tokenize_midi
     genres = set(args.genres.split(',')) if args.genres else None
 
     # metadata.json comes before data/ in the archive; read it in a first quick pass

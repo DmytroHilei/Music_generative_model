@@ -29,6 +29,7 @@ import hashlib
 import json
 import os
 import shutil
+import sys
 import tarfile
 import zlib
 from multiprocessing import Pool
@@ -60,6 +61,8 @@ def parse_args():
     parser.add_argument('--min-free-gb', type=float, default=3.0, help='stop at a checkpoint when free disk is lower')
     parser.add_argument('--checkpoint', type=int, default=50_000, help='files between checkpoints')
     parser.add_argument('--workers', type=int, default=os.cpu_count())
+    parser.add_argument('--fast-tokenizer', action='store_true',
+                        help='use data_prep/census/fast_tokenize.py (C port, tested bit-identical to the loader tokenizers)')
     return parser.parse_args()
 
 
@@ -140,9 +143,12 @@ def giga_index(args):
 
 # ---------------------------------------------------------------- Discover pass
 
+TOKENIZE = {'tracks': tokenize_tracks}  # swapped by --fast-tokenizer before the pool forks
+
+
 def work(item):
     k, data = item
-    result = tokenize_tracks(data)
+    result = TOKENIZE['tracks'](data)
     if result is None:
         return k, None
     tokens, programs = result
@@ -156,6 +162,10 @@ def work_or_skip(item):
 
 def main():
     args = parse_args()
+    if args.fast_tokenizer:
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'census'))
+        from fast_tokenize import fast_tokenize_tracks
+        TOKENIZE['tracks'] = fast_tokenize_tracks
     work_dir = Path(args.work_dir)
     work_dir.mkdir(parents=True, exist_ok=True)
     giga = giga_index(args)
