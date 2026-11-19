@@ -22,7 +22,9 @@ SCENARIOS = [  # (label, tag) in table order
 ]
 RUNS = [('1B @ 20B', 20e9), ('1.8B @ 35B', 35e9), ('2.5B @ 50B', 50e9)]
 ORIGIN = {'gigamidi': 'native (scraped MIDI)', 'discover': 'native (scraped MIDI) + transcribed (contains Aria-MIDI)',
-          'aria': 'transcribed (audio to MIDI, piano)', 'aria_pruned': 'transcribed', 'aria_deduped': 'transcribed'}
+          'aria': 'transcribed (audio to MIDI, piano)', 'aria_pruned': 'transcribed', 'aria_deduped': 'transcribed',
+          'pianocore': 'transcribed (Aria, PERiScoPe/Transkun V2, ATEPP) + Disklavier (ASAP)',
+          'piast': 'transcribed (piano)', 'beat': 'score (MuseScore MusicXML)', 'pdmx': 'score'}
 
 
 def load(name, tag):
