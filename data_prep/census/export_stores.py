@@ -30,7 +30,7 @@ def kept_mask(status, level):
 
 
 def export_source(src, si, z, tables, metas, args):
-    t = tables[src]
+    t = {k: np.asarray(tables[src][k]) for k in ('store', 'idx')}  # npz members re-read on every access: load once
     a, b = z['source_start'][si], z['source_start'][si + 1]
     keep = kept_mask(z['status'][a:b], args.level) & (t['store'] >= 0)
     need = set(np.flatnonzero(keep).tolist())
