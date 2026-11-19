@@ -6,6 +6,8 @@ Checkpoint sync between the rented GPU and the Hugging Face Hub (two private mod
   laptop /  python cloud/sync/ckpt.py pull --run long_450m      # newest checkpoint -> checkpoints/long_450m/
   new host:                                                #   (then cloud/run/launch.sh resumes from it)
             python cloud/sync/ckpt.py status --run long_450m    # what is on the Hub
+  instance: python cloud/sync/ckpt.py results --run aug --post-run-dir results/aug_sweep --auto-stop
+                                                           # a folder -> <user>/aug-results, then stop (aug_all.sh)
 
 A push uploads ckpt.pt (full resumable state), model_bf16.pt (best val weights, if any), run.env (the machine/budget
 settings), the training log tail and state.json (iteration, time) in ONE commit to whichever of the two repos holds the
@@ -181,17 +183,34 @@ def post_run(args):
     if not results.exists():
         log(f'post-run: no {results} to upload')
         return
+    upload_results(args.run, results, 'post-run results')
+
+
+def upload_results(run, folder, message):
+    """folder -> the private model repo <user>/<run>-results, 3 attempts."""
     for attempt in range(3):
         try:
             hf = hub.api()
-            repo = f'{hub.hf_user(hf)}/{args.run}-results'
+            repo = f'{hub.hf_user(hf)}/{run}-results'
             hf.create_repo(repo, private=True, exist_ok=True)
-            hf.upload_folder(repo_id=repo, folder_path=str(results), commit_message='post-run results')
-            log(f'post-run results uploaded to {repo}')
+            hf.upload_folder(repo_id=repo, folder_path=str(folder), commit_message=message)
+            log(f'{message} uploaded to {repo}')
             return
         except Exception as e:
             log(f'results upload failed ({type(e).__name__}: {e}); retry {attempt + 1}/3 in 60 s')
             time.sleep(60)
+
+
+def results(args):
+    """A run outside the checkpoint loop (cloud/run/aug_all.sh): --post-run-dir -> <user>/<run>-results, then with
+    --auto-stop the instance stops."""
+    folder = Path(args.post_run_dir or '')
+    if args.post_run_dir and folder.is_dir():
+        upload_results(args.run, folder, 'results')
+    else:
+        log(f'results: no folder {args.post_run_dir} to upload')
+    if args.auto_stop:
+        stop_instance()
 
 
 def stop_instance():
@@ -208,23 +227,23 @@ def stop_instance():
 
 def main():
     p = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-    p.add_argument('command', choices=['push', 'pull', 'loop', 'status'])
+    p.add_argument('command', choices=['push', 'pull', 'loop', 'status', 'results'])
     p.add_argument('--run', default='long_450m')
     p.add_argument('--out-dir', default=None, help='default checkpoints/<run>')
     p.add_argument('--log', default=None, help='training log whose tail is pushed (default logs/<run>.log)')
     p.add_argument('--pid-file', default=None, help='loop: wrapper pid file (default logs/<run>.wrapper.pid)')
     p.add_argument('--every-min', type=int, default=60)
-    p.add_argument('--auto-stop', action='store_true', help='loop: stop the vast.ai instance after the final push')
+    p.add_argument('--auto-stop', action='store_true', help='loop / results: stop the vast.ai instance at the end')
     p.add_argument('--force', action='store_true')
     p.add_argument('--post-run', default=None, help='loop: shell command run after the final push of a finished run '
                    '(before the auto-stop), e.g. the settings sweep')
-    p.add_argument('--post-run-dir', default=None, help='loop: folder uploaded to <user>/<run>-results afterwards')
+    p.add_argument('--post-run-dir', default=None, help='loop / results: folder uploaded to <user>/<run>-results')
     p.add_argument('--post-run-limit-min', type=float, default=75)
     args = p.parse_args()
     args.out_dir = args.out_dir or str(hub.ROOT / 'checkpoints' / args.run)
     args.log = args.log or str(hub.ROOT / 'logs' / f'{args.run}.log')
     args.pid_file = args.pid_file or str(hub.ROOT / 'logs' / f'{args.run}.wrapper.pid')
-    {'push': push, 'pull': pull, 'loop': loop, 'status': status}[args.command](args)
+    {'push': push, 'pull': pull, 'loop': loop, 'status': status, 'results': results}[args.command](args)
 
 
 if __name__ == '__main__':

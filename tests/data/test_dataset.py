@@ -120,6 +120,23 @@ def test_source_weights():
         assert 0 < low < 60, 'default: by size (24 vs 384 window starts)'
 
 
+def test_file_frac():
+    with tempfile.TemporaryDirectory() as d:
+        files = [notes(20, i, pitch=(i, i + 1)) for i in range(120)]  # file i = pitch i throughout
+        full = dataset(d, files)
+        frac = {f: NoteWindowDataset(f'store:{d}/toy', root_dir=d, split='train', block_size=16, cache_dir=d,
+                                     file_frac=f) for f in (0.25, 0.125)}
+        quarter, eighth = (set(frac[f].file_ids.tolist()) for f in (0.25, 0.125))
+        assert full.n_files == 120 and 15 <= len(quarter) <= 45, len(quarter)
+        assert eighth < quarter, 'a smaller share is a subset of a larger one'
+        again = NoteWindowDataset(f'store:{d}/toy', root_dir=d, split='train', block_size=16, cache_dir=d,
+                                  file_frac=0.25)
+        assert set(again.file_ids.tolist()) == quarter, 'the same files every time'
+        assert frac[0.25].num_notes() == 20 * len(quarter)
+        random.seed(0)
+        assert all(int(frac[0.25][0][0][0][0]) in quarter for _ in range(200)), 'windows only from the kept files'
+
+
 def test_conditions_and_collate():
     assert density_level([0.1, 0.5, 1.0, 64.0, 1000.0]).tolist() == [1, 1, 3, 15, 15]
     pitch = torch.tensor([[BOS_PITCH, 60, 62, 64], [60, 61, 62, EOS_PITCH]])

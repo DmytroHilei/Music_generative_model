@@ -7,7 +7,8 @@ seed, so a stopped sweep still compares all arms). Arm rms = the step-size contr
 linear = the heads A/B on the same recipe (MusicConfig.heads) against the cascade of base: indep = the same residual
 heads without the chain, linear = independent linear heads (the 2026-09-28 baseline of the cascade's -0.41). Final held-out GigaMIDI CE and Aria CE per run in logs/muon_ab.md;
 a run whose log has its last eval is skipped. ckpt.pt and pre_cooldown.pt (optimizer state) deleted after each
-run, model_bf16.pt kept.
+run, model_bf16.pt kept. Arms learned / bf16 / layernorm / gelu / no_qknorm / adamw_* (2026-11-07) = the write-up
+claims E3, E8, E1 per component and E2 of context/claude/research_analysis.md on the same recipe.
 
     .venv/bin/python tools/sweeps/muon_ab.py --dry-run
     .venv/bin/python tools/sweeps/muon_ab.py                       # 12 runs, ~25 min each
@@ -37,6 +38,15 @@ ARMS = {
     'rms': ['--muon_rms=True'],  # NorMuon's step size (RMS 0.2 exactly) without its per-neuron division
     'indep': ['--heads=independent'],  # heads A/B (todo 657cfb1c): the residual heads without the chain
     'linear': ['--heads=linear'],  # heads A/B: independent linear heads (rejected.IndependentHeads, the 09-28 baseline)
+    # write-up claims (context/claude/research_analysis.md ledger), same recipe, 2026-11-07
+    'learned': ['--pos_emb=learned'],  # E3: scratch learned positions vs scratch RoPE (base)
+    'bf16': ['--fp8=False'],  # E8: fp8 cost
+    'layernorm': ['--norm=layernorm'],  # E1 per component: new block minus RMSNorm
+    'gelu': ['--mlp=gelu'],  # E1: minus SwiGLU
+    'no_qknorm': ['--qk_norm=False'],  # E1: minus QK-norm
+    'adamw_3e-4': ['--optimizer_name=adamw', '--learning_rate=3e-4'],  # E2: AdamW LR sweep on the same recipe
+    'adamw_1e-3': ['--optimizer_name=adamw', '--learning_rate=1e-3'],
+    'adamw_3e-3': ['--optimizer_name=adamw', '--learning_rate=3e-3'],
 }
 SEEDS = (1337, 2, 3)
 LAST = 'step 1499:'

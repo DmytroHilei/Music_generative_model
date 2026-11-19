@@ -142,17 +142,40 @@ After: `.venv/bin/python cloud/sync/ckpt.py pull --run f1` (the long run) and
 then destroy the instance. The post-run reads `config/f1/f1_cap.py` when it starts, so the file on the instance can
 be changed until the long run ends, e.g. after the length check in step 6.
 
+## Augmentation search: tools/sweeps/aug_sweep.py (prepared 2026-11-20)
+
+16 runs of the 42M at micro-batch 16: fresh, control and 6 augmentation arms, 2 seeds each (the
+`tools/sweeps/aug_sweep.py` docstring). The GigaMIDI replay store it trains on has been on the Hub since 2026-11-20
+(`cloud/sync/data.py upload --stores gigamidi_replay_train --merge`), so nothing is copied from the laptop. The instance
+sets up with the two stores (~2 GB with the label tables), smoke-tests every arm, runs the sweep, uploads
+`results/aug_sweep` to `<user>/aug-results` (private) and, with `AUTO_STOP=1`, stops itself. A run took 41 min on the
+laptop's RTX 5060 at micro-batch 4; the 5090 time is not measured yet (the first run's is in
+`logs/aug_sweep/control_s1337.log`).
+
+| # | where | command | time |
+|---|---|---|---|
+| 1 | vast.ai | one RTX 5090 with the filters of section 1; disk ≥ 40 GB is enough | |
+| 2 | instance | `git clone -b transformer-v2 https://github.com/DmytroHilei/Music_generative_model.git music && cd music` | 1 min |
+| 3 | instance | `cp cloud/secrets.env.example cloud/secrets.env && nano cloud/secrets.env` (HF_TOKEN, AUTO_STOP=1; WANDB_API_KEY can stay empty) | 1 min |
+| 4 | instance | `mkdir -p logs && MICRO=16 setsid nohup bash cloud/run/aug_all.sh > logs/aug_all.log 2>&1 < /dev/null &` | setup + smoke ~20 min, then the sweep |
+| 5 | laptop | `hf download <user>/aug-results --local-dir results/aug_sweep_5090`, then destroy the instance | |
+
+Progress on the instance: `tail -f logs/aug_all.log` and `cat logs/aug_sweep.md` (rewritten after every run). If
+control is less than 0.01 above fresh after the first 4 runs, the sweep stops at the gate and the results are uploaded
+as they are. Starting `aug_all.sh` again skips finished runs and retries failed ones.
+
 ## Files
 
 | file | role |
 |---|---|
 | `hub.py` | stores list, repo names, sha256 manifest, loads `cloud/secrets.env` |
-| `data.py` | `upload` (laptop) / `download` / `verify` (instance) |
+| `data.py` | `upload` (laptop; `--merge` = only the named stores) / `download` / `verify` (instance) |
 | `setup_instance.sh` | system packages, uv + Python 3.12 + `requirements-lock.txt`, GPU check, data, accounts |
 | `preflight.py` | checks, benchmark, budget, smoke tests, LR probe, `run.env` |
 | `launch.sh`, `stop.sh`, `status.sh` | start detached / graceful stop + final push / quick status |
 | `run_resumable.sh` | crash-restart wrapper around train.py (respects `out_dir/STOP`) |
-| `ckpt.py` | `push`, `pull`, `loop`, `status` for checkpoints on the Hub; vast.ai auto-stop |
+| `ckpt.py` | `push`, `pull`, `loop`, `status` for checkpoints on the Hub; `results` (a folder -> `<user>/<run>-results`); vast.ai auto-stop |
 | `f1_ship.sh`, `f1_checks.sh`, `f1_post.sh` | F1: laptop -> instance copy; checks between preflight and launch; caption phase + evals after the run |
+| `aug_all.sh` | the augmentation search: setup, smoke, `tools/sweeps/aug_sweep.py`, results upload, auto-stop |
 | `requirements-lock.txt` | the exact training environment (torch 2.14.0+cu130, torchao 0.18, ...) |
 | `secrets.env.example` | template for `cloud/secrets.env` (git-ignored) |

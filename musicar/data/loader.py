@@ -189,6 +189,7 @@ class NoteWindowDataset(Dataset):
         aug_tempo=0.0,
         aug_stores=None,
         aug_transpose=(-5, 5),
+        file_frac=1.0,
         programs=False,
         pad_short=False,
         pack_short=False,
@@ -239,6 +240,9 @@ class NoteWindowDataset(Dataset):
                      Transposition applies to every store regardless
         aug_transpose: training only: (lowest, highest) transposition in semitones per window, drawn uniformly and
                      narrowed so no note leaves 0..127; (-5, 6) covers all 12 keys
+        file_frac:   keep only this share of each store's files, drawn with a fixed seed per store name: the same
+                     files in every run and seed, and a smaller share is a subset of a larger one (repeated-data tests:
+                     0.25 of a store over 4 passes)
         pad_short:   keep files shorter than the window (>= min_notes notes) as one whole-file window, zero-padded at
                      the end with masked (-1) targets; a short file is sampled as often per note as a long one. Without
                      it they are dropped (at block_size 2048: 99% of the Ukrainian songs, 57% of Aria's notes)
@@ -318,6 +322,8 @@ class NoteWindowDataset(Dataset):
         self.aug_stores = aug_stores
         self.aug_transpose = tuple(aug_transpose)
         assert len(self.aug_transpose) == 2 and self.aug_transpose[0] <= 0 <= self.aug_transpose[1], aug_transpose
+        assert 0 < file_frac <= 1, file_frac
+        self.file_frac = file_frac
         self.cache_dir = Path(cache_dir)
         self.eval_stride = eval_stride
         self.programs = programs
@@ -388,6 +394,11 @@ class NoteWindowDataset(Dataset):
                 labeled[[f for f in self.captioners[i].labels if self.captioners[i].labeled(f)]] = True
                 keep &= labeled if store_tiers[i] == 'labeled' else ~labeled
                 print(f"{store.name}#{store_tiers[i]}: {int(keep.sum()):,} files")
+            if self.file_frac < 1:
+                seed = int(hashlib.md5(store.name.encode()).hexdigest()[:8], 16)
+                keep &= np.random.default_rng(seed).random(len(n)) < self.file_frac
+                print(f"{store.name}: file_frac {self.file_frac:g} keeps {int(keep.sum()):,} files, "
+                      f"{int((n[keep] - 2 * self.pad).sum()):,} notes")
             file_ids.append(np.flatnonzero(keep))
             store_ids.append(np.full(int(keep.sum()), i, dtype=np.int32))
             starts.append(offsets[:-1][keep])

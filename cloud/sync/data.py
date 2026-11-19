@@ -5,6 +5,8 @@ Move the token stores between the laptop and the rented GPU through a private Hu
   instance: python cloud/sync/data.py download     # cloud/setup/setup_instance.sh runs this and then `verify`
             python cloud/sync/data.py verify       # every file present, right size, right sha256
   --stores on download / verify: only those stores (+ the label / caption tables), e.g. the ones a run reads
+  upload --stores X --merge: add or refresh store X alone, the rest of the manifest as it is on the Hub
+            (e.g. gigamidi_replay_train for tools/sweeps/aug_sweep.py)
 
 The repo holds data/cache/<store>/... for the stores in cloud/sync/hub.py, their label / caption tables (labels/,
 captions/ from --labels-dir / --captions-dir; on the instance data/labels and data/captions link to them) plus
@@ -31,18 +33,29 @@ def upload(args):
     stores = args.stores.split(',')
     local = [s for s in stores if (Path(args.cache_dir) / s / 'meta.json').exists()]
     remote_manifest = {}
-    if len(local) < len(stores):
+    if len(local) < len(stores) or args.merge:
         from huggingface_hub import hf_hub_download
         remote_manifest = json.loads(Path(hf_hub_download(repo, hub.MANIFEST, repo_type='dataset')).read_text())
-    kept = {rel: e for rel, e in remote_manifest.items() if rel.split('/')[0] in set(stores) - set(local)}
-    for store in set(stores) - set(local):
-        if not any(rel.split('/')[0] == store for rel in kept):
-            raise SystemExit(f'{store}: not in {args.cache_dir} and not on {repo}')
-        print(f'{store}: not local, entries kept from the Hub manifest', flush=True)
-    tables = hub.label_files(args.labels_dir, args.captions_dir, stores)
+    if args.merge:  # only these stores; every other entry (other stores, label / caption tables) stays as on the Hub
+        if set(stores) - set(local):
+            raise SystemExit(f'--merge: {sorted(set(stores) - set(local))} not in {args.cache_dir}')
+        kept = {rel: e for rel, e in remote_manifest.items() if rel.split('/')[0] not in set(stores)}
+        tables = {}
+    else:
+        kept = {rel: e for rel, e in remote_manifest.items() if rel.split('/')[0] in set(stores) - set(local)}
+        for store in set(stores) - set(local):
+            if not any(rel.split('/')[0] == store for rel in kept):
+                raise SystemExit(f'{store}: not in {args.cache_dir} and not on {repo}')
+            print(f'{store}: not local, entries kept from the Hub manifest', flush=True)
+        tables = hub.label_files(args.labels_dir, args.captions_dir, stores)
     print(f'hashing {len(local)} stores in {args.cache_dir} + {len(tables)} label tables (cached after the first run) ...',
           flush=True)
     manifest = {**kept, **hub.build_manifest(args.cache_dir, local, extra=tables)}
+    if args.merge:
+        lost = sorted(rel for rel in remote_manifest if rel not in manifest)
+        assert not lost, f'--merge would drop manifest entries: {lost[:5]}'
+        print(f'--merge: {len(kept)} entries kept from the Hub manifest, {len(manifest) - len(kept)} from '
+              f'{", ".join(stores)}', flush=True)
     total = sum(e['size'] for e in manifest.values())
     print(f'{len(manifest)} files, {total / 1e9:.1f} GB -> {repo} (private dataset)', flush=True)
 
@@ -66,7 +79,7 @@ def upload(args):
         return {f.path: f.size for f in hf.list_repo_tree(repo, repo_type='dataset', recursive=True)
                 if getattr(f, 'size', None) is not None}
 
-    for store in stores + ['labels', 'captions']:
+    for store in stores + ([] if args.merge else ['labels', 'captions']):
         files = {rel: e for rel, e in manifest.items() if rel.split('/')[0] == store}
         remote = remote_sizes()
         if all(remote.get(rel) == e['size'] for rel, e in files.items()):
@@ -153,6 +166,8 @@ def main():
     p.add_argument('--staging', default=str(hub.ROOT / 'data' / 'hf_upload'))
     p.add_argument('--workers', type=int, default=8)
     p.add_argument('--quick', action='store_true', help='verify: sizes only, no sha256')
+    p.add_argument('--merge', action='store_true', help='upload: only the --stores given (all local); every other '
+                   'manifest entry, label / caption tables included, stays as on the Hub')
     args = p.parse_args()
     {'upload': upload, 'download': download, 'verify': verify}[args.command](args)
 
