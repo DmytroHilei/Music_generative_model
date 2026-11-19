@@ -19,12 +19,13 @@ SCENARIOS = [  # (label, tag) in table order
     ('Core three, Aria full', ''),
     ('+ sources 4–8', 'plus48'),
     ('+ sources 4–8, without `unclear` licences', 'plus48-no-unclear'),
+    ('+ sources 4–8 + IrishMAN (source 9)', 'plus9'),
 ]
 RUNS = [('1B @ 20B', 20e9), ('1.8B @ 35B', 35e9), ('2.5B @ 50B', 50e9)]
 ORIGIN = {'gigamidi': 'native (scraped MIDI)', 'discover': 'native (scraped MIDI) + transcribed (contains Aria-MIDI)',
           'aria': 'transcribed (audio to MIDI, piano)', 'aria_pruned': 'transcribed', 'aria_deduped': 'transcribed',
           'pianocore': 'transcribed (Aria, PERiScoPe/Transkun V2, ATEPP) + Disklavier (ASAP)',
-          'piast': 'transcribed (piano)', 'beat': 'score (MuseScore MusicXML)', 'pdmx': 'score'}
+          'piast': 'transcribed (piano)', 'beat': 'score (MuseScore MusicXML)', 'pdmx': 'score', 'irishman': 'score (ABC folk tunes, mostly monophonic)'}
 
 
 def load(name, tag):
@@ -114,6 +115,10 @@ def main():
           'Levels cascade left to right: each column is the notes kept after that level and all levels before it. '
           'First copy wins in the order GigaMIDI → Discover → Aria; within GigaMIDI and Aria, train before '
           'validation before test; within Discover, archive order (as its own script decided).', '',
+          *((['## Per source (all sources, order GigaMIDI → Discover → Aria → PianoCoRe → PIAST → BEAT → IrishMAN)', '',
+              per_source('plus9'), '', '## Drops by level (all sources)', '', drops('plus9'), '',
+              '## Length and instrument mix, all sources (loose level, notes-weighted)', '', shape('plus9'), '']
+             if load('usable', 'plus9') else [])),
           '## Drops by level', '', drops(), '',
           '## Length and instrument mix (loose level, notes-weighted)', '', shape(), '',
           'piano-only: every note in GM programs 0–7; drums-only: every note a drum note; single other: one '
