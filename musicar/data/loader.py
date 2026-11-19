@@ -188,6 +188,7 @@ class NoteWindowDataset(Dataset):
         boundary_end=None,
         aug_tempo=0.0,
         aug_stores=None,
+        aug_transpose=(-5, 5),
         programs=False,
         pad_short=False,
         pack_short=False,
@@ -236,6 +237,8 @@ class NoteWindowDataset(Dataset):
         aug_stores:  optional 0/1 per store (same order as source_weights): which stores get the tempo
                      augmentation (e.g. [1, 0] = only the fine-tune CSVs, the replay store stays real). Default: all.
                      Transposition applies to every store regardless
+        aug_transpose: training only: (lowest, highest) transposition in semitones per window, drawn uniformly and
+                     narrowed so no note leaves 0..127; (-5, 6) covers all 12 keys
         pad_short:   keep files shorter than the window (>= min_notes notes) as one whole-file window, zero-padded at
                      the end with masked (-1) targets; a short file is sampled as often per note as a long one. Without
                      it they are dropped (at block_size 2048: 99% of the Ukrainian songs, 57% of Aria's notes)
@@ -313,6 +316,8 @@ class NoteWindowDataset(Dataset):
         self.augment = augment
         self.aug_tempo = aug_tempo
         self.aug_stores = aug_stores
+        self.aug_transpose = tuple(aug_transpose)
+        assert len(self.aug_transpose) == 2 and self.aug_transpose[0] <= 0 <= self.aug_transpose[1], aug_transpose
         self.cache_dir = Path(cache_dir)
         self.eval_stride = eval_stride
         self.programs = programs
@@ -685,13 +690,13 @@ class NoteWindowDataset(Dataset):
             duration = torch.where(drums, 0, duration)  # drum hits have no meaningful length
 
         if self.augment and not self.eval_stride:
-            # transpose by up to ±5 semitones, limited so no note leaves 0..127 (clamping would bend them);
+            # transpose within aug_transpose (default ±5 semitones), limited so no note leaves 0..127 (clamping would bend them);
             # BOS/EOS (pitch >= 128) and drums (pitch = drum sound) stay as they are
             notes = pitch < BOS_PITCH
             pitched = notes if drums is None else notes & ~drums
             if pitched.any():
                 lo, hi = int(pitch[pitched].min()), int(pitch[pitched].max())
-                shift = random.randint(max(-5, -lo), min(5, 127 - hi))
+                shift = random.randint(max(self.aug_transpose[0], -lo), min(self.aug_transpose[1], 127 - hi))
                 pitch = torch.where(pitched, pitch + shift, pitch)
             store_augmented = self.aug_stores is None or bool(self.aug_stores[int(self.store_ids[file_idx])])
             if self.aug_tempo and store_augmented:

@@ -341,6 +341,22 @@ def train_cpu(s):
     return f'val {losses[0][1]:.3f} -> {losses[-1][1]:.3f}'
 
 
+@test('train-aug-cpu', needs=('data',))
+def train_aug_cpu(s):
+    """6 steps on the CPU on the multi-instrument store per augmentation hypothesis (hypotheses/aug_dyn, aug_octave,
+    aug_family), with the 12-key transposition (aug_transpose -5,6), the tempo stretch and the instrument-set
+    condition on (aug_family remaps it)."""
+    vals = []
+    for h in ('aug_dyn:shift=4', 'aug_octave:rows=1.0', 'aug_family:rows=1.0'):
+        name = h.split(':')[0]
+        out = s.train(f'train-{name}', data='multi', hypothesis=h, n_programs=129, cond_inst=True,
+                      aug_transpose='-5,6', aug_tempo=0.1, **CPU)
+        if f'hypothesis: {name}' not in out:
+            raise Fail(f'{name}: no hypothesis line in the output')
+        vals.append(f'{name} {val_losses(out)[-1][1]:.3f}')
+    return ', '.join(vals)
+
+
 @test('golden-cpu', needs=('train-cpu',))
 def golden_cpu(s):
     """train-cpu's val losses vs tests/assets/losses/cpu.json: any change to init, data sampling, the loss or the
@@ -439,7 +455,7 @@ def f1_train(s, name, init_ckpt, *overlays, check=True, **kw):
 
 
 def f1_checks(out, s, name):
-    missing = [m for m in ('AdamW8bit', 'length tables:', 'text gain', 'section changes') if m not in out]
+    missing = [m for m in ('AdamW8bit', 'length tables:', 'text gain') if m not in out]  # change windows off since 10-27
     if missing:
         raise Fail(f'not in the output: {missing}')
     s.generate(name, s.work / name, '--text', 'a short loud piece with drums', '--cfg-scale', 2, '--length-seconds', 5,

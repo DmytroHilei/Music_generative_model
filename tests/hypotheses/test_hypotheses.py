@@ -9,7 +9,7 @@ import torch
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from hypotheses import load  # noqa: E402
-from musicar.data.loader import BOS_PITCH  # noqa: E402
+from musicar.data.loader import BOS_PITCH, DRUM_PROGRAM  # noqa: E402
 from musicar.model.gpt import GPT, MusicConfig  # noqa: E402
 from musicar.training.optim import build_optimizer  # noqa: E402
 
@@ -179,6 +179,119 @@ def test_open_proxy():
     assert torch.allclose(parts['proxy_kl'], kl, atol=2e-3), (parts['proxy_kl'], kl)   # bf16 teacher vs float
     loss.backward()
     assert m.transformer['text_prefix'].gate.grad.abs().sum() > 0
+
+
+def test_aug_dyn():
+    X, Y = batch()
+    g = torch.Generator().manual_seed(2)
+    vel, yv = torch.randint(10, 20, X[0][1].shape, generator=g), torch.randint(10, 20, Y[1].shape, generator=g)
+    vel[0, 3], yv[0, 7] = 31, -1                                    # row 0 at the top bin: it can only go down
+    Y[0][1, 2] = -1                                                 # a masked target stays
+    X = ((X[0][0], vel) + X[0][2:], X[1])
+    Y = (Y[0], yv) + Y[2:]
+    torch.manual_seed(0)
+    shifts = set()
+    for _ in range(50):
+        (xs, ex), Y2 = load('aug_dyn:shift=4:captioned=True').batch(X, Y, 0)
+        d = xs[1] - vel
+        real = X[0][0] < BOS_PITCH
+        for r in range(3):
+            s = int(d[r][real[r]][0])
+            assert (d[r][real[r]] == s).all() and (d[r][~real[r]] == 0).all(), 'one shift per window, BOS kept'
+            ry = (Y[0][r] >= 0) & (Y[0][r] < BOS_PITCH) & (Y[1][r] >= 0)
+            assert ((Y2[1][r] - Y[1][r])[ry] == s).all() and torch.equal(Y2[1][r][~ry], Y[1][r][~ry])
+            assert -4 <= s <= 4
+            shifts.add((r, s))
+        assert xs[1].min() >= 0 and xs[1].max() <= 31 and Y2[1].max() <= 31, 'no note leaves the range'
+        assert all(torch.equal(a, b) for i, (a, b) in enumerate(zip(xs, X[0])) if i != 1)
+        assert all(torch.equal(a, b) for i, (a, b) in enumerate(zip(Y2, Y)) if i != 1)
+    assert max(s for r, s in shifts if r == 0) == 0 and len(shifts) > 9
+    # captioned rows (0 and 2) stay by default; nothing with shift=0
+    (xs, _), _ = load('aug_dyn:shift=4').batch(X, Y, 0)
+    assert torch.equal(xs[1][0], vel[0]) and torch.equal(xs[1][2], vel[2])
+    assert load('aug_dyn:shift=0').batch(X, Y, 0)[0] is X
+
+
+def band(B=3, T=16):
+    """A batch whose targets are the inputs shifted by one (as the loader's): row 0 = programs 0 / 33 / drums, row 1 =
+    programs 0 / 40, row 2 = piano only; pitches 40..80, row 0's program 33 near the bottom (it can only go up)."""
+    g = torch.Generator().manual_seed(5)
+    rows = T + 1
+    pitch = torch.randint(40, 80, (B, rows), generator=g)
+    prog = torch.zeros(B, rows, dtype=torch.long)
+    prog[0, 1::3], prog[0, 2::3], prog[1, 1::2] = 33, DRUM_PROGRAM, 40
+    pitch[0, 1::3] = torch.randint(5, 12, (len(range(1, rows, 3)),), generator=g)
+    pitch[:, 0] = BOS_PITCH
+    other = [torch.randint(0, n, (B, rows), generator=g) for n in (32, 512, 512)]
+    full = (pitch, *other)
+    X = (tuple(t[:, :-1] for t in full), dict(program=prog[:, :-1]))
+    Y = tuple(t[:, 1:].clone() for t in full) + (prog[:, 1:].clone(),)
+    Y[0][1, 3] = Y[4][1, 3] = -1                                    # a masked target
+    return X, Y
+
+
+def test_aug_octave():
+    X, Y = band()
+    pitch, prog = X[0][0], X[1]['program']
+    torch.manual_seed(0)
+    seen = set()
+    for _ in range(40):
+        (xs, ex), Y2 = load('aug_octave:rows=1.0').batch(X, Y, 0)
+        dx, dy = xs[0] - pitch, Y2[0] - Y[0]
+        for r in range(3):
+            moved = dx[r] != 0
+            if r == 2:
+                assert not moved.any() and not dy[r].any(), 'one pitched program: not eligible at min_tracks=2'
+                continue
+            assert moved.any(), 'a two-track window always fits one direction here'
+            p = int(prog[r][moved][0])
+            s = int(dx[r][moved][0])
+            assert abs(s) == 12 and (prog[r][moved] == p).all() and (dx[r][(prog[r] == p) & (pitch[r] < BOS_PITCH)] == s).all()
+            assert p != DRUM_PROGRAM and not (dx[r][pitch[r] >= BOS_PITCH]).any()
+            ty = (Y[4][r] == p) & (Y[0][r] >= 0)
+            assert (dy[r][ty] == s).all() and not dy[r][~ty].any(), 'targets move with their inputs'
+            if r == 0 and p == 33:
+                assert s == 12, 'program 33 sits at pitch 5..11: only up fits'
+            seen.add((r, p, s))
+        assert xs[0][xs[0] < BOS_PITCH].max() <= 127 and xs[0].min() >= 0
+        assert all(torch.equal(a, b) for a, b in zip(xs[1:], X[0][1:])) and ex['program'] is prog
+    assert len(seen) >= 4, seen
+    (xs, _), _ = load('aug_octave:rows=1.0:min_tracks=1').batch(X, Y, 0)
+    assert (xs[0][2] != pitch[2]).any(), 'solo windows with min_tracks=1'
+    assert load('aug_octave:rows=0').batch(X, Y, 0)[0] is X
+
+
+def test_aug_family():
+    X, Y = band()
+    prog = X[1]['program']
+    inst = torch.zeros(3, DRUM_PROGRAM + 1)
+    inst.scatter_(1, prog[:, 1:], 1.0)                              # from the notes, as window_conditions (no BOS)
+    X = (X[0], dict(X[1], cond=(inst, torch.arange(3))))
+    torch.manual_seed(0)
+    seen = set()
+    for _ in range(30):
+        (xs, ex), Y2 = load('aug_family:rows=1.0').batch(X, Y, 0)
+        new = ex['program']
+        assert xs is X[0] and all(torch.equal(a, b) for a, b in zip(Y2[:4], Y[:4]))
+        assert torch.equal(new // 8, prog // 8) and torch.equal(new[prog == DRUM_PROGRAM], prog[prog == DRUM_PROGRAM])
+        assert torch.equal(new[2], prog[2]), 'piano-only row stays'
+        assert torch.equal(new[:, 0], prog[:, 0]), 'BOS keeps program 0'
+        for r in range(2):
+            m = {}
+            for a, b in zip(prog[r, 1:].tolist(), new[r, 1:].tolist()):
+                assert m.setdefault(a, b) == b, 'one mapping per window'
+            assert len(set(m.values())) == len(m), 'distinct instruments stay distinct'
+            seen.add((r, m[0], m.get(33, m.get(40))))
+        valid = Y[4] >= 0
+        assert torch.equal(Y2[4][~valid], Y[4][~valid])
+        full = torch.cat([new, Y2[4][:, -1:]], 1)
+        assert torch.equal(Y2[4][valid], full[:, 1:][valid]), 'targets remapped as the inputs'
+        want = torch.zeros_like(inst).scatter_(1, new[:, 1:], 1.0)
+        assert torch.equal(ex['cond'][0], want) and ex['cond'][1] is X[1]['cond'][1], 'condition matches the notes'
+    assert len(seen) > 10
+    (_, ex), _ = load('aug_family:rows=1.0:piano_only=True').batch(X, Y, 0)
+    assert (ex['program'][2] // 8 == 0).all()
+    assert load('aug_family:rows=0').batch(X, Y, 0)[0] is X
 
 
 if __name__ == '__main__':

@@ -58,6 +58,10 @@ def test_transposition_and_tempo():
             shifts.add(int(diff[0]))
         assert shifts <= set(range(-5, 3)) and len(shifts) > 3, shifts  # pitches 122..125: at most +2
         assert int(base[:, 0].max()) + max(shifts) <= 127
+        mid = notes(17, 1, pitch=(60, 64))  # room both ways: aug_transpose sets the range
+        wide, plain = dataset(d, [mid], name='wide', augment=True, aug_transpose=(-5, 6)), dataset(d, [mid], name='plain')
+        wide_shifts = {int(wide[0][0][0][0] - plain[0][0][0][0]) for _ in range(300)}
+        assert wide_shifts == set(range(-5, 7)), wide_shifts  # all 12 keys
         tempo = dataset(d, [base], name='tempo', augment=True, aug_tempo=0.5)
         x, _ = tempo[0]
         assert torch.all(x[2] <= 511) and torch.all((x[3] == 0) == (raw[0][0][3] == 0)), 'chords stay chords'
