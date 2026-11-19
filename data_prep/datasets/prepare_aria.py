@@ -15,6 +15,7 @@ Aria-MIDI is CC-BY-NC-SA 4.0: non-commercial research use.
 
 import argparse
 import csv
+import hashlib
 import json
 import os
 import tarfile
@@ -37,12 +38,21 @@ def parse_args():
     parser.add_argument('--min-audio-score', type=float, default=0.0)
     parser.add_argument('--val-percent', type=int, default=1)
     parser.add_argument('--batch', type=int, default=4096, help='files read from the tar per parallel batch')
+    parser.add_argument('--csv-dir', default=None, help='where <name>.csv goes (default: next to the tar)')
+    parser.add_argument('--census', action='store_true',
+                        help='csv also gets md5 (of the MIDI bytes) and a status column, with a row for every failed '
+                             'segment too (status failed, n_notes 0), for the census manifests')
     return parser.parse_args()
 
 
 def tokenize_bytes(item):
     name, data = item
     return name, tokenize_midi(data)
+
+
+def tokenize_bytes_md5(item):
+    name, data = item
+    return name, tokenize_midi(data), hashlib.md5(data).hexdigest()
 
 
 class StoreWriter:
@@ -86,23 +96,29 @@ def main():
         return 'validation' if zlib.crc32(file_id.encode()) % 100 < args.val_percent else 'train'
 
     writers = {s: StoreWriter(Path(args.cache_dir) / f'{args.name}_{s}') for s in ('train', 'validation')}
-    csv_path = Path(args.tar).parent / f'{args.name}.csv'
+    csv_path = Path(args.csv_dir or Path(args.tar).parent) / f'{args.name}.csv'
     rows, failed = [], {'train': 0, 'validation': 0}
 
     def flush(batch, pool):
-        for name, arr in pool.imap(tokenize_bytes, batch, chunksize=32):  # imap keeps tar order
+        fn = tokenize_bytes_md5 if args.census else tokenize_bytes
+        for name, arr, *md5 in pool.imap(fn, batch, chunksize=32):  # imap keeps tar order
             file_id, segment = Path(name).stem.rsplit('_', 1)
             split = split_of(file_id)
+            md = metadata.get(file_id, {})
+            row = dict(file_id=file_id, segment=segment, split=split,
+                       genre=md.get('metadata', {}).get('genre', ''),
+                       composer=md.get('metadata', {}).get('composer', ''),
+                       audio_score=md.get('audio_scores', {}).get(segment, ''),
+                       n_notes=0 if arr is None else len(arr))
+            if args.census:
+                row.update(md5=md5[0], status='failed' if arr is None else 'kept')
             if arr is None:
                 failed[split] += 1
+                if args.census:
+                    rows.append(row)
                 continue
             writers[split].add(arr)
-            md = metadata.get(file_id, {})
-            rows.append(dict(file_id=file_id, segment=segment, split=split,
-                             genre=md.get('metadata', {}).get('genre', ''),
-                             composer=md.get('metadata', {}).get('composer', ''),
-                             audio_score=md.get('audio_scores', {}).get(segment, ''),
-                             n_notes=len(arr)))
+            rows.append(row)
 
     with tarfile.open(args.tar, 'r|gz') as tf, Pool(os.cpu_count()) as pool:
         batch, pbar = [], tqdm(desc='Tokenizing Aria', unit='file', total=None)

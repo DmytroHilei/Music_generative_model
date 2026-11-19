@@ -44,6 +44,7 @@ from musicar.data.loader import tokenize_tracks  # also imported from here by pr
 SPLITS = {'training': 'train', 'validation': 'validation', 'test': 'test'}  # inner zip prefix -> store split
 CATEGORIES = ('drums-only', 'no-drums', 'all-instruments-with-drums')
 CSV_FIELDS = ['md5', 'split', 'category', 'n_notes', 'n_programs']
+FAILED_FIELDS = ['md5', 'split', 'category', 'reason']
 
 
 def parse_args():
@@ -59,6 +60,9 @@ def parse_args():
     parser.add_argument('--min-free-gb', type=float, default=1.0, help='stop at a checkpoint when free disk is lower')
     parser.add_argument('--checkpoint', type=int, default=20_000, help='files between checkpoints')
     parser.add_argument('--workers', type=int, default=os.cpu_count())
+    parser.add_argument('--failed-csv', action='store_true',
+                        help='also write <work-dir>/<name>_failed.csv: md5, split, category, reason of every file not in '
+                             'the store (unparsable/empty, or over --max-bytes), for the census manifests')
     return parser.parse_args()
 
 
@@ -88,11 +92,15 @@ def iter_inner(outer, member, infos):
             yield info, info.compress_type, raw
 
 
+OVERSIZED = []  # (filename, size) of the .mid members skipped for --max-bytes, for --failed-csv
+
+
 def midi_infos(infos, max_bytes, categories=None):
     """The .mid members (of the wanted categories, if given) in header-offset order, i.e. archive order."""
-    return sorted((i for i in infos if i.filename.lower().endswith('.mid') and not i.filename.startswith('__MACOSX')
-                   and (categories is None or i.filename.split('/')[1] in categories) and i.file_size <= max_bytes),
-                  key=lambda i: i.header_offset)
+    mids = [i for i in infos if i.filename.lower().endswith('.mid') and not i.filename.startswith('__MACOSX')
+            and (categories is None or i.filename.split('/')[1] in categories)]
+    OVERSIZED.extend((i.filename, i.file_size) for i in mids if i.file_size > max_bytes)
+    return sorted((i for i in mids if i.file_size <= max_bytes), key=lambda i: i.header_offset)
 
 
 def iter_split(outer, member, categories, max_bytes):
@@ -162,9 +170,13 @@ def main():
     progress_path = work_dir / f'{args.name}_progress.json'
     progress = json.loads(progress_path.read_text()) if progress_path.exists() else {}
     csv_path = work_dir / f'{args.name}.csv'
+    failed_path = work_dir / f'{args.name}_failed.csv'
     if not progress:
         with open(csv_path, 'w', newline='', encoding='utf-8') as f:
             csv.DictWriter(f, fieldnames=CSV_FIELDS).writeheader()
+        if args.failed_csv:
+            with open(failed_path, 'w', newline='', encoding='utf-8') as f:
+                csv.DictWriter(f, fieldnames=FAILED_FIELDS).writeheader()
     categories = set(args.categories.split(','))
 
     outer = zipfile.ZipFile(os.path.expanduser(args.zip))
@@ -187,13 +199,18 @@ def main():
             store = ResumableStore(Path(args.cache_dir) / f'{args.name}_{split}', resume=state['files'] > 0)
             start = state['files']
             pbar = tqdm(desc=split, unit='file', total=expected, initial=start, smoothing=0.05)
-            rows = []
+            rows, failed_rows = [], []
+            OVERSIZED.clear()
 
             def save():
                 store.checkpoint()
                 with open(csv_path, 'a', newline='', encoding='utf-8') as f:
                     csv.DictWriter(f, fieldnames=CSV_FIELDS).writerows(rows)
                 rows.clear()
+                if args.failed_csv:
+                    with open(failed_path, 'a', newline='', encoding='utf-8') as f:
+                        csv.DictWriter(f, fieldnames=FAILED_FIELDS).writerows(failed_rows)
+                    failed_rows.clear()
                 progress[split] = state
                 progress_path.write_text(json.dumps(progress, indent=1))
 
@@ -210,6 +227,7 @@ def main():
                 category, filename = names[k]
                 if result is None:
                     state['failed'] += 1
+                    failed_rows.append(dict(md5=Path(filename).stem, split=split, category=category, reason='parse'))
                 else:
                     store.add(*result)
                     rows.append(dict(md5=Path(filename).stem, split=split, category=category,
@@ -226,6 +244,9 @@ def main():
                         return
             pbar.close()
             state['done'] = True
+            # oversized members are listed per split when the central directory is read (all of them, also on resume)
+            failed_rows.extend(dict(md5=Path(n).stem, split=split, category=n.split('/')[1] if '/' in n else '',
+                                    reason=f'oversized:{size}') for n, size in OVERSIZED)
             save()
             meta = store.close(state['failed'])
             print(f"{split}: {meta['n_files']:,} files, {meta['n_notes']:,} notes, {state['failed']} failed "
