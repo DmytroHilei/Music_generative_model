@@ -8,6 +8,7 @@ Checkpoint sync between the rented GPU and the Hugging Face Hub (two private mod
             python cloud/sync/ckpt.py status --run long_450m    # what is on the Hub
   instance: python cloud/sync/ckpt.py results --run aug --post-run-dir results/aug_sweep --auto-stop
                                                            # a folder -> <user>/aug-results, then stop (aug_all.sh)
+            python cloud/sync/ckpt.py weights --repo musicar-L  # released weights -> checkpoints/musicar-L/
 
 A push uploads ckpt.pt (full resumable state), model_bf16.pt (best val weights, if any), run.env (the machine/budget
 settings), the training log tail and state.json (iteration, time) in ONE commit to whichever of the two repos holds the
@@ -213,6 +214,27 @@ def results(args):
         stop_instance()
 
 
+def weights(args):
+    """Released weights: --repo <name>[,<name>] (<hf user>/<name>, or a full repo id) -> checkpoints/<name>/
+    model_bf16.pt + config.json, each checked against the sha256 the Hub keeps for it (setup_instance.sh WEIGHTS)."""
+    import hashlib
+    from huggingface_hub import hf_hub_download
+    hf = hub.api()
+    for name in args.repo.split(','):
+        repo = name if '/' in name else f'{hub.hf_user(hf)}/{name}'
+        out = hub.ROOT / 'checkpoints' / repo.split('/')[-1]
+        for info in hf.get_paths_info(repo, ['model_bf16.pt', 'config.json'], expand=True):
+            path = Path(hf_hub_download(repo, info.path, local_dir=out))
+            if info.lfs is not None:
+                h = hashlib.sha256()
+                with open(path, 'rb') as f:
+                    for chunk in iter(lambda: f.read(1 << 24), b''):
+                        h.update(chunk)
+                if h.hexdigest() != info.lfs.sha256:
+                    raise SystemExit(f'{path}: sha256 does not match {repo}/{info.path}; delete it and run again')
+            log(f'{repo}/{info.path} -> {path} ({path.stat().st_size / 1e6:.0f} MB, verified)')
+
+
 def stop_instance():
     """vast.ai: stop (not destroy) this instance after the final push, so idle GPU time isn't billed. Needs the
     CONTAINER_ID / CONTAINER_API_KEY variables vast.ai sets inside instances; elsewhere it only logs."""
@@ -227,8 +249,9 @@ def stop_instance():
 
 def main():
     p = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-    p.add_argument('command', choices=['push', 'pull', 'loop', 'status', 'results'])
+    p.add_argument('command', choices=['push', 'pull', 'loop', 'status', 'results', 'weights'])
     p.add_argument('--run', default='long_450m')
+    p.add_argument('--repo', default='musicar-L', help='weights: released model repo(s), <user>/<name> or full ids')
     p.add_argument('--out-dir', default=None, help='default checkpoints/<run>')
     p.add_argument('--log', default=None, help='training log whose tail is pushed (default logs/<run>.log)')
     p.add_argument('--pid-file', default=None, help='loop: wrapper pid file (default logs/<run>.wrapper.pid)')
@@ -243,7 +266,8 @@ def main():
     args.out_dir = args.out_dir or str(hub.ROOT / 'checkpoints' / args.run)
     args.log = args.log or str(hub.ROOT / 'logs' / f'{args.run}.log')
     args.pid_file = args.pid_file or str(hub.ROOT / 'logs' / f'{args.run}.wrapper.pid')
-    {'push': push, 'pull': pull, 'loop': loop, 'status': status, 'results': results}[args.command](args)
+    {'push': push, 'pull': pull, 'loop': loop, 'status': status, 'results': results,
+     'weights': weights}[args.command](args)
 
 
 if __name__ == '__main__':

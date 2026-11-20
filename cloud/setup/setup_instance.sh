@@ -6,6 +6,8 @@
 #   bash cloud/setup/setup_instance.sh
 # Then: .venv/bin/python cloud/setup/preflight.py --hours <GPU hours>   and   cloud/run/launch.sh
 # DATA_STORES=a,b,c: download / verify only those stores (default: all in cloud/sync/hub.py)
+# WEIGHTS=a,b: also released model weights from the Hub (<hf user>/<name> or a full repo id) into checkpoints/<name>/,
+#   sha256-checked (cloud/sync/ckpt.py weights), e.g. WEIGHTS=musicar-L for data_prep/datasets/synth_store.py
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 ROOT=$(pwd)
@@ -66,6 +68,10 @@ if [ ! -f data/cache/.verified ]; then
     touch data/cache/.verified
 else
     echo "already verified ($(date -r data/cache/.verified '+%F %T'))"
+fi
+if [ -n "${WEIGHTS:-}" ]; then
+    step "5b/6 weights from the Hub: $WEIGHTS"
+    .venv/bin/python cloud/sync/ckpt.py weights --repo "$WEIGHTS"
 fi
 
 step "6/6 accounts"

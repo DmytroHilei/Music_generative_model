@@ -24,6 +24,13 @@ DEFAULT_CSV_STYLE = {'combined': 'classical'}   # style of CSV sources without a
 DEFAULT_STORE_STYLE = 'none'
 
 
+def file_subset(store_name, n_files, frac):
+    """(n_files,) bool: a fixed share of a store's files, drawn with a seed from the store's directory name (e.g.
+    'gigamidi_replay_train'): the same files in every run, and a smaller share is a subset of a larger one."""
+    seed = int(hashlib.md5(store_name.encode()).hexdigest()[:8], 16)
+    return np.random.default_rng(seed).random(n_files) < frac
+
+
 def load_styles(path='data/styles.json'):
     return json.loads(Path(path).read_text())
 
@@ -240,9 +247,10 @@ class NoteWindowDataset(Dataset):
                      Transposition applies to every store regardless
         aug_transpose: training only: (lowest, highest) transposition in semitones per window, drawn uniformly and
                      narrowed so no note leaves 0..127; (-5, 6) covers all 12 keys
-        file_frac:   keep only this share of each store's files, drawn with a fixed seed per store name: the same
-                     files in every run and seed, and a smaller share is a subset of a larger one (repeated-data tests:
-                     0.25 of a store over 4 passes)
+        file_frac:   keep only this share of each store's files (file_subset: a fixed draw per store name, the same
+                     files in every run and seed, a smaller share a subset of a larger one), for repeated-data tests:
+                     0.25 of a store over 4 passes. One value for every store, or one per store (same order as
+                     source_weights), e.g. [0.25, 1] = a quarter of the first store, all of the second
         pad_short:   keep files shorter than the window (>= min_notes notes) as one whole-file window, zero-padded at
                      the end with masked (-1) targets; a short file is sampled as often per note as a long one. Without
                      it they are dropped (at block_size 2048: 99% of the Ukrainian songs, 57% of Aria's notes)
@@ -322,8 +330,8 @@ class NoteWindowDataset(Dataset):
         self.aug_stores = aug_stores
         self.aug_transpose = tuple(aug_transpose)
         assert len(self.aug_transpose) == 2 and self.aug_transpose[0] <= 0 <= self.aug_transpose[1], aug_transpose
-        assert 0 < file_frac <= 1, file_frac
-        self.file_frac = file_frac
+        self.file_frac = [float(f) for f in file_frac] if isinstance(file_frac, (list, tuple)) else [float(file_frac)]
+        assert all(0 < f <= 1 for f in self.file_frac), file_frac
         self.cache_dir = Path(cache_dir)
         self.eval_stride = eval_stride
         self.programs = programs
@@ -382,6 +390,8 @@ class NoteWindowDataset(Dataset):
         self.remain = remain
         self.elapsed = elapsed and remain
 
+        assert len(self.file_frac) in (1, len(self.store_dirs)), \
+            f"{len(self.file_frac)} file_frac values for {len(self.store_dirs)} stores"
         store_ids, starts, lengths, styles_kept, file_ids = [], [], [], [], []
         for i, store in enumerate(self.store_dirs):
             offsets = np.load(store / "offsets.npy")
@@ -394,10 +404,10 @@ class NoteWindowDataset(Dataset):
                 labeled[[f for f in self.captioners[i].labels if self.captioners[i].labeled(f)]] = True
                 keep &= labeled if store_tiers[i] == 'labeled' else ~labeled
                 print(f"{store.name}#{store_tiers[i]}: {int(keep.sum()):,} files")
-            if self.file_frac < 1:
-                seed = int(hashlib.md5(store.name.encode()).hexdigest()[:8], 16)
-                keep &= np.random.default_rng(seed).random(len(n)) < self.file_frac
-                print(f"{store.name}: file_frac {self.file_frac:g} keeps {int(keep.sum()):,} files, "
+            frac = self.file_frac[i] if len(self.file_frac) > 1 else self.file_frac[0]
+            if frac < 1:
+                keep &= file_subset(store.name, len(n), frac)
+                print(f"{store.name}: file_frac {frac:g} keeps {int(keep.sum()):,} files, "
                       f"{int((n[keep] - 2 * self.pad).sum()):,} notes")
             file_ids.append(np.flatnonzero(keep))
             store_ids.append(np.full(int(keep.sum()), i, dtype=np.int32))

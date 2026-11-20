@@ -135,6 +135,11 @@ def test_file_frac():
         assert frac[0.25].num_notes() == 20 * len(quarter)
         random.seed(0)
         assert all(int(frac[0.25][0][0][0][0]) in quarter for _ in range(200)), 'windows only from the kept files'
+        make_store(Path(d) / 'other_train', [notes(20, i) for i in range(10)])
+        both = NoteWindowDataset(f'store:{d}/toy,store:{d}/other', root_dir=d, split='train', block_size=16,
+                                 cache_dir=d, file_frac=[0.25, 1])
+        assert set(both.file_ids[both.store_ids == 0].tolist()) == quarter and (both.store_ids == 1).sum() == 10, \
+            'one share per store: a quarter of the first, all of the second'
 
 
 def test_conditions_and_collate():

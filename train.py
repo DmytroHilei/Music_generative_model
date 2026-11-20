@@ -95,7 +95,7 @@ boundary_end = -1.0       # ... at a piece's end (-1 = boundary_frac / 2); the o
 aug_tempo = 0.0           # training: time stretch up to x(1+aug_tempo) either way per window (0 = off)
 aug_transpose = '-5,5'    # training: lowest,highest transposition in semitones per window; '-5,6' = all 12 keys
 aug_stores = ''           # e.g. '1,0': which train stores get tempo aug (same order as source_weights); '' = all
-train_file_frac = 1.0     # training: keep a fixed share of each train store's files (same files every run): repeated-data tests
+train_file_frac = '1'     # training: a fixed share of each train store's files (same files every run), one value or one per store ('0.25,1')
 source_weights = ''       # e.g. '0.8,0.2': sampling weight per train store (CSVs = one store, then each store:); '' = by size
 batch_size = 6
 block_size = 512
@@ -304,7 +304,7 @@ train_dataset = NoteWindowDataset(csv_path, split='train', block_size=block_size
                                pack_short=pack_short, caption_dropout=caption_dropout, section_dropout=section_dropout,
                                change_frac=section_change_frac, change_min=section_change_min,
                                counterfactual=section_cf_weight > 0, splice_frac=section_splice_frac,
-                               aug_transpose=as_list(aug_transpose, int), file_frac=train_file_frac,
+                               aug_transpose=as_list(aug_transpose, int), file_frac=as_list(train_file_frac, float),
                                aug_stores=as_list(aug_stores, int), source_weights=as_list(source_weights, float))
 if hyp:
     train_dataset = hyp.dataset(train_dataset)

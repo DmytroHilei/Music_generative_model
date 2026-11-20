@@ -4,20 +4,26 @@ scale ladder's recipe (config/pretrain/scale_ladder.py) on a fixed quarter of th
 (--train_file_frac=0.25: 25,383 files, 41.5M notes), 4,883 iterations = 160M notes seen = ~3.9 passes. The arm
 'fresh' is the fresh-data reference on the same machine: the whole store (167.9M notes) for the same iterations,
 under one pass (the laptop's scale ladder 42M_160M run: CE 2.426). Repeat penalty = control - fresh; an arm's "won
-back" = the share of it the arm recovers.
+back" = the share of it the arm recovers (over 100% = better than fresh data).
+'synth25' takes a quarter of its windows from musicar-L's continuations of real openings
+(data_prep/datasets/synth_store.py -> data/cache/synth_musicar_l_train; prompts from the same quarter of the replay
+files), the rest from the replay quarter as in control. --size 108M runs the same arms on the ladder's 108M: with
+42M it shows whether what musicar-L's samples add shrinks as the student nears the teacher's size.
 
-control and fresh run first (every seed). If the repeat penalty is under --min-gap, the queue stops: there is nothing
-to win back at this many passes, so the arms could not separate (then --frac 0.125 = ~8 passes, or no search). Arms
-then run seed by seed, so a stopped queue still compares every arm on the first seed. A failed run is logged, the
-queue goes on, and the next start tries it again. Each run's evaluations go to results/aug_sweep/runs.json and the
-table to logs/aug_sweep.md; its checkpoint directory is deleted. --micro 16 = the same 32,768 notes per step as 16 x 1
-(a 5090) instead of the config's 4 x 4; eval_iters follows, so validation keeps the same 1,200 windows.
+control and fresh run first (every seed). If the repeat penalty is under --min-gap, the queue stops (--force runs the
+arms anyway): there is nothing to win back at this many passes, so the arms could not separate (then --frac 0.125 =
+~8 passes, or no search). Arms then run seed by seed, so a stopped queue still compares every arm on the first seed.
+A failed run is logged, the queue goes on, and the next start tries it again. Each run's evaluations go to
+results/aug_sweep/runs.json and the table to logs/aug_sweep.md (logs/aug_sweep_<size>.md for other sizes); its
+checkpoint directory is deleted. --micro 16 = the same 32,768 notes per step as 16 x 1 (a 5090) instead of the
+config's 4 x 4; eval_iters follows, so validation keeps the same 1,200 windows.
 
     .venv/bin/python tools/sweeps/aug_sweep.py --list
     .venv/bin/python tools/sweeps/aug_sweep.py                 # control + fresh, the gate, then every arm missing
     .venv/bin/python tools/sweeps/aug_sweep.py --smoke         # 40 iterations of every arm, nothing recorded
     .venv/bin/python tools/sweeps/aug_sweep.py --only family   # arms whose name contains the text
     .venv/bin/python tools/sweeps/aug_sweep.py --micro 16      # on the 5090 (cloud/run/aug_all.sh)
+    .venv/bin/python tools/sweeps/aug_sweep.py --size 108M --arms fresh,control,synth25 --force --micro 16
 """
 import argparse
 import json
@@ -33,12 +39,12 @@ ROOT = Path(__file__).resolve().parents[2]
 OUT = ROOT / 'results/aug_sweep'
 RUNS = OUT / 'runs.json'
 LOGS = ROOT / 'logs/aug_sweep'
-TABLE = ROOT / 'logs/aug_sweep.md'
-SIZE = '42M'
 ITERS = round(160e6 / NOTES_PER_STEP)  # 4,883, the ladder's 160M budget
 ROWS, VAL_WINDOWS = 16, 1200  # rows per step (config: 4 x 4) and validation windows (300 x 4)
 SEEDS = (1337, 2)
 REF = 'fresh'
+SYNTH_STORE = 'data/cache/synth_musicar_l'  # data_prep/datasets/synth_store.py --out
+SYNTH = {'synth25': 0.25}  # arm: the share of windows from SYNTH_STORE
 ARMS = {  # census doc idea numbers
     REF: [],  # the whole store (file_frac 1): the fresh-data reference
     'control': [],
@@ -48,6 +54,8 @@ ARMS = {  # census doc idea numbers
     'octave': ['--hypothesis=aug_octave:rows=0.5'],  # idea 7: one track of a multi-track window moves +-12
     'family': ['--hypothesis=aug_family:rows=0.5'],  # idea 6: programs permuted within their GM family
     'keys12': ['--aug_transpose=-5,6'],  # all 12 keys instead of +-5
+    **{arm: [f'--csv_path=store:data/cache/gigamidi_replay,store:{SYNTH_STORE}',  # idea 12: musicar-L's samples
+             f'--source_weights={1 - share:g},{share:g}'] for arm, share in SYNTH.items()},
 }
 
 
@@ -64,8 +72,18 @@ def save(name, rec):
     tmp.replace(RUNS)
 
 
-def run_name(arm, seed, frac):
-    return f'{arm}_s{seed}' + ('' if frac == 0.25 or arm == REF else f'_f{frac:g}')
+def run_name(arm, seed, frac, size='42M'):
+    return (f'{arm}_s{seed}' + ('' if frac == 0.25 or arm == REF else f'_f{frac:g}')
+            + ('' if size == '42M' else f'_{size}'))
+
+
+def table_path(size):
+    return ROOT / ('logs/aug_sweep.md' if size == '42M' else f'logs/aug_sweep_{size}.md')
+
+
+def file_frac(arm, frac):
+    """--train_file_frac of an arm: the whole store for the reference, all of the synthetic store."""
+    return 1.0 if arm == REF else f'{frac:g},1' if arm in SYNTH else frac
 
 
 def micro_args(micro, eval_iters=None):
@@ -74,13 +92,13 @@ def micro_args(micro, eval_iters=None):
             f'--eval_iters={eval_iters or VAL_WINDOWS // micro}']
 
 
-def train(arm, seed, file_frac, iters, out, log, extra=()):
+def train(arm, seed, frac, size, iters, out, log, extra=()):
     """One train.py run -> its exit code; the log holds everything. The checkpoint directory is deleted."""
     LOGS.mkdir(parents=True, exist_ok=True)
     print(time.strftime('%H:%M'), log.name, flush=True)
-    cmd = ['.venv/bin/python', 'train.py', CONFIG, *[f'--{k}={v}' for k, v in SIZES[SIZE].items()],
-           f'--train_file_frac={file_frac}', f'--seed={seed}', f'--max_iters={iters}', f'--lr_decay_iters={iters}',
-           f'--out_dir={out.relative_to(ROOT)}', *ARMS[arm], *extra]
+    cmd = ['.venv/bin/python', 'train.py', CONFIG, *[f'--{k}={v}' for k, v in SIZES[size].items()],
+           f'--train_file_frac={file_frac(arm, frac)}', f'--seed={seed}', f'--max_iters={iters}',
+           f'--lr_decay_iters={iters}', f'--out_dir={out.relative_to(ROOT)}', *ARMS[arm], *extra]
     with open(log, 'w') as f:
         code = subprocess.run(cmd, cwd=ROOT, stdout=f, stderr=subprocess.STDOUT).returncode
     shutil.rmtree(out, ignore_errors=True)
@@ -92,28 +110,28 @@ def unique_notes(text):
     return int(m.group(1).replace(',', '')) if m else None
 
 
-def run(arm, seed, frac, micro):
-    name = run_name(arm, seed, frac)
-    file_frac = 1.0 if arm == REF else frac
+def run(arm, seed, frac, size, micro):
+    name = run_name(arm, seed, frac, size)
     log = LOGS / f'{name}.log'
     t0 = time.time()
-    code = train(arm, seed, file_frac, ITERS, ROOT / 'checkpoints' / f'aug_{name}', log,
+    code = train(arm, seed, frac, size, ITERS, ROOT / 'checkpoints' / f'aug_{name}', log,
                  [*micro_args(micro), f'--eval_interval={ITERS // 4}'])
     evals, params = parse(log)
+    rec = dict(arm=arm, seed=seed, frac=1.0 if arm == REF else frac, size=size, micro=micro)
     if code or not evals or evals[-1]['step'] < ITERS - 1:
         print(f'  failed (exit {code}), see {log}', flush=True)
-        save(name, dict(arm=arm, seed=seed, frac=file_frac, micro=micro, failed=True, code=code))
+        save(name, dict(rec, failed=True, code=code))
         return
-    save(name, dict(arm=arm, seed=seed, frac=file_frac, micro=micro, params=params, notes=ITERS * NOTES_PER_STEP,
-                    iters=ITERS, unique_notes=unique_notes(log.read_text(errors='replace')),
+    save(name, dict(rec, params=params, notes=ITERS * NOTES_PER_STEP, iters=ITERS,
+                    unique_notes=unique_notes(log.read_text(errors='replace')),
                     minutes=round((time.time() - t0) / 60, 1), curve=[(e['step'], e['ce']) for e in evals],
                     **evals[-1]))
     print(f'  CE {evals[-1]["ce"]:.3f}', flush=True)
 
 
-def finished(runs, arm, frac):
+def finished(runs, arm, frac, size):
     """{seed: record} of the finished runs of an arm."""
-    return {s: r for s in SEEDS if (r := runs.get(run_name(arm, s, frac))) and not r.get('failed')}
+    return {s: r for s in SEEDS if (r := runs.get(run_name(arm, s, frac, size))) and not r.get('failed')}
 
 
 def mean(xs):
@@ -121,37 +139,40 @@ def mean(xs):
     return sum(xs) / len(xs) if xs else None
 
 
-def penalty(runs, frac):
+def penalty(runs, frac, size):
     """control mean - fresh mean, once both finished every seed, else None."""
-    ctrl, ref = finished(runs, 'control', frac), finished(runs, REF, frac)
+    ctrl, ref = finished(runs, 'control', frac, size), finished(runs, REF, frac, size)
     if len(ctrl) < len(SEEDS) or len(ref) < len(SEEDS):
         return None
     return mean(r['ce'] for r in ctrl.values()) - mean(r['ce'] for r in ref.values())
 
 
-def table(frac, note=''):
+def table(frac, size, note=''):
     runs = load()
-    ctrl = finished(runs, 'control', frac)
-    gap = penalty(runs, frac)
-    unique = next((r['unique_notes'] for r in runs.values() if r.get('frac') == frac and r.get('unique_notes')), None)
+    ctrl = finished(runs, 'control', frac, size)
+    gap = penalty(runs, frac, size)
+    unique = next((r['unique_notes'] for r in runs.values() if r.get('frac') == frac and r.get('unique_notes')
+                   and r.get('size', '42M') == size), None)
     passes = f' (~{ITERS * NOTES_PER_STEP / unique:.1f} passes over {unique / 1e6:.1f}M notes)' if unique else ''
-    micro = next((r['micro'] for r in runs.values() if r.get('micro')), None)
+    micro = next((r['micro'] for r in runs.values() if r.get('micro') and r.get('size', '42M') == size), None)
     try:
-        ladder = f' The laptop\'s scale ladder 42M_160M (micro 4): CE {json.loads(LADDER_RUNS.read_text())["42M_160M"]["ce"]:.3f}.'
+        ref = json.loads(LADDER_RUNS.read_text())[f'{size}_160M']['ce']
+        ladder = f' The laptop\'s scale ladder {size}_160M (micro 4): CE {ref:.3f}.'
     except (OSError, KeyError, ValueError):
         ladder = ''
     fmt = lambda v, f: '' if v is None else format(v, f)  # noqa: E731
-    lines = [f'# Augmentation search (tools/sweeps/aug_sweep.py): {SIZE}, {frac:g} of the GigaMIDI replay files, '
+    lines = [f'# Augmentation search (tools/sweeps/aug_sweep.py): {size}, {frac:g} of the GigaMIDI replay files, '
              f'{ITERS:,} iterations = 160M notes seen{passes}, micro-batch {micro}', '',
              f'{REF} = the whole store under one pass. Repeat penalty = control mean - {REF} mean = '
-             f'{fmt(gap, "+.3f") or "(unfinished)"}.{ladder}',
+             f'{fmt(gap, "+.3f") or "(unfinished)"}.{ladder} synth arms: that share of the windows from '
+             f'{SYNTH_STORE}_train.',
              '', '| arm | ' + ' | '.join(f's{s}' for s in SEEDS) + ' | mean | vs control | won back | prog CE |',
              '|---' * (len(SEEDS) + 5) + '|']
     for arm in ARMS:
-        done = finished(runs, arm, frac)
-        if not any(run_name(arm, s, frac) in runs for s in SEEDS):
+        done = finished(runs, arm, frac, size)
+        if not any(run_name(arm, s, frac, size) in runs for s in SEEDS):
             continue
-        cells = [fmt(done[s]['ce'], '.3f') if s in done else 'failed' if run_name(arm, s, frac) in runs else ''
+        cells = [fmt(done[s]['ce'], '.3f') if s in done else 'failed' if run_name(arm, s, frac, size) in runs else ''
                  for s in SEEDS]
         common = [s for s in done if s in ctrl]
         vs = mean(done[s]['ce'] - ctrl[s]['ce'] for s in common) if arm not in ('control', REF) else None
@@ -161,70 +182,79 @@ def table(frac, note=''):
         lines.append('| ' + ' | '.join(row) + ' |')
     lines += ['', 'vs control: mean difference over the seeds both finished (negative = better). won back = '
               '-(vs control) / repeat penalty.'] + (['', note] if note else [])
-    TABLE.write_text('\n'.join(lines) + '\n')
+    table_path(size).write_text('\n'.join(lines) + '\n')
 
 
-def smoke(arms, frac, micro):
+def smoke(arms, frac, size, micro):
     """40 iterations of each arm with fp8 + compile: the hook loads, training runs, the eval is finite."""
     for arm in arms:
         if arm == REF:  # the plain config on the whole store: control covers it
             continue
-        log = LOGS / f'smoke_{arm}.log'
-        code = train(arm, SEEDS[0], frac, 40, ROOT / 'checkpoints' / f'aug_smoke_{arm}', log,
+        if arm in SYNTH and not (ROOT / f'{SYNTH_STORE}_train' / 'meta.json').exists():
+            print(f'  skipped {arm}: no {SYNTH_STORE}_train yet', flush=True)
+            continue
+        log = LOGS / f'smoke_{arm}{"" if size == "42M" else "_" + size}.log'
+        code = train(arm, SEEDS[0], frac, size, 40, ROOT / 'checkpoints' / f'aug_smoke_{arm}', log,
                      [*micro_args(micro, eval_iters=20), '--warmup_iters=5', '--eval_interval=40'])
         evals, _ = parse(log)
         text = log.read_text(errors='replace')
         hyp = next((ln for ln in text.splitlines() if ln.startswith('hypothesis:')), '')
         wants_hyp = any(x.startswith('--hypothesis') for x in ARMS[arm])
         ok = (code == 0 and evals and evals[-1]['step'] >= 39 and unique_notes(text) is not None
-              and bool(hyp) == wants_hyp)
+              and bool(hyp) == wants_hyp and (arm not in SYNTH or f'{Path(SYNTH_STORE).name}_train' in text))
         print(f'  {"ok" if ok else "FAILED"}  exit {code}  CE {evals[-1]["ce"] if evals else "-"}  {hyp}', flush=True)
 
 
 def main():
     p = argparse.ArgumentParser()
     p.add_argument('--list', action='store_true')
-    p.add_argument('--only', default='')
+    p.add_argument('--only', default='', help='arms whose name contains the text')
+    p.add_argument('--arms', default='', help='comma-separated arm names (default: all)')
     p.add_argument('--smoke', action='store_true')
     p.add_argument('--frac', type=float, default=0.25)
+    p.add_argument('--size', default='42M', choices=list(SIZES))
     p.add_argument('--micro', type=int, default=4, help='rows per micro-batch (16 / micro accumulation steps)')
     p.add_argument('--min-gap', type=float, default=0.01)
     p.add_argument('--force', action='store_true', help='run the arms even if the gate fails')
     a = p.parse_args()
     micro_args(a.micro)  # checks it divides 16 and 1,200
-    arms = [arm for arm in ARMS if a.only in arm]
+    wanted = [x for x in a.arms.split(',') if x]
+    assert all(x in ARMS for x in wanted), f'unknown arms {set(wanted) - set(ARMS)}'
+    arms = [arm for arm in ARMS if a.only in arm and (not wanted or arm in wanted)]
     if a.smoke:
-        return smoke(arms, a.frac, a.micro)
+        return smoke(arms, a.frac, a.size, a.micro)
     if a.list:
         runs = load()
         for seed in SEEDS:
             for arm in arms:
-                r = runs.get(run_name(arm, seed, a.frac))
-                print(f'{run_name(arm, seed, a.frac):20s}', '-' if not r else 'failed' if r.get('failed') else
+                name = run_name(arm, seed, a.frac, a.size)
+                r = runs.get(name)
+                print(f'{name:24s}', '-' if not r else 'failed' if r.get('failed') else
                       f'CE {r["ce"]:.3f}  prog {r["prog"]:.3f}  {r["minutes"]} min')
         return
 
     def todo(arm, seed):  # missing or failed (a failed run is tried again on the next start)
-        r = load().get(run_name(arm, seed, a.frac))
+        r = load().get(run_name(arm, seed, a.frac, a.size))
         return arm in arms and (r is None or r.get('failed', False))
 
     for seed in SEEDS:
         for arm in ('control', REF):
             if todo(arm, seed):
-                run(arm, seed, a.frac, a.micro)
-                table(a.frac)
-    gap = penalty(load(), a.frac)
-    if gap is None or (gap < a.min_gap and not a.force):
+                run(arm, seed, a.frac, a.size, a.micro)
+                table(a.frac, a.size)
+    gap = penalty(load(), a.frac, a.size)
+    if not a.force and (gap is None or gap < a.min_gap):
         note = f'Stopped at the gate: repeat penalty {gap if gap is None else round(gap, 3)}, needed {a.min_gap}.'
-        table(a.frac, note)
+        table(a.frac, a.size, note)
         print(note)
         return
-    print(f'gate passed: repeat penalty {gap:+.3f}', flush=True)
+    print(f'gate: repeat penalty {gap if gap is None else round(gap, 3)}' + (' (--force)' if a.force else ''),
+          flush=True)
     for seed in SEEDS:
         for arm in ARMS:
             if arm not in ('control', REF) and todo(arm, seed):
-                run(arm, seed, a.frac, a.micro)
-                table(a.frac)
+                run(arm, seed, a.frac, a.size, a.micro)
+                table(a.frac, a.size)
 
 
 if __name__ == '__main__':

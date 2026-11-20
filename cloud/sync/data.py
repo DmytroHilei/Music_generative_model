@@ -5,8 +5,8 @@ Move the token stores between the laptop and the rented GPU through a private Hu
   instance: python cloud/sync/data.py download     # cloud/setup/setup_instance.sh runs this and then `verify`
             python cloud/sync/data.py verify       # every file present, right size, right sha256
   --stores on download / verify: only those stores (+ the label / caption tables), e.g. the ones a run reads
-  upload --stores X --merge: add or refresh store X alone, the rest of the manifest as it is on the Hub
-            (e.g. gigamidi_replay_train for tools/sweeps/aug_sweep.py)
+  upload --stores X --merge: add or refresh store X and its own label / caption tables alone, the rest of the
+            manifest as it is on the Hub (e.g. gigamidi_replay_train for tools/sweeps/aug_sweep.py)
 
 The repo holds data/cache/<store>/... for the stores in cloud/sync/hub.py, their label / caption tables (labels/,
 captions/ from --labels-dir / --captions-dir; on the instance data/labels and data/captions link to them) plus
@@ -36,11 +36,12 @@ def upload(args):
     if len(local) < len(stores) or args.merge:
         from huggingface_hub import hf_hub_download
         remote_manifest = json.loads(Path(hf_hub_download(repo, hub.MANIFEST, repo_type='dataset')).read_text())
-    if args.merge:  # only these stores; every other entry (other stores, label / caption tables) stays as on the Hub
+    if args.merge:  # only these stores and their own label / caption tables; every other entry stays as on the Hub
         if set(stores) - set(local):
             raise SystemExit(f'--merge: {sorted(set(stores) - set(local))} not in {args.cache_dir}')
-        kept = {rel: e for rel, e in remote_manifest.items() if rel.split('/')[0] not in set(stores)}
-        tables = {}
+        tables = hub.label_files(args.labels_dir, args.captions_dir, stores)
+        kept = {rel: e for rel, e in remote_manifest.items()
+                if rel.split('/')[0] not in set(stores) and rel not in tables}
     else:
         kept = {rel: e for rel, e in remote_manifest.items() if rel.split('/')[0] in set(stores) - set(local)}
         for store in set(stores) - set(local):
@@ -96,6 +97,14 @@ def upload(args):
                 print(f'  failed: {type(e).__name__}: {str(e)[:200]}', flush=True)
                 if attempt == 3:
                     raise SystemExit(f'{store}: upload failed 3 times; re-run the same command to continue')
+    if args.merge:  # the stores' own tables one by one (the labels/ folder holds every other store's tables too)
+        for rel, path in tables.items():
+            if remote_manifest.get(rel, {}).get('sha256') == manifest[rel]['sha256']:
+                print(f'{rel}: already on the Hub', flush=True)
+                continue
+            print(f'{rel}: uploading {manifest[rel]["size"] / 1e6:.1f} MB', flush=True)
+            hf.upload_file(path_or_fileobj=str(path), path_in_repo=rel, repo_id=repo, repo_type='dataset',
+                           commit_message=rel)
     hf.upload_file(path_or_fileobj=str(staging / hub.MANIFEST), path_in_repo=hub.MANIFEST, repo_id=repo,
                    repo_type='dataset', commit_message='manifest')
     remote = remote_sizes()
@@ -166,8 +175,8 @@ def main():
     p.add_argument('--staging', default=str(hub.ROOT / 'data' / 'hf_upload'))
     p.add_argument('--workers', type=int, default=8)
     p.add_argument('--quick', action='store_true', help='verify: sizes only, no sha256')
-    p.add_argument('--merge', action='store_true', help='upload: only the --stores given (all local); every other '
-                   'manifest entry, label / caption tables included, stays as on the Hub')
+    p.add_argument('--merge', action='store_true', help='upload: only the --stores given (all local) and their own '
+                   'label / caption tables; every other manifest entry stays as on the Hub')
     args = p.parse_args()
     {'upload': upload, 'download': download, 'verify': verify}[args.command](args)
 
