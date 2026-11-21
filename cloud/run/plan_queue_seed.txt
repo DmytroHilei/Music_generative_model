@@ -30,49 +30,49 @@ min=63 need=tests/tools/test_aug_sweep.py disk=6 tier=ESS id=A-S4 :: $A --size 2
 gate=frontier
 min=48.6 need=tests/tools/test_aug_sweep.py,data/cache/cdisc_t1* tier=ESS id=B-T1 :: $A --arms disc_control,disc_fresh,disc_fresh120
 gate=discover
-min=15.4 need=tests/tools/test_aug_sweep.py,data/cache/gigamidi_pool_train tier=ESS id=A-B1 :: $A --size 6M --arms fresh_census,sub168_census --force
-min=13.1 need=tests/tools/test_aug_sweep.py,data/cache/gigamidi_pool_train tier=ESS id=A-R2 :: $A --size 6M --notes 320e6 --arms control,fresh_census --seeds 1337 --force
-min=24.5 need=tests/tools/test_aug_sweep.py,data/cache/gigamidi_pool_train tier=ESS id=A-R3 :: $A --size 6M --notes 640e6 --arms control,fresh_census --seeds 1337 --force
-min=44.3 need=tests/tools/test_aug_sweep.py,data/cache/gigamidi_pool_train tier=ESS id=A-C2 :: $A --size 20M --notes 640e6 --arms full,fresh_census --seeds 1337 --force
+min=15.4 need=tests/tools/test_aug_sweep.py,data/cache/gigamidi_pool_train/VERIFIED tier=ESS id=A-B1 :: $A --size 6M --arms fresh_census,sub168_census --force
+min=13.1 need=tests/tools/test_aug_sweep.py,data/cache/gigamidi_pool_train/VERIFIED tier=ESS id=A-R2 :: $A --size 6M --notes 320e6 --arms control,fresh_census --seeds 1337 --force
+min=24.5 need=tests/tools/test_aug_sweep.py,data/cache/gigamidi_pool_train/VERIFIED tier=ESS id=A-R3 :: $A --size 6M --notes 640e6 --arms control,fresh_census --seeds 1337 --force
+min=44.3 need=tests/tools/test_aug_sweep.py,data/cache/gigamidi_pool_train/VERIFIED tier=ESS id=A-C2 :: $A --size 20M --notes 640e6 --arms full,fresh_census --seeds 1337 --force
 gate=frontier
 # iso block (block C) in isoflop.py order
-min=3.3 need=tools/sweeps/isoflop.py,data/cache/gigamidi_pool_train tier=ESS id=C-S0 :: $PY tools/sweeps/isoflop.py --smoke
-min=8.3 need=tools/sweeps/isoflop.py,data/cache/gigamidi_pool_train tier=ESS id=C-24 :: $PY tools/sweeps/isoflop.py --arms 24
-min=8.3 need=tools/sweeps/isoflop.py,data/cache/gigamidi_pool_train tier=ESS id=C-25 :: $PY tools/sweeps/isoflop.py --arms 25
-min=9.9 need=tools/sweeps/isoflop.py,data/cache/gigamidi_pool_train tier=ESS id=C-27 :: $PY tools/sweeps/isoflop.py --arms 27
-min=8.3 need=tools/sweeps/isoflop.py,data/cache/gigamidi_pool_train tier=ESS id=C-26 :: $PY tools/sweeps/isoflop.py --arms 26
-min=15.7 need=tools/sweeps/isoflop.py,data/cache/gigamidi_pool_train disk=1 tier=ESS id=C-1 :: $PY tools/sweeps/isoflop.py --arms 1
-min=14.7 need=tools/sweeps/isoflop.py,data/cache/gigamidi_pool_train disk=1 tier=ESS id=C-2 :: $PY tools/sweeps/isoflop.py --arms 2
-min=12.4 need=tools/sweeps/isoflop.py,data/cache/gigamidi_pool_train disk=1 tier=ESS id=C-3 :: $PY tools/sweeps/isoflop.py --arms 3
-min=10.6 need=tools/sweeps/isoflop.py,data/cache/gigamidi_pool_train disk=1 tier=ESS id=C-4 :: $PY tools/sweeps/isoflop.py --arms 4
-min=8.9 need=tools/sweeps/isoflop.py,data/cache/gigamidi_pool_train disk=1 tier=ESS id=C-5 :: $PY tools/sweeps/isoflop.py --arms 5
-min=7.8 need=tools/sweeps/isoflop.py,data/cache/gigamidi_pool_train disk=1 tier=ESS id=C-6 :: $PY tools/sweeps/isoflop.py --arms 6
-min=14.5 need=tools/sweeps/isoflop.py,data/cache/gigamidi_pool_train,data/cache/cdisc_v* tier=ESS id=B-T4 :: $PY tools/sweeps/isoflop.py --panel 1-6
-min=8.5 need=tools/sweeps/isoflop.py,data/cache/gigamidi_pool_train tier=ESS id=C-23 :: $PY tools/sweeps/isoflop.py --arms 23
-min=15.7 need=tools/sweeps/isoflop.py,data/cache/gigamidi_pool_train tier=ESS id=C-18 :: $PY tools/sweeps/isoflop.py --arms 18
-min=10.6 need=tools/sweeps/isoflop.py,data/cache/gigamidi_pool_train tier=ESS id=C-19 :: $PY tools/sweeps/isoflop.py --arms 19
-min=7.8 need=tools/sweeps/isoflop.py,data/cache/gigamidi_pool_train tier=ESS id=C-20 :: $PY tools/sweeps/isoflop.py --arms 20
-min=8.9 need=tools/sweeps/isoflop.py,data/cache/gigamidi_pool_train tier=ESS id=C-21 :: $PY tools/sweeps/isoflop.py --arms 21
-min=23.5 need=tools/sweeps/isoflop.py,data/cache/gigamidi_pool_train tier=REC id=C-LIT3 :: $PY tools/sweeps/isoflop.py --arms lit3
-min=3 need=tools/sweeps/isoflop.py,data/cache/gigamidi_pool_train tier=ESS id=C-G1 :: $PY tools/sweeps/isoflop.py --gate 1
-min=30.6 need=tools/sweeps/isoflop.py,data/cache/gigamidi_pool_train disk=1 tier=ESS id=C-7 :: $PY tools/sweeps/isoflop.py --arms 7
-min=25.8 need=tools/sweeps/isoflop.py,data/cache/gigamidi_pool_train disk=1 tier=ESS id=C-8 :: $PY tools/sweeps/isoflop.py --arms 8
-min=21.7 need=tools/sweeps/isoflop.py,data/cache/gigamidi_pool_train disk=1 tier=ESS id=C-9 :: $PY tools/sweeps/isoflop.py --arms 9
-min=18.9 need=tools/sweeps/isoflop.py,data/cache/gigamidi_pool_train disk=1 tier=ESS id=C-10 :: $PY tools/sweeps/isoflop.py --arms 10
-min=21.5 need=tools/sweeps/isoflop.py,data/cache/gigamidi_pool_train disk=1 tier=ESS id=C-11 :: $PY tools/sweeps/isoflop.py --arms 11
-min=19.8 need=tools/sweeps/isoflop.py,data/cache/gigamidi_pool_train disk=1 tier=ESS id=C-12 :: $PY tools/sweeps/isoflop.py --arms 12
-min=6.6 need=tools/sweeps/isoflop.py,data/cache/gigamidi_pool_train tier=ESS id=C-22 :: $PY tools/sweeps/isoflop.py --arms 22
-min=30.9 need=tools/sweeps/isoflop.py,data/cache/gigamidi_pool_train tier=REC id=C-28 :: $PY tools/sweeps/isoflop.py --arms 28
-min=59.9 need=tools/sweeps/isoflop.py,data/cache/gigamidi_pool_train tier=REC id=C-29-30 :: $PY tools/sweeps/isoflop.py --arms 29,30
-min=36 need=tools/sweeps/isoflop.py,data/cache/gigamidi_pool_train tier=REC id=C-31-33 :: $PY tools/sweeps/isoflop.py --arms 31,32,33
-min=3 need=tools/sweeps/isoflop.py,data/cache/gigamidi_pool_train tier=ESS id=C-G2 :: $PY tools/sweeps/isoflop.py --gate 2
-min=53.6 need=tools/sweeps/isoflop.py,data/cache/gigamidi_pool_train disk=2 tier=ESS id=C-13 :: $PY tools/sweeps/isoflop.py --arms 13
-min=46.5 need=tools/sweeps/isoflop.py,data/cache/gigamidi_pool_train disk=2 tier=ESS id=C-14 :: $PY tools/sweeps/isoflop.py --arms 14
-min=42.9 need=tools/sweeps/isoflop.py,data/cache/gigamidi_pool_train disk=2 tier=ESS id=C-15 :: $PY tools/sweeps/isoflop.py --arms 15
-min=54.9 need=tools/sweeps/isoflop.py,data/cache/gigamidi_pool_train disk=2 tier=ESS id=C-16 :: $PY tools/sweeps/isoflop.py --arms 16
-min=50 need=tools/sweeps/isoflop.py,data/cache/gigamidi_pool_train disk=2 tier=ESS id=C-17 :: $PY tools/sweeps/isoflop.py --arms 17
-min=61.7 need=tools/sweeps/isoflop.py,data/cache/gigamidi_pool_train disk=1 tier=ESS id=C-34 :: $PY tools/sweeps/isoflop.py --arms 34
-min=14.5 need=tools/sweeps/isoflop.py,data/cache/gigamidi_pool_train,data/cache/cdisc_v* tier=ESS id=B-T4b :: $PY tools/sweeps/isoflop.py --panel 7-17
+min=3.3 need=tools/sweeps/isoflop.py,data/cache/gigamidi_pool_train/VERIFIED tier=ESS id=C-S0 :: $PY tools/sweeps/isoflop.py --smoke
+min=8.3 need=tools/sweeps/isoflop.py,data/cache/gigamidi_pool_train/VERIFIED tier=ESS id=C-24 :: $PY tools/sweeps/isoflop.py --arms 24
+min=8.3 need=tools/sweeps/isoflop.py,data/cache/gigamidi_pool_train/VERIFIED tier=ESS id=C-25 :: $PY tools/sweeps/isoflop.py --arms 25
+min=9.9 need=tools/sweeps/isoflop.py,data/cache/gigamidi_pool_train/VERIFIED tier=ESS id=C-27 :: $PY tools/sweeps/isoflop.py --arms 27
+min=8.3 need=tools/sweeps/isoflop.py,data/cache/gigamidi_pool_train/VERIFIED tier=ESS id=C-26 :: $PY tools/sweeps/isoflop.py --arms 26
+min=15.7 need=tools/sweeps/isoflop.py,data/cache/gigamidi_pool_train/VERIFIED disk=1 tier=ESS id=C-1 :: $PY tools/sweeps/isoflop.py --arms 1
+min=14.7 need=tools/sweeps/isoflop.py,data/cache/gigamidi_pool_train/VERIFIED disk=1 tier=ESS id=C-2 :: $PY tools/sweeps/isoflop.py --arms 2
+min=12.4 need=tools/sweeps/isoflop.py,data/cache/gigamidi_pool_train/VERIFIED disk=1 tier=ESS id=C-3 :: $PY tools/sweeps/isoflop.py --arms 3
+min=10.6 need=tools/sweeps/isoflop.py,data/cache/gigamidi_pool_train/VERIFIED disk=1 tier=ESS id=C-4 :: $PY tools/sweeps/isoflop.py --arms 4
+min=8.9 need=tools/sweeps/isoflop.py,data/cache/gigamidi_pool_train/VERIFIED disk=1 tier=ESS id=C-5 :: $PY tools/sweeps/isoflop.py --arms 5
+min=7.8 need=tools/sweeps/isoflop.py,data/cache/gigamidi_pool_train/VERIFIED disk=1 tier=ESS id=C-6 :: $PY tools/sweeps/isoflop.py --arms 6
+min=14.5 need=tools/sweeps/isoflop.py,data/cache/gigamidi_pool_train/VERIFIED,data/cache/cdisc_v* tier=ESS id=B-T4 :: $PY tools/sweeps/isoflop.py --panel 1-6
+min=8.5 need=tools/sweeps/isoflop.py,data/cache/gigamidi_pool_train/VERIFIED tier=ESS id=C-23 :: $PY tools/sweeps/isoflop.py --arms 23
+min=15.7 need=tools/sweeps/isoflop.py,data/cache/gigamidi_pool_train/VERIFIED tier=ESS id=C-18 :: $PY tools/sweeps/isoflop.py --arms 18
+min=10.6 need=tools/sweeps/isoflop.py,data/cache/gigamidi_pool_train/VERIFIED tier=ESS id=C-19 :: $PY tools/sweeps/isoflop.py --arms 19
+min=7.8 need=tools/sweeps/isoflop.py,data/cache/gigamidi_pool_train/VERIFIED tier=ESS id=C-20 :: $PY tools/sweeps/isoflop.py --arms 20
+min=8.9 need=tools/sweeps/isoflop.py,data/cache/gigamidi_pool_train/VERIFIED tier=ESS id=C-21 :: $PY tools/sweeps/isoflop.py --arms 21
+min=23.5 need=tools/sweeps/isoflop.py,data/cache/gigamidi_pool_train/VERIFIED tier=REC id=C-LIT3 :: $PY tools/sweeps/isoflop.py --arms lit3
+min=3 need=tools/sweeps/isoflop.py,data/cache/gigamidi_pool_train/VERIFIED tier=ESS id=C-G1 :: $PY tools/sweeps/isoflop.py --gate 1
+min=30.6 need=tools/sweeps/isoflop.py,data/cache/gigamidi_pool_train/VERIFIED disk=1 tier=ESS id=C-7 :: $PY tools/sweeps/isoflop.py --arms 7
+min=25.8 need=tools/sweeps/isoflop.py,data/cache/gigamidi_pool_train/VERIFIED disk=1 tier=ESS id=C-8 :: $PY tools/sweeps/isoflop.py --arms 8
+min=21.7 need=tools/sweeps/isoflop.py,data/cache/gigamidi_pool_train/VERIFIED disk=1 tier=ESS id=C-9 :: $PY tools/sweeps/isoflop.py --arms 9
+min=18.9 need=tools/sweeps/isoflop.py,data/cache/gigamidi_pool_train/VERIFIED disk=1 tier=ESS id=C-10 :: $PY tools/sweeps/isoflop.py --arms 10
+min=21.5 need=tools/sweeps/isoflop.py,data/cache/gigamidi_pool_train/VERIFIED disk=1 tier=ESS id=C-11 :: $PY tools/sweeps/isoflop.py --arms 11
+min=19.8 need=tools/sweeps/isoflop.py,data/cache/gigamidi_pool_train/VERIFIED disk=1 tier=ESS id=C-12 :: $PY tools/sweeps/isoflop.py --arms 12
+min=6.6 need=tools/sweeps/isoflop.py,data/cache/gigamidi_pool_train/VERIFIED tier=ESS id=C-22 :: $PY tools/sweeps/isoflop.py --arms 22
+min=30.9 need=tools/sweeps/isoflop.py,data/cache/gigamidi_pool_train/VERIFIED tier=REC id=C-28 :: $PY tools/sweeps/isoflop.py --arms 28
+min=59.9 need=tools/sweeps/isoflop.py,data/cache/gigamidi_pool_train/VERIFIED tier=REC id=C-29-30 :: $PY tools/sweeps/isoflop.py --arms 29,30
+min=36 need=tools/sweeps/isoflop.py,data/cache/gigamidi_pool_train/VERIFIED tier=REC id=C-31-33 :: $PY tools/sweeps/isoflop.py --arms 31,32,33
+min=3 need=tools/sweeps/isoflop.py,data/cache/gigamidi_pool_train/VERIFIED tier=ESS id=C-G2 :: $PY tools/sweeps/isoflop.py --gate 2
+min=53.6 need=tools/sweeps/isoflop.py,data/cache/gigamidi_pool_train/VERIFIED disk=2 tier=ESS id=C-13 :: $PY tools/sweeps/isoflop.py --arms 13
+min=46.5 need=tools/sweeps/isoflop.py,data/cache/gigamidi_pool_train/VERIFIED disk=2 tier=ESS id=C-14 :: $PY tools/sweeps/isoflop.py --arms 14
+min=42.9 need=tools/sweeps/isoflop.py,data/cache/gigamidi_pool_train/VERIFIED disk=2 tier=ESS id=C-15 :: $PY tools/sweeps/isoflop.py --arms 15
+min=54.9 need=tools/sweeps/isoflop.py,data/cache/gigamidi_pool_train/VERIFIED disk=2 tier=ESS id=C-16 :: $PY tools/sweeps/isoflop.py --arms 16
+min=50 need=tools/sweeps/isoflop.py,data/cache/gigamidi_pool_train/VERIFIED disk=2 tier=ESS id=C-17 :: $PY tools/sweeps/isoflop.py --arms 17
+min=61.7 need=tools/sweeps/isoflop.py,data/cache/gigamidi_pool_train/VERIFIED disk=1 tier=ESS id=C-34 :: $PY tools/sweeps/isoflop.py --arms 34
+min=14.5 need=tools/sweeps/isoflop.py,data/cache/gigamidi_pool_train/VERIFIED,data/cache/cdisc_v* tier=ESS id=B-T4b :: $PY tools/sweeps/isoflop.py --panel 7-17
 # RECOMMENDED tail: D (rgates inserts D-R5*, D-R7*, D-R8*, D-R9b* here), A, B, E
 gate=rgates
 min=10.4 need=tests/tools/test_aug_sweep.py,logs/reg_arms.json tier=REC id=D-R6 :: $A --notes 80e6 --arms fresh_BEST --force --arm-json logs/reg_arms.json
@@ -82,9 +82,9 @@ min=20.4 need=tests/tools/test_aug_sweep.py tier=REC id=D-R10 :: $A --arms b16k
 min=21.9 need=tests/tools/test_aug_sweep.py tier=REC id=D-R11 :: $A --arms b16k_lr7
 # rgates inserts D-R12 (fresh_b16k at the better b16k LR) here
 gate=rgates
-min=25.2 need=tests/tools/test_aug_sweep.py,data/cache/gigamidi_pool_train tier=REC id=A-R4 :: $A --size 6M --notes 320e6 --arms control,fresh_census --seeds 2 --force; $A --size 6M --notes 640e6 --arms control --seeds 2 --force
+min=25.2 need=tests/tools/test_aug_sweep.py,data/cache/gigamidi_pool_train/VERIFIED tier=REC id=A-R4 :: $A --size 6M --notes 320e6 --arms control,fresh_census --seeds 2 --force; $A --size 6M --notes 640e6 --arms control --seeds 2 --force
 min=14.4 need=tests/tools/test_aug_sweep.py tier=REC id=A-C1 :: $A --size 3M --frac 0.125 --arms control; $A --size 3M --frac 0.0625 --arms control; $A --size 3M --notes 80e6 --arms fresh
-min=8.8 need=tests/tools/test_aug_sweep.py,data/cache/gigamidi_pool_train tier=REC id=A-B2 :: $A --arms fresh_census --seeds 1337 --force
+min=8.8 need=tests/tools/test_aug_sweep.py,data/cache/gigamidi_pool_train/VERIFIED tier=REC id=A-B2 :: $A --arms fresh_census --seeds 1337 --force
 min=17.5 need=tests/tools/test_aug_sweep.py,data/cache/cdisc_t1* tier=REC id=B-T1aug :: $A --arms disc_dyn
 gate=frontier
 gate=discover
@@ -101,8 +101,8 @@ min=17 need=tests/tools/test_aug_sweep.py,hypotheses/wd_split.py tier=OPT id=D-O
 gate=rgates
 min=12.1 need=tests/tools/test_aug_sweep.py tier=OPT id=A-U3 :: $A --size 6M --frac 0.5 --notes 640e6 --arms control --seeds 1337 --force
 min=6.4 need=tests/tools/test_aug_sweep.py tier=OPT id=A-U4 :: $A --size 6M --frac 0.125 --notes 320e6 --arms control --seeds 1337 --force
-min=23.5 need=tools/sweeps/isoflop.py,data/cache/gigamidi_pool_train tier=OPT id=C-O2 :: $PY tools/sweeps/isoflop.py --arms o2
-min=45.7 need=tools/sweeps/isoflop.py,data/cache/gigamidi_pool_train disk=1 tier=OPT id=C-O1 :: $PY tools/sweeps/isoflop.py --arms o1
+min=23.5 need=tools/sweeps/isoflop.py,data/cache/gigamidi_pool_train/VERIFIED tier=OPT id=C-O2 :: $PY tools/sweeps/isoflop.py --arms o2
+min=45.7 need=tools/sweeps/isoflop.py,data/cache/gigamidi_pool_train/VERIFIED disk=1 tier=OPT id=C-O1 :: $PY tools/sweeps/isoflop.py --arms o1
 min=17 need=tests/tools/test_aug_sweep.py,logs/reg_arms.json tier=OPT id=D-O3 :: $A --arms wstar_lr5 --arm-json logs/reg_arms.json
 min=13.8 need=tests/tools/test_aug_sweep.py,logs/reg_arms.json tier=OPT id=D-O8 :: $A --size 20M --force --arms BEST --arm-json logs/reg_arms.json
 min=8.5 tier=OPT id=F-Q7 :: m q42_tempo20_s3 $C42 --train_file_frac=0.25 --seed=3 --aug_tempo=0.2 --out_dir=checkpoints/keep/q42_tempo20_s3
