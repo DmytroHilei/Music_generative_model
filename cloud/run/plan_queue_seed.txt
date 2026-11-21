@@ -38,6 +38,7 @@ gate=frontier
 # iso block (block C) in isoflop.py order
 min=3.3 need=tools/sweeps/isoflop.py,data/cache/gigamidi_pool_train/VERIFIED tier=ESS id=C-S0 :: $PY tools/sweeps/isoflop.py --smoke
 min=8.3 need=tools/sweeps/isoflop.py,data/cache/gigamidi_pool_train/VERIFIED tier=ESS id=C-24 :: $PY tools/sweeps/isoflop.py --arms 24
+min=2 need=tools/sweeps/isoflop.py,data/cache/gigamidi_pool_train/VERIFIED tier=ESS id=C-G0 :: $PY tools/sweeps/isoflop.py --gate 0
 min=8.3 need=tools/sweeps/isoflop.py,data/cache/gigamidi_pool_train/VERIFIED tier=ESS id=C-25 :: $PY tools/sweeps/isoflop.py --arms 25
 min=9.9 need=tools/sweeps/isoflop.py,data/cache/gigamidi_pool_train/VERIFIED tier=ESS id=C-27 :: $PY tools/sweeps/isoflop.py --arms 27
 min=8.3 need=tools/sweeps/isoflop.py,data/cache/gigamidi_pool_train/VERIFIED tier=ESS id=C-26 :: $PY tools/sweeps/isoflop.py --arms 26
@@ -62,6 +63,7 @@ min=18.9 need=tools/sweeps/isoflop.py,data/cache/gigamidi_pool_train/VERIFIED di
 min=21.5 need=tools/sweeps/isoflop.py,data/cache/gigamidi_pool_train/VERIFIED disk=1 tier=ESS id=C-11 :: $PY tools/sweeps/isoflop.py --arms 11
 min=19.8 need=tools/sweeps/isoflop.py,data/cache/gigamidi_pool_train/VERIFIED disk=1 tier=ESS id=C-12 :: $PY tools/sweeps/isoflop.py --arms 12
 min=6.6 need=tools/sweeps/isoflop.py,data/cache/gigamidi_pool_train/VERIFIED tier=ESS id=C-22 :: $PY tools/sweeps/isoflop.py --arms 22
+min=2 need=tools/sweeps/isoflop.py,data/cache/gigamidi_pool_train/VERIFIED tier=ESS id=C-Gchain :: $PY tools/sweeps/isoflop.py --gate chain
 min=30.9 need=tools/sweeps/isoflop.py,data/cache/gigamidi_pool_train/VERIFIED tier=REC id=C-28 :: $PY tools/sweeps/isoflop.py --arms 28
 min=59.9 need=tools/sweeps/isoflop.py,data/cache/gigamidi_pool_train/VERIFIED tier=REC id=C-29-30 :: $PY tools/sweeps/isoflop.py --arms 29,30
 min=36 need=tools/sweeps/isoflop.py,data/cache/gigamidi_pool_train/VERIFIED tier=REC id=C-31-33 :: $PY tools/sweeps/isoflop.py --arms 31,32,33
