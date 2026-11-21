@@ -69,6 +69,7 @@ min=59.9 need=tools/sweeps/isoflop.py,data/cache/gigamidi_pool_train/VERIFIED ti
 min=36 need=tools/sweeps/isoflop.py,data/cache/gigamidi_pool_train/VERIFIED tier=REC id=C-31-33 :: $PY tools/sweeps/isoflop.py --arms 31,32,33
 min=3 need=tools/sweeps/isoflop.py,data/cache/gigamidi_pool_train/VERIFIED tier=ESS id=C-G2 :: $PY tools/sweeps/isoflop.py --gate 2
 min=53.6 need=tools/sweeps/isoflop.py,data/cache/gigamidi_pool_train/VERIFIED disk=2 tier=ESS id=C-13 :: $PY tools/sweeps/isoflop.py --arms 13
+min=72.8 need=tools/sweeps/isoflop.py,data/cache/gigamidi_pool_train/VERIFIED disk=1 tier=REC id=C-13u :: $PY tools/sweeps/isoflop.py --arms 13u
 min=46.5 need=tools/sweeps/isoflop.py,data/cache/gigamidi_pool_train/VERIFIED disk=2 tier=ESS id=C-14 :: $PY tools/sweeps/isoflop.py --arms 14
 min=42.9 need=tools/sweeps/isoflop.py,data/cache/gigamidi_pool_train/VERIFIED disk=2 tier=ESS id=C-15 :: $PY tools/sweeps/isoflop.py --arms 15
 min=54.9 need=tools/sweeps/isoflop.py,data/cache/gigamidi_pool_train/VERIFIED disk=2 tier=ESS id=C-16 :: $PY tools/sweeps/isoflop.py --arms 16

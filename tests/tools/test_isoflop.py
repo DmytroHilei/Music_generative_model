@@ -18,7 +18,7 @@ PLAN = {  # id: (iters, resumes at), master plan 3(C)
     '01': (25944, 0), '02': (20377, 0), '03': (14609, 0), '04': (10506, 0), '05': (7693, 0), '06': (5613, 0),
     '07': (48697, 11688), '08': (35019, 8405), '09': (25643, 6155), '10': (18711, 4491), '11': (14252, 0),
     '12': (10548, 0), '13': (56132, 14969), '14': (42757, 11402), '15': (31643, 8439), '16': (23531, 0),
-    '17': (17974, 0), '23': (11226, 0), '27': (9766, 3907), '34': (76928, 20515), '28': (51888, 0), 'O1': (14312, 0)}
+    '17': (17974, 0), '13u': (56132, 0), '23': (11226, 0), '27': (9766, 3907), '34': (76928, 20515), '28': (51888, 0), 'O1': (14312, 0)}
 
 
 def test_grid_iterations_and_chaining():
@@ -42,6 +42,9 @@ def test_commands():
     assert (last(c, 'max_iters'), last(c, 'lr_decay_iters'), last(c, 'eval_interval')) == ('4678', '18711', '4677')
     c = isoflop.command(isoflop.ARMS['10'])
     assert (last(c, 'eval_dense'), last(c, 'eval_dense_until')) == ('4677', '4677')
+    c, c13 = isoflop.command(isoflop.ARMS['13u']), isoflop.command(isoflop.ARMS['13'])
+    assert '--init_from=resume' not in c and isoflop.ARMS['13u']['C'] is None
+    assert [x for x in c if 'out_dir' not in x] == [x for x in c13 if 'out_dir' not in x and 'init_from' not in x]
     c = isoflop.command(isoflop.ARMS['23'])
     assert (last(c, 'batch_size'), last(c, 'warmup_iters'), last(c, 'eval_iters')) == ('8', '200', '150')
     assert last(isoflop.command(isoflop.ARMS['26']), 'train_file_frac') == '0.25'

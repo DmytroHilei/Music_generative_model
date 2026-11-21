@@ -69,6 +69,7 @@ ARMS = {a['id']: a for a in [
     arm('18', '6x256', 3e16, lr=ALT_LR), arm('19', '7x384', 3e16, lr=ALT_LR, keep=True),
     arm('20', '10x448', 3e16, lr=ALT_LR, keep=True), arm('21', '10x384', 3e16, seed=2),
     arm('22p', '10x448', iters=4678, extra=['--lr_decay_iters=18711', '--eval_interval=4677']),
+    arm('13u', '10x448', iters=56132, tier='REC'),  # #13 from scratch (chain check on a 3e17 final); C None: not fitted
     arm('23', '10x448', 3e16, extra=B8, batch=8),
     arm('24', '12x512', iters=4883, store=REPLAY), arm('25', '12x512', iters=4883),
     arm('26', '12x512', iters=4883, store=REPLAY, extra=['--train_file_frac=0.25', '--one_pass_epochs=4']),
