@@ -219,6 +219,11 @@ class NoteWindowDataset(Dataset):
         remain=False,
         elapsed=False,
         length_words='v1',
+        one_pass=False,
+        one_pass_epochs=1,
+        one_pass_phase0=0.05,
+        one_pass_skip='',
+        one_pass_seed=1337,
     ):
         """
         csv_path:    one or more sources separated by ',': a CSV (paths inside relative to root_dir or absolute),
@@ -310,6 +315,11 @@ class NoteWindowDataset(Dataset):
                      as change windows), then a section of another long file of the same store from its own section
                      boundary on, with that file's section captions (the first one, change-aware, against the notes
                      before the splice) and no file caption: a caption that contradicts the context
+        one_pass:    training only: item i = window i of a fixed plan (one_pass_plan) instead of a random window: every
+                     target row of every kept file once per epoch (one_pass_epochs passes, each with its own phases and
+                     order), long files tiled from a random phase (0 for one_pass_phase0 of them), heads, tails and short
+                     files packed; read it in order (PlanSampler). one_pass_skip: a file of store file indices to leave
+                     out (one per line, single store). The plan is cached in cache_dir/one_pass/<key>.npz
         """
         sources = [s.strip() for s in str(csv_path).split(',') if s.strip()]
         self.csv_paths = [Path(s) for s in sources if not s.startswith('store:')]
@@ -459,6 +469,9 @@ class NoteWindowDataset(Dataset):
                 for r in [np.arange(0, n - self.block_size, eval_stride) if n > self.block_size
                           else np.zeros(1, np.int64)]
             ])
+        self.plan = None
+        if one_pass:
+            self._init_plan(one_pass_epochs, one_pass_phase0, one_pass_skip, one_pass_seed)
 
     def _find_changes(self, change_min):
         """self.changes: (file index, virtual row of the section start) of the boundaries with a section change of
@@ -631,6 +644,8 @@ class NoteWindowDataset(Dataset):
     def __len__(self):
         if self.eval_stride:
             return len(self.windows)
+        if self.plan is not None:
+            return len(self.plan['plan'])
         # one "epoch" = as many windows as fit without overlap; items are random anyway
         return max(1, int(self.lengths.sum()) // self.block_size)
 
@@ -656,6 +671,8 @@ class NoteWindowDataset(Dataset):
         return torch.from_numpy(rows), None if programs is None else torch.from_numpy(programs)
 
     def __getitem__(self, idx):
+        if self.plan is not None:
+            return self._plan_item(idx)
         change = None
         if self.eval_stride:
             file_idx, v = (int(x) for x in self.windows[idx])
@@ -913,6 +930,150 @@ class NoteWindowDataset(Dataset):
         low = scaled.floor()
         out = low + (torch.rand_like(scaled) < scaled - low).double()
         return out.long().clamp(max=max_bin)
+
+
+    # ------------------------------------------------------------------ one-pass plan
+
+    def _init_plan(self, epochs, phase0, skip, seed):
+        assert not self.eval_stride and self.pad and self.pack_short, 'one_pass: training with special_tokens + pack_short'
+        assert not (self.boundary_frac or self.source_weights or self.with_captions or self.section_len or self.remain
+                    or self.file_style is not None or self.aug_tempo), 'one_pass: unsupported option set'
+        skip_mask = None
+        if skip:
+            assert len(self.store_dirs) == 1, 'one_pass_skip: one store only'
+            ids = np.loadtxt(skip, dtype=np.int64, ndmin=1)
+            skip_mask = np.isin(self.file_ids, ids)
+            print(f"one_pass: skipping {int(skip_mask.sum()):,} files ({int(self.lengths[skip_mask].sum()):,} rows)")
+        key = hashlib.md5(json.dumps(dict(
+            stores=[str(d) for d in self.store_dirs], lengths=hashlib.md5(self.lengths.tobytes()).hexdigest(),
+            files=hashlib.md5(self.file_ids.tobytes()).hexdigest(), T=self.block_size, seed=seed, epochs=epochs,
+            phase0=phase0, skip=None if skip_mask is None else hashlib.md5(skip_mask.tobytes()).hexdigest(),
+            v=1)).encode()).hexdigest()[:16]
+        path = self.cache_dir / 'one_pass' / f'{key}.npz'
+        if path.exists():
+            z = np.load(path)
+            self.plan = {k: z[k] for k in z.files}
+        else:
+            self.plan = one_pass_plan(self.lengths, self.block_size, seed, epochs, phase0, skip_mask)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_suffix('.tmp.npz')
+            np.savez(tmp, **self.plan)
+            tmp.replace(path)
+        self.plan_seed = seed
+        n_full, n = len(self.plan['full_file']), len(self.plan['plan'])
+        print(f"one_pass plan: {n:,} windows ({n_full:,} tiled, {n - n_full:,} packed), {epochs} epoch(s), {path}")
+
+    def _plan_item(self, idx):
+        """Window idx of the plan: (rows, programs) of a tiled window or of a packed stretch, targets at the joins
+        between pieces masked unless an EOS is followed by a BOS; transposition drawn from (seed, idx)."""
+        P, T = self.plan, self.block_size
+        w = int(P['plan'][idx])
+        masked = []
+        if w >= 0:
+            rows, program = self._read(int(P['full_file'][w]), int(P['full_v'][w]))
+        else:
+            start, end = int(P['packed_start'][-1 - w]), int(P['packed_end'][-1 - w])
+            ps = P['piece_start']
+            k = int(np.searchsorted(ps, start, side='right')) - 1
+            parts = []
+            while k < len(ps) and ps[k] < end:
+                f, a, n, s0 = int(P['piece_file'][k]), int(P['piece_a'][k]), int(P['piece_n'][k]), int(ps[k])
+                lo, hi = max(start, s0), min(end, s0 + n)
+                r, p = self._read(f, a + lo - s0)
+                parts.append((r[:hi - lo], None if p is None else p[:hi - lo]))
+                if s0 > start and not P['piece_join'][k]:
+                    masked.append(s0 - start - 1)
+                k += 1
+            rows = torch.cat([r for r, _ in parts])
+            program = torch.cat([p for _, p in parts]) if self.programs else None
+        pitch, velocity, duration, delta_time = rows.unbind(1)
+        drums = program == DRUM_PROGRAM if program is not None else None
+        if drums is not None:
+            duration = torch.where(drums, 0, duration)
+        if self.augment:
+            notes = pitch < BOS_PITCH
+            pitched = notes if drums is None else notes & ~drums
+            if pitched.any():
+                rng = random.Random(self.plan_seed * 1_000_003 + idx)
+                lo, hi = int(pitch[pitched].min()), int(pitch[pitched].max())
+                shift = rng.randint(max(self.aug_transpose[0], -lo), min(self.aug_transpose[1], 127 - hi))
+                pitch = torch.where(pitched, pitch + shift, pitch)
+        streams = (pitch, velocity, duration, delta_time) + ((program,) if program is not None else ())
+        n_rows = len(pitch)
+        if n_rows < T + 1:  # the last packed stretch of an epoch
+            streams = tuple(F.pad(t, (0, T + 1 - n_rows)) for t in streams)
+            if drums is not None:
+                drums = F.pad(drums, (0, T + 1 - n_rows))
+        x, y = tuple(t[:-1] for t in streams), tuple(t[1:] for t in streams)
+        if drums is not None:
+            y = (y[0], y[1], torch.where(drums[1:], -1, y[2])) + y[3:]
+        if n_rows < T + 1 or masked:
+            keep = torch.arange(T) < n_rows - 1
+            keep[masked] = False
+            y = tuple(torch.where(keep, t, -1) for t in y)
+        return x, y
+
+
+class PlanSampler(torch.utils.data.Sampler):
+    """Indices start, start + 1, ... of a one-pass plan (set .start after a resume: iter_num * batch * accumulation);
+    a second pass starts again at 0."""
+
+    def __init__(self, n):
+        self.n, self.start = n, 0
+
+    def __iter__(self):
+        start, self.start = self.start, 0
+        return iter(range(start, self.n))
+
+    def __len__(self):
+        return self.n - self.start
+
+
+def one_pass_plan(lengths, T, seed, epochs=1, phase0=0.05, skip=None):
+    """A fixed window plan over files of virtual lengths `lengths` (BOS + notes + EOS) for windows of T + 1 rows.
+    Per epoch e (rng from (seed, e), so a plan of more epochs starts with the plan of fewer): a file of >= T + 1 rows
+    is tiled with stride T from a random phase phi (0 for a share phase0; at most L - 1 - T, so >= 1 window); its head
+    (rows 0..phi), its tail and every shorter file are pieces, shuffled and concatenated into one stream that is cut
+    into windows of T + 1 rows with stride T. Every target row (all but BOS) is covered once per epoch. A piece's
+    first row is a join target, kept only after an EOS when the piece starts with a BOS. Windows of an epoch are
+    permuted together. Returns arrays: plan (window ids, >= 0 tiled, < 0 packed -1 - k), full_file / full_v,
+    piece_file / piece_a / piece_n / piece_start (in the stream of all epochs) / piece_join, packed_start / packed_end."""
+    L = np.asarray(lengths, np.int64)
+    nf = len(L)
+    use = np.ones(nf, bool) if skip is None else ~np.asarray(skip, bool)
+    out = {k: [] for k in ('plan', 'full_file', 'full_v', 'piece_file', 'piece_a', 'piece_n', 'piece_start',
+                           'piece_join', 'packed_start', 'packed_end')}
+    n_full = n_packed = base = 0
+    for e in range(epochs):
+        rng = np.random.default_rng([seed, e])
+        u, zero = rng.random(nf), rng.random(nf) < phase0
+        long = use & (L >= T + 1)
+        top = np.minimum(T - 1, L - 1 - T)
+        phi = np.where(long & ~zero, (u * (top + 1)).astype(np.int64), 0)
+        m = np.where(long, (L - 1 - phi) // T, 0)
+        ff = np.repeat(np.arange(nf), m)
+        fv = phi[ff] + (np.arange(len(ff)) - np.repeat(np.cumsum(m) - m, m)) * T
+        heads = np.flatnonzero(long & (phi >= 1))
+        tail_a = phi + m * T
+        tails = np.flatnonzero(long & (L - tail_a >= 2))
+        shorts = np.flatnonzero(use & ~long)
+        pf = np.concatenate([heads, tails, shorts])
+        pa = np.concatenate([np.zeros(len(heads), np.int64), tail_a[tails], np.zeros(len(shorts), np.int64)])
+        pn = np.concatenate([phi[heads] + 1, L[tails] - tail_a[tails], L[shorts]])
+        order = rng.permutation(len(pf))
+        pf, pa, pn = pf[order], pa[order], pn[order]
+        join = np.ones(len(pf), bool)
+        join[1:] = (pa[:-1] + pn[:-1] == L[pf[:-1]]) & (pa[1:] == 0)
+        s_len = int(pn.sum())
+        n_pk = -(-(s_len - 1) // T) if s_len > 1 else 0
+        pk = base + np.arange(n_pk, dtype=np.int64) * T
+        ids = np.concatenate([n_full + np.arange(len(ff)), -1 - (n_packed + np.arange(n_pk))])
+        for k, v in (('plan', ids[rng.permutation(len(ids))]), ('full_file', ff), ('full_v', fv), ('piece_file', pf),
+                     ('piece_a', pa), ('piece_n', pn), ('piece_start', base + np.cumsum(pn) - pn), ('piece_join', join),
+                     ('packed_start', pk), ('packed_end', np.minimum(pk + T + 1, base + s_len))):
+            out[k].append(v)
+        n_full, n_packed, base = n_full + len(ff), n_packed + n_pk, base + s_len
+    return {k: np.concatenate(v).astype(bool if k == 'piece_join' else np.int64) for k, v in out.items()}
 
 
 def _read_midi(midi):

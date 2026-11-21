@@ -12,8 +12,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from helpers import make_store, notes, run  # noqa: E402
 from musicar.data.loader import (BOS_PITCH, DRUM_PROGRAM, EOS_PITCH, NoteWindowDataset,  # noqa: E402
-                                 captioned_windows, collate_windows, density_level, elapsed_seconds, progress_level,
-                                 remain_level, remaining_seconds, source_name, window_conditions)
+                                 captioned_windows, collate_windows, density_level, elapsed_seconds, one_pass_plan,
+                                 progress_level, remain_level, remaining_seconds, source_name, window_conditions)
 
 
 def dataset(d, files, progs=None, name='toy', **kw):
@@ -277,6 +277,23 @@ def test_boundary_start_end():
         assert half.boundary_frac == 0.5 and kinds(half) == {'start', 'middle'}
         plain = dataset(d, f, name='p', special_tokens=False, boundary_start=0.5, boundary_end=0.5)
         assert plain.boundary_frac == 0.0, 'no special tokens: no boundary placement'
+
+
+def test_one_pass_plan_replay():
+    """The one-pass plan over the replay store's files (data/cache/gigamidi_replay_train, skipped without it) at the
+    scale ladder's block 2048: unique window ids, covered target rows = sum(n + 1) per epoch (more coverage checks:
+    tests/data/test_one_pass.py)."""
+    store = Path(__file__).resolve().parents[2] / 'data/cache/gigamidi_replay_train'
+    if not (store / 'offsets.npy').exists():
+        return
+    n = np.diff(np.load(store / 'offsets.npy'))
+    L = n[n >= 64] + 2
+    for epochs in (1, 2):
+        p = one_pass_plan(L, 2048, seed=1337, epochs=epochs)
+        assert len(np.unique(p['plan'])) == len(p['plan'])
+        tiled = len(p['full_file']) * 2048
+        packed = int((p['piece_n'] - 1).sum())  # each piece's own targets (its first row is context or a join)
+        assert tiled + packed == epochs * int((L - 1).sum()), (tiled, packed)
 
 
 if __name__ == '__main__':

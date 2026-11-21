@@ -29,8 +29,8 @@ from tqdm import tqdm
 
 from musicar.model.checkpoint import (ARCH_KEYS, bf16_cpu_state, load_expanded, merge_model_args, save_atomic,
                                 strip_compile_prefix, torch_load)
-from musicar.data.loader import (NoteWindowDataset, captioned_windows, collate_windows, load_styles, progress_level,
-                                 remain_level, source_name, val_loader, window_conditions)
+from musicar.data.loader import (NoteWindowDataset, PlanSampler, captioned_windows, collate_windows, load_styles,
+                                 progress_level, remain_level, source_name, val_loader, window_conditions)
 from musicar.eval.val_loss import estimate_val_loss, summed_ce
 from musicar.training.fp8 import convert_fp8, fp8_supported, refresh_fp8_weights
 from musicar.training.memory import spill_to_cpu
@@ -44,6 +44,8 @@ from hypotheses import load as load_hypothesis
 out_dir = 'checkpoints'
 eval_interval = 20
 eval_iters = 200          # max number of val batches per evaluation (fixed windows, same every time)
+eval_dense = 0            # > 0: also evaluate every eval_dense iterations up to iteration eval_dense_until
+eval_dense_until = 3000
 style_eval_songs = 0      # > 0: at every evaluation generate from this many fixed songs per style (5 styles) and log
                           # per-style distances to the real continuations (style_eval.py: styles/<mode>/<style>)
 style_eval_csv = ''       # a multi-track CSV: style_eval_songs of its validation songs instead (style_eval.csv_set)
@@ -97,6 +99,10 @@ aug_transpose = '-5,5'    # training: lowest,highest transposition in semitones 
 aug_stores = ''           # e.g. '1,0': which train stores get tempo aug (same order as source_weights); '' = all
 train_file_frac = '1'     # training: a fixed share of each train store's files (same files every run), one value or one per store ('0.25,1')
 source_weights = ''       # e.g. '0.8,0.2': sampling weight per train store (CSVs = one store, then each store:); '' = by size
+one_pass = False          # training: a fixed one-pass window plan read in order (NoteWindowDataset one_pass; needs
+one_pass_epochs = 1       # special_tokens, pack_short, boundary_frac 0): every target row once per epoch, random
+one_pass_phase0 = 0.05    # phase per long file (0 for this share), packed heads / tails / short files; a resume
+one_pass_skip = ''        # continues at window iter_num * batch * accumulation; skip = file of store file indices
 batch_size = 6
 block_size = 512
 gradient_accumulation_steps = 5 * 8  # used to simulate larger batch sizes
@@ -305,11 +311,15 @@ train_dataset = NoteWindowDataset(csv_path, split='train', block_size=block_size
                                change_frac=section_change_frac, change_min=section_change_min,
                                counterfactual=section_cf_weight > 0, splice_frac=section_splice_frac,
                                aug_transpose=as_list(aug_transpose, int), file_frac=as_list(train_file_frac, float),
-                               aug_stores=as_list(aug_stores, int), source_weights=as_list(source_weights, float))
+                               aug_stores=as_list(aug_stores, int), source_weights=as_list(source_weights, float),
+                               **(dict(one_pass=True, one_pass_epochs=one_pass_epochs, one_pass_phase0=one_pass_phase0,
+                                       one_pass_skip=one_pass_skip, one_pass_seed=seed) if one_pass else {}))
 if hyp:
     train_dataset = hyp.dataset(train_dataset)
 train_names = tuple(extra_names + cf_names + remain_names)
-train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=num_workers, drop_last=True,
+plan_sampler = PlanSampler(len(train_dataset)) if one_pass else None
+train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=not one_pass, sampler=plan_sampler,
+                          num_workers=num_workers, drop_last=True,
                           collate_fn=partial(collate_windows, extra_names=train_names),
                           persistent_workers=num_workers > 0)
 make_val_loader = partial(val_loader, batch_size=batch_size, max_batches=eval_iters, num_workers=num_workers,
@@ -382,6 +392,14 @@ if checkpoint is not None:
         # different data windows after a restart instead of replaying the ones from the start
         torch.manual_seed(seed + iter_num)
         random.seed(seed + iter_num)
+if one_pass:
+    windows_per_iter = batch_size * gradient_accumulation_steps
+    assert train_dataset.boundary_frac == 0, 'one_pass: set --boundary_frac=0'
+    assert max_iters * windows_per_iter <= len(train_dataset), \
+        f"one_pass: {max_iters:,} iterations need {max_iters * windows_per_iter:,} windows, the plan has " \
+        f"{len(train_dataset):,} (raise one_pass_epochs)"
+    plan_sampler.start = iter_num * windows_per_iter
+    print(f"one_pass: windows {plan_sampler.start:,} .. {max_iters * windows_per_iter:,} of {len(train_dataset):,}")
 
 # the window conditions follow the model, not the config: a finetune of a conditioned base (long_450m) left them
 # at the config default (off), so it trained and evaluated only the 'none' condition (ua_450_s1, 2026-10-06)
@@ -769,7 +787,8 @@ for iter_num in pbar:
     if wandb_log and style_res:
         wandb.log({"iter": iter_num,
                    **{f"styles/{mode}/{k}": v for mode, m in style_res.items() for k, v in m.items()}})
-    if not profile_steps and (iter_num % eval_interval == 0 or iter_num == max_iters - 1):
+    if not profile_steps and (iter_num % eval_interval == 0 or iter_num == max_iters - 1
+                              or eval_dense and iter_num <= eval_dense_until and iter_num % eval_dense == 0):
         val = val_loss(val_loader_main)
         val2 = val_loss(val2_loader) if val2_loader else {}
         extra = {name: val_loss(loader) for name, loader in extra_loaders.items()}
