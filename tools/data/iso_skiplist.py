@@ -74,7 +74,8 @@ def query_set(args):
     ev = np.flatnonzero(n >= args.eval_min)
     parts, names = [capped(held, ev, args.cap)], [f'heldout:{i}' for i in ev]
     toks, progs, lens = [], [], []
-    for p in sorted((Path(args.cont96) / 'prompts').glob('p*.mid')):
+    assert not args.cont96 or (Path(args.cont96) / 'prompts').is_dir(), f'no {args.cont96}/prompts (--cont96= skips it)'
+    for p in sorted((Path(args.cont96) / 'prompts').glob('p*.mid')) if args.cont96 else []:
         segs = [tokenize_tracks(str(p))] + [tokenize_tracks(str(r)) for r in
                                              sorted((Path(args.cont96) / 'real').glob(f'{p.stem}_*.mid'))[:1]]
         segs = [s for s in segs if s is not None]

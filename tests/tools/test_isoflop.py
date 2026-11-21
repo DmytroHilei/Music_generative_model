@@ -98,7 +98,7 @@ def test_skiplist():
         out = Path(d) / 'skip.txt'
         root = Path(__file__).resolve().parents[2]
         r = subprocess.run([sys.executable, 'tools/data/iso_skiplist.py', f'--pool={d}/pool_train',
-                            f'--heldout={d}/held_validation', f'--cont96={d}/none', '--eval-min=100', '--workers=1',
+                            f'--heldout={d}/held_validation', '--cont96=', '--eval-min=100', '--workers=1',
                             f'--out={out}'], cwd=root, capture_output=True, text=True)
         assert r.returncode == 0, r.stderr[-2000:]
         assert out.read_text().split() == ['2', '4'], out.read_text()

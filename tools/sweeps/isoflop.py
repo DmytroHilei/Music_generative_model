@@ -150,7 +150,8 @@ def command(a):
     cmd = ['.venv/bin/python', 'train.py', CONFIG, f'--n_layer={L}', f'--n_embd={d}', f'--n_head={h}',
            f"--csv_path=store:{a['store']}", '--one_pass=True', '--boundary_frac=0', '--batch_size=16',
            '--gradient_accumulation_steps=1', '--eval_iters=75', f'--max_iters={I}', f'--lr_decay_iters={I}',
-           '--save_pre_cooldown=True', f'--eval_interval={max(I // 8, 1)}', '--eval_dense=250',
+           '--save_pre_cooldown=True', '--always_save_checkpoint=True', f'--eval_interval={max(I // 8, 1)}',
+           '--eval_dense=250',
            '--eval_dense_until=3000', f"--learning_rate={a['lr']:g}", f"--seed={a['seed']}",
            f'--out_dir={out_dir(a).relative_to(ROOT)}']
     if skip_hash(a['store']):

@@ -63,6 +63,12 @@ def tar_stream(tar):
     return proc, tarfile.open(fileobj=proc.stdout, mode='r|')
 
 
+def stop(proc):
+    proc.kill()
+    proc.wait()
+    proc.stdout.close()
+
+
 def member_name(name):
     """'gigamidi/gigamidi_train/tokens.u16' -> ('train', 'tokens.u16')."""
     parts = name.split('/')
@@ -79,7 +85,7 @@ def read_small(tar, parts):
             small[part][fname] = tf.extractfile(m).read()
         if all(len(v) == 3 for v in small.values()):
             break
-    proc.kill()
+    stop(proc)
     return {p: dict(offsets=np.load(io.BytesIO(v['offsets.npy'])), files=v['files.csv'],
                     meta=json.loads(v['meta.json'])) for p, v in small.items()}
 
@@ -129,7 +135,7 @@ def count(args):
         assert i == len(off) - 1, f'{m.name}: stream ended at file {i} of {len(off) - 1}'
         if fname == 'programs.u8' and part == parts[-1]:
             break
-    proc.kill()
+    stop(proc)
     files = notes = 0
     for p in parts:
         off = small[p]['offsets']
@@ -198,7 +204,7 @@ def build(args):
                 done.add(part)
             if done == set(parts):
                 break
-    proc.kill()
+    stop(proc)
     offs, rows, csv_lines = [], 0, []
     for p in parts:  # tar order is train, validation: the same order as the appended bytes
         off = np.load(io.BytesIO(small[p]['offsets.npy']))
