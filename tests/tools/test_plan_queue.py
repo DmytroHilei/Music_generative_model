@@ -97,7 +97,7 @@ def test_seed_format():
         if not ln.strip() or ln.startswith('#'):
             continue
         if ln.startswith('gate='):
-            assert re.fullmatch(r'gate=\w+( :: .+)?', ln), ln
+            assert re.fullmatch(r'gate=\w+( need=\S+)?( :: .+)?', ln), ln
             continue
         m = re.fullmatch(r'min=([\d.]+)( need=\S+)?( disk=\d+)? tier=(ESS|REC|OPT) id=(\S+) :: (.+)', ln)
         assert m, ln

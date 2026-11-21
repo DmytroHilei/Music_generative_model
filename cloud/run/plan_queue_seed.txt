@@ -22,7 +22,7 @@ min=3 need=tests/tools/test_aug_sweep.py,hypotheses/drop_late.py tier=REC id=D-R
 min=18.2 need=tests/tools/test_aug_sweep.py,hypotheses/drop_late.py tier=REC id=D-R2 :: $A --arms drop10_late
 min=17 need=tests/tools/test_aug_sweep.py,hypotheses/wd_split.py tier=REC id=D-R3 :: $A --arms wd30x_trunk
 # D1 inserts D-R4*, D-E5*, D-E6 (+smoke), D-E9, gate=confirm, D-E7, D-E8, D-E10, D-E11 right here
-gate=d1
+gate=d1 need=tests/tools/test_aug_sweep.py
 min=34 need=tests/tools/test_aug_sweep.py tier=REC id=D-L4 :: $A --arms lr2e3,fresh_lr2e3
 gate=rgates
 min=3 need=tests/tools/test_aug_sweep.py tier=ESS id=A-S4s :: $A --smoke --size 217M --arms control
@@ -92,7 +92,7 @@ gate=discover
 min=3 need=tools/sweeps/ensemble_eval.py tier=REC id=E-E3 :: $PY tools/sweeps/ensemble_eval.py --members control_s3,control_s4,control_s5,control_s6 --ref fresh_s3,fresh_s4,fresh_s5,fresh_s6 --modes prob,logit,joint --nocond --train-windows 1200 --save-lp
 min=1.5 tier=REC id=E-U1 :: upkeep members
 min=2 need=data_prep/datasets/sbp_pairs.py tier=REC id=E-S2 :: HF_HUB_DISABLE_XET=1 $PY cloud/sync/data.py download --stores sbp_pairs_train,sbp_val_base_validation,sbp_shuf_base_validation
-min=4 need=data/cache/sbp_val_base* tier=REC id=E-S3 :: $TB $FTL $PE --val_csv_path=store:data/cache/sbp_val_base --val_extra='shuf=store:data/cache/sbp_shuf_base' --out_dir=checkpoints/sbp_base_eval
+min=4 need=data/cache/sbp_val_base* tier=REC id=E-S3 :: mkdir -p logs/sbp && $TB $FTL $PE --val_csv_path=store:data/cache/sbp_val_base --val_extra='shuf=store:data/cache/sbp_shuf_base' --out_dir=checkpoints/sbp_eval > logs/sbp/base.log 2>&1
 min=75.5 need=tests/tools/test_aug_sweep.py,checkpoints/members/control_s3 disk=3 tier=REC id=E-S6 :: $SS --checkpoint checkpoints/members/control_s3 --out data/cache/synth_clean && $A --smoke --arms synth_clean25 && $A --arms synth_clean25 --force --keep
 # items34 inserts E-E4*/E-E5* (G3a), E-E6* (G3b) and the gated OPTIONAL rows at their priority
 gate=items34
@@ -109,5 +109,5 @@ min=8.5 tier=OPT id=F-Q7 :: m q42_tempo20_s3 $C42 --train_file_frac=0.25 --seed=
 min=8.5 tier=OPT id=F-Q8 :: m q42_family_s3 $C42 --train_file_frac=0.25 --seed=3 --hypothesis=aug_family:rows=0.5 --out_dir=checkpoints/keep/q42_family_s3
 min=0.5 tier=OPT id=F-U1o :: upkeep keep
 # SBP chain (OPTIONAL after review): E-S4 here, then items34 G4a inserts E-S5*/S7*/S8*/S9*
-min=46.5 need=data/cache/sbp_pairs*,checkpoints/musicar-L/model_bf16.pt disk=6 tier=OPT id=E-S4 :: $TB $FTL $AW --csv_path=store:data/cache/sbp_pairs --out_dir=checkpoints/sbp_synth --weight_decay=0.1 --warmup_iters=50 --batch_size=8 --gradient_accumulation_steps=4 --max_iters=1600 --lr_decay_iters=1600 --eval_interval=400 --eval_iters=150 --save_iters=800 --always_save_checkpoint=True
+min=46.5 need=data/cache/sbp_pairs*,checkpoints/musicar-L/model_bf16.pt disk=6 tier=OPT id=E-S4 :: mkdir -p logs/sbp && $TB $FTL $AW --csv_path=store:data/cache/sbp_pairs --out_dir=checkpoints/sbp_synth --weight_decay=0.1 --warmup_iters=50 --batch_size=8 --gradient_accumulation_steps=4 --max_iters=1600 --lr_decay_iters=1600 --eval_interval=400 --eval_iters=150 --save_iters=800 --always_save_checkpoint=True > logs/sbp/train.log 2>&1; for i in 800 1600; do f=checkpoints/sbp_synth/model_bf16_it$i.pt; [ -f $f ] || f=checkpoints/sbp_synth/model_bf16.pt; $TB --init_from=finetune --init_ckpt=$f $PE --val_csv_path=store:data/cache/sbp_val --val_extra='shuf=store:data/cache/sbp_shuf' --out_dir=checkpoints/sbp_eval > logs/sbp/it$i.log 2>&1; done
 gate=items34

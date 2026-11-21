@@ -18,7 +18,8 @@
 #   they get a counted retry, at most twice, then go to logs/plan_dropped.txt.
 # - tier=OPT lines start only if `plan_gates.py guard --min <m>` exits 0 (budget / deadline), else dropped.
 # - At the end: one `plan_gates.py catchall` pass, then 30 min waiting for new lines, the upload, the auto-stop.
-# - Log: logs/plan_queue.log (start, end, exit code of every line); failed lines also in logs/plan_failed.txt.
+# - Log: logs/plan_queue.log (start, end, exit code of every line); every finished line with its exit code in
+#   logs/plan_done.txt (read by the catch-all), failed ones also in logs/plan_failed.txt.
 #   Background upload every 30 min (logs/plan_upload.log).
 # Env: PLAN_DRY=1 (no pull / upload / stop / sleeps; lines still run), AUTO_STOP=0 (no stop at the end),
 #   PLAN_IDLE_MIN (30), PLAN_KILL (2m), PLAN_PY (.venv/bin/python), PLAN_GATES (command for plan_gates.py).
@@ -38,6 +39,7 @@ export PLAN_DRY=${PLAN_DRY:-0}
 DRY=$PLAN_DRY
 Q=logs/plan_queue.txt; QLOCK=logs/plan_queue.txt.lock
 DEF=logs/plan_deferred.txt; DROP=logs/plan_dropped.txt; FAIL=logs/plan_failed.txt; LOG=logs/plan_queue.log
+DONE=logs/plan_done.txt
 UPSTOP=logs/.plan_upload_stop
 IDLE_SECS=$(( ${PLAN_IDLE_MIN:-30} * 60 ))
 KILL=${PLAN_KILL:-2m}
@@ -65,7 +67,8 @@ up() {  # results/aug_sweep (+ logs) -> <user>/aug-results; extra args go to ckp
     mkdir -p results/aug_sweep/logs
     cp logs/aug_sweep*.md results/aug_sweep/ 2>/dev/null
     cp -r logs/aug_sweep/*.log logs/members logs/p0.log logs/plan_queue.log logs/plan_decisions.md logs/reg_arms.json \
-        logs/plan_queue.txt logs/plan_deferred.txt logs/plan_dropped.txt logs/plan_failed.txt results/aug_sweep/logs/ 2>/dev/null
+        logs/plan_queue.txt logs/plan_deferred.txt logs/plan_dropped.txt logs/plan_failed.txt logs/plan_done.txt logs/sbp \
+        results/aug_sweep/logs/ 2>/dev/null
     if [ "$PLAN_DRY" = 1 ]; then echo "DRY upload $*"; return 0; fi
     HF_HUB_DISABLE_XET=1 timeout 60m $PY cloud/sync/ckpt.py results --run aug --post-run-dir results/aug_sweep "$@"
 }
@@ -176,6 +179,7 @@ handle() {  # one popped line
     fi
     run_cmd "$L_MIN" "$label" "$L_CMD"; code=$?
     [ $code = 0 ] || echo "$(with_try "$line" "$L_TRY") # exit $code $(date -u '+%F %T')" >> "$FAIL"
+    echo "$line # exit $code $(date -u '+%F %T')" >> "$DONE"
     RAN=1
 }
 
