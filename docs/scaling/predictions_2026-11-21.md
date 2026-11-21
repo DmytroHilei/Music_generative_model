@@ -1,6 +1,6 @@
 # Pre-registered predictions: data-constrained scaling runs (RTX 5090, from 2026-11-21)
 
-Committed 2026-11-21 ~02:20 UTC, before the results of the rows below were known, except the rows under "Already
+Committed 2026-11-21 ~02:11 UTC, before the results of the rows below were known, except the rows under "Already
 visible". The source is the scaling plan §8.1. The decision rules are in plan §8.2–8.6. Units: GigaMIDI held-out CE,
 nats/note, 4 heads summed. P = repeat penalty = control − fresh at 160M notes seen (U = 41.48M for the replay quarter,
 3.86 passes).
