@@ -94,5 +94,29 @@ def test_shards_resume_merge():
             sys.argv = saved
 
 
+def test_ladder_member_16_rows():
+    """A scale-ladder member's run dir (model_bf16.pt; cond_inst + n_density, RMSNorm, SwiGLU, QK-norm, as
+    config/pretrain/scale_ladder.py; the E-S6 generator path): one shard of 16 rows."""
+    with tempfile.TemporaryDirectory() as d:
+        files, labels = setup(d)
+        m = tiny(n_programs=129, pitch_size=BOS_PITCH + 2, cond_inst=True, n_density=16, norm='rmsnorm', mlp='swiglu',
+                 qk_norm=True)
+        args = {k: v for k, v in vars(m.config).items() if k != 'dropout'}
+        (Path(d) / 'member').mkdir()
+        torch.save(dict(model=m.state_dict(), model_args=args, iter_num=199), Path(d) / 'member' / 'model_bf16.pt')
+        argv = ['synth_store.py', '--checkpoint', f'{d}/member', '--prompt-store', f'{d}/toy_train', '--prompt-frac',
+                '1', '--labels-dir', str(labels), '--min-group', '2', '--prompt-notes', '16', '--new-notes', '24',
+                '--min-new', '24', '--rows', '16', '--notes', '600', '--shard-notes', '600', '--device', 'cpu',
+                '--out', f'{d}/m']
+        saved, sys.argv = sys.argv, argv
+        try:
+            synth_store.main()
+        finally:
+            sys.argv = saved
+        meta = json.loads((Path(d) / 'm_train' / 'meta.json').read_text())
+        assert meta['n_files'] == 16 and meta['n_notes'] == 16 * 40 and meta['plan']['iter'] == 199
+        assert meta['plan']['checkpoint'].endswith('member/model_bf16.pt')
+
+
 if __name__ == '__main__':
     run(globals())
