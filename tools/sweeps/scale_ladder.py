@@ -53,14 +53,17 @@ def save(name, rec):
 
 
 def parse(log):
-    """Every 'step N:' evaluation line of a train.py log -> [dict(step, ce, heads, prog)], and the parameter count."""
+    """Every 'step N:' evaluation line of a train.py log -> [dict(step, ce, heads, prog[, extras])], and the parameter
+    count. extras: the line's other ' | <name> CE x' sets (val2, val_extra), when it has any."""
     text = log.read_text(errors='replace')
     evals = []
     for m in re.finditer(r'step (\d+): train loss \S+ val loss [\d.]+ \| \S+ CE ([\d.]+) \(([^)]*)\)[^\n\r]*', text):
         heads = {k: float(v) for k, v in re.findall(r'(pit|vel|dur|del) ([\d.]+)', m.group(3))}
         prog = re.search(r'prog CE ([\d.]+)', m.group(0))
+        extras = {k: float(v) for k, v in re.findall(r' \| (\S+) CE ([\d.]+)', m.group(0)[m.end(3) - m.start():])
+                  if k != 'prog'}
         evals.append(dict(step=int(m.group(1)), ce=float(m.group(2)), heads=heads,
-                          prog=float(prog.group(1)) if prog else None))
+                          prog=float(prog.group(1)) if prog else None, **({'extras': extras} if extras else {})))
     params = re.search(r'Model parameters : ([\d,]+)', text)
     return evals, int(params.group(1).replace(',', '')) if params else None
 
