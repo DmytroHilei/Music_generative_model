@@ -91,11 +91,12 @@ min=17.5 need=tests/tools/test_aug_sweep.py,data/cache/cdisc_t1* tier=REC id=B-T
 gate=frontier
 gate=discover
 # E block (items 3-4)
-min=3 need=tools/sweeps/ensemble_eval.py tier=REC id=E-E3 :: $PY tools/sweeps/ensemble_eval.py --members control_s3,control_s4,control_s5,control_s6 --ref fresh_s3,fresh_s4,fresh_s5,fresh_s6 --modes prob,logit,joint --nocond --train-windows 1200 --save-lp
+min=5 need=tools/sweeps/ensemble_eval.py,checkpoints/members/fresh_s6 disk=1 tier=REC id=E-E3 :: $PY tools/sweeps/ensemble_eval.py --members control_s3,control_s4,control_s5,control_s6 --ref fresh_s3,fresh_s4,fresh_s5,fresh_s6 --modes prob,logit,joint --nocond --train-windows 1200 --save-lp
 min=1.5 tier=REC id=E-U1 :: upkeep members
 min=2 need=data_prep/datasets/sbp_pairs.py tier=REC id=E-S2 :: HF_HUB_DISABLE_XET=1 $PY cloud/sync/data.py download --stores sbp_pairs_train,sbp_val_base_validation,sbp_shuf_base_validation
 min=4 need=data/cache/sbp_val_base* tier=REC id=E-S3 :: mkdir -p logs/sbp && $TB $FTL $PE --val_csv_path=store:data/cache/sbp_val_base --val_extra='shuf=store:data/cache/sbp_shuf_base' --out_dir=checkpoints/sbp_eval > logs/sbp/base.log 2>&1
 min=75.5 need=tests/tools/test_aug_sweep.py,checkpoints/members/control_s3 disk=3 tier=REC id=E-S6 :: $SS --checkpoint checkpoints/members/control_s3 --out data/cache/synth_clean && $A --smoke --arms synth_clean25 && $A --arms synth_clean25 --force --keep
+min=2 need=tools/sweeps/synth_leak.py,data/cache/synth_clean_train tier=REC id=E-S6leak :: $PY tools/sweeps/synth_leak.py --synth data/cache/synth_clean_train
 # items34 inserts E-E4*/E-E5* (G3a), E-E6* (G3b) and the gated OPTIONAL rows at their priority
 gate=items34
 # OPTIONAL in §9 priority order; gates insert the gated (*) rows at their rank; each line asks plan_gates.py guard
