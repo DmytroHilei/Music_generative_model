@@ -6,7 +6,10 @@ master plan section 3(C) and 8.3). One arm = one train.py run of config/pretrain
     .venv/bin/python tools/sweeps/isoflop.py --queue               # queue lines (plan_queue.sh format) of the ESS rows
     .venv/bin/python tools/sweeps/isoflop.py --run 07              # one arm (chained arms copy the stem's pre_cooldown.pt)
     .venv/bin/python tools/sweeps/isoflop.py --gate 0|1|chain|2    # decisions; --append FILE adds the gated rows' lines
-    .venv/bin/python tools/sweeps/isoflop.py --smoke [--s0]        # chained vs independent CE (laptop: replay, tiny)
+    .venv/bin/python tools/sweeps/isoflop.py --arms 1,22,lit3      # several arms (gated ones only when switched on)
+    .venv/bin/python tools/sweeps/isoflop.py --panel 1-6           # B-T4: finals on the Discover panel
+    .venv/bin/python tools/sweeps/isoflop.py --smoke [--s0]        # chained vs independent CE (S0 on the pool when
+                                                                   # it is VERIFIED, else tiny on replay; --laptop)
 
 Iterations come from C = 6 N D (N = the plan's non-embedding count incl. the heads, D = iters x 32,768 notes).
 A chained arm resumes from its stem's pre_cooldown.pt (every arm passes --save_pre_cooldown=True; the scale ladder
@@ -42,6 +45,10 @@ N_NE = {  # the plan's N per shape (reproduces its iteration counts); other shap
     '10x448': 27_183_761, '10x512': 35_687_230, '11x576': 48_221_689, '12x640': 64_845_476, '13x704': 84_893_674,
     '14x768': 106_615_351}
 ALT_LR = 2e-3
+GATES = OUT / 'gates.json'            # rows each gate switched on: {'1': [...], '2': [...]}
+VERIFIED = ROOT / f'{POOL}_train/VERIFIED'  # written by census_pool.py verify
+PANEL = 'disc=store:data/cache/cdisc_vn;disc_aria=store:data/cache/cdisc_va'  # B-T4: Discover panel on the finals
+ALIASES = {'22': ['22p'], 'lit3': ['LIT3a', 'LIT3b'], 'o1': ['O1'], 'o2': ['O2a', 'O2b'], 'o4': ['O4'], 'g1a': ['G1a']}
 
 
 def arm(id, shape, C=None, iters=None, stem=None, lr=1e-3, seed=1337, extra=(), tier='ESS', store=POOL, gate=None,
@@ -233,6 +240,59 @@ def run(id, dry=False):
     print(f'{id}: CE {curve[-1][1]:.4f} in {(time.time() - t0) / 60:.1f} min')
 
 
+def resolve(ids):
+    """'1,22,lit3' -> ['01', '22p', 'LIT3a', 'LIT3b']."""
+    out = []
+    for x in str(ids).split(','):
+        x = x.strip()
+        if x in ARMS:
+            out.append(x)
+        elif x.lower() in ALIASES:
+            out += ALIASES[x.lower()]
+        elif x.isdigit() and f'{int(x):02d}' in ARMS:
+            out.append(f'{int(x):02d}')
+        elif x:
+            sys.exit(f'unknown arm {x}')
+    return out
+
+
+def gated_off(id):
+    """A gated row runs only after its gate switched it on (results/isoflop/gates.json)."""
+    g = ARMS[id]['gate']
+    if not g:
+        return False
+    dec = json.loads(GATES.read_text()) if GATES.exists() else {}
+    return id not in dec.get(g[0], [])
+
+
+def panel(spec):
+    """B-T4: the finals (model_bf16.pt) of grid rows a-b scored on the Discover panel (eval only) -> runs.json."""
+    a, _, b = spec.partition('-')
+    for n in range(int(a), int(b or a) + 1):
+        id = f'{n:02d}'
+        rec, ck = load().get(id), out_dir(ARMS[id]) / 'model_bf16.pt'
+        if rec is None or not ck.exists() or 'panel' in rec:
+            print(f'{id}: ' + ('already scored' if rec and 'panel' in rec else 'no final'))
+            continue
+        L, d, h = dims(ARMS[id]['shape'])
+        log = LOGS / f'panel_{id}.log'
+        with open(log, 'w') as f:
+            code = subprocess.run(['.venv/bin/python', 'train.py', CONFIG, f'--n_layer={L}', f'--n_embd={d}',
+                                   f'--n_head={h}', f'--csv_path=store:{REPLAY}', '--init_from=finetune',
+                                   f'--init_ckpt={ck.relative_to(ROOT)}', '--eval_only=True', '--compile=False',
+                                   '--batch_size=16', '--eval_iters=75', f'--val_extra={PANEL}',
+                                   '--out_dir=logs/isoflop/panel_tmp'], cwd=ROOT, stdout=f,
+                                  stderr=subprocess.STDOUT).returncode
+        text = log.read_text(errors='replace')
+        if code:
+            print(f'{id}: panel eval failed (exit {code}), see {log}')
+            continue
+        line = re.search(r'step \d+: train loss[^\n]*', text).group(0)
+        rec['panel'] = {k: float(v) for k, v in re.findall(r'\| (\w+) CE ([\d.]+)', line)}
+        save(rec)
+        print(f'{id}: {rec["panel"]}')
+
+
 def queue_line(a):
     need = out_dir(ARMS[a['stem']]) / 'pre_cooldown.pt' if a['stem'] else ROOT / f"{a['store']}_train/meta.json"
     return (f"min={minutes(a)} need={need.relative_to(ROOT)} tier={a['tier']} id=iso_{a['id']} :: "
@@ -356,6 +416,11 @@ def gate(which, args):
             with open(SKIP_IDS, 'a') as f:
                 f.write('34\n')
             cleanup_stems()
+    if which in ('1', '2'):
+        dec = json.loads(GATES.read_text()) if GATES.exists() else {}
+        dec[which] = add
+        OUT.mkdir(parents=True, exist_ok=True)
+        GATES.write_text(json.dumps(dec, indent=1))
     lines = [queue_line(ARMS[i]) for i in add if i not in runs and i not in skipped()]
     for x in lines:
         print(x)
@@ -433,6 +498,9 @@ def main():
     p.add_argument('--queue', action='store_true', help='queue lines of the ungated ESS rows not done / skipped')
     p.add_argument('--tier', default='ESS', help='with --queue: tiers to include, e.g. ESS,REC')
     p.add_argument('--run')
+    p.add_argument('--arms', help='comma list (1, 22, lit3, o2 ...): run each not done; gated rows only when switched on')
+    p.add_argument('--panel', help="grid rows 'a-b': score their finals on the Discover panel")
+    p.add_argument('--laptop', action='store_true', help='with --smoke: the tiny replay smoke even if the pool exists')
     p.add_argument('--print-cmd', action='store_true', help='with --run: print the train.py command only')
     p.add_argument('--gate', choices=['0', '1', 'chain', '2'])
     p.add_argument('--append', help='with --gate / --queue: append the lines to this queue file')
@@ -458,9 +526,21 @@ def main():
             append(a.append, lines)
     elif a.run:
         run(a.run, dry=a.print_cmd)
+    elif a.arms:
+        runs, skip = load(), skipped()
+        for id in resolve(a.arms):
+            if id in runs or id in skip:
+                print(f'{id}: done / skipped')
+            elif gated_off(id):
+                print(f'{id}: gated off (gate {ARMS[id]["gate"]})')
+            else:
+                run(id, dry=a.print_cmd)
+    elif a.panel:
+        panel(a.panel)
     elif a.gate:
         sys.exit(0 if gate(a.gate, a) else 1)
     elif a.smoke:
+        a.s0 = a.s0 or (VERIFIED.exists() and not a.laptop)
         sys.exit(0 if smoke(a) else 1)
     else:
         p.print_help()

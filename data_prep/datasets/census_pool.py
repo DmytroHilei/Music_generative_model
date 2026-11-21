@@ -14,7 +14,8 @@ pack_short rule), 17.21 GB.
 The tar is read as a stream (zstd -dc | tarfile): tokens.u16 and programs.u8 of the wanted parts are appended to the
 output, then the twins are cut out in place, so the peak disk use is the tar + the pool. Candidates for a twin share
 the held-out file's onset sequence (cumsum of delta_time), which every hash level fixes; only those are hashed in full.
-Output: tokens.u16, programs.u8, offsets.npy, files.csv (file_id, md5, store, idx of the census store), meta.json last.
+Output: tokens.u16, programs.u8, offsets.npy, files.csv (file_id, md5, store, idx of the census store), meta.json last;
+verify writes VERIFIED when it passes.
 """
 
 import argparse
@@ -279,6 +280,11 @@ def verify(args):
         ok &= usable == EXPECT_USABLE[parts]
         print(f'expected {EXPECT_USABLE[parts]:,} usable notes')
     print('VERIFY OK' if ok else 'VERIFY FAILED')
+    marker = Path(args.out) / 'VERIFIED'  # queue lines wait for it
+    if ok:
+        marker.write_text(json.dumps(dict(n_files=len(s), n_notes=int(off[-1]), usable=usable)) + '\n')
+    else:
+        marker.unlink(missing_ok=True)
     return ok
 
 

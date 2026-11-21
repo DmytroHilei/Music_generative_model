@@ -55,6 +55,7 @@ def fake_runs(d, ce):
     runs = {id: dict(id=id, ce=v, curve=[(4677, v + 0.1, None), (isoflop.iters(isoflop.ARMS[id]) - 1, v, None)])
             for id, v in ce.items()}
     isoflop.RUNS = Path(d) / 'runs.json'
+    isoflop.GATES = Path(d) / 'gates.json'
     isoflop.SKIP_IDS = Path(d) / 'skip.txt'
     isoflop.RUNS.write_text(json.dumps(runs))
 
@@ -78,7 +79,9 @@ def test_gates():
         # 1e17 vertex at ~45M: r* = 1e17 / (6 N*) / N* ~ 8 < 15 -> #34 skipped
         fake_runs(d, {'07': 2.2, '08': 2.1, '09': 2.03, '10': 1.99, '11': 1.97, '12': 1.965})
         isoflop.gate('2', Namespace(append=None, delete_kept=False))
-        assert '34' in isoflop.SKIP_IDS.read_text()
+        assert '34' in isoflop.SKIP_IDS.read_text() and isoflop.gated_off('34')
+        assert isoflop.resolve('1,22,lit3,o2') == ['01', '22p', 'LIT3a', 'LIT3b', 'O2a', 'O2b']
+        assert not isoflop.gated_off('01')
 
 
 def test_skiplist():
