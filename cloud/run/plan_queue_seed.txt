@@ -75,7 +75,7 @@ min=61.7 need=tools/sweeps/isoflop.py,data/cache/gigamidi_pool_train disk=1 tier
 min=14.5 need=tools/sweeps/isoflop.py,data/cache/gigamidi_pool_train,data/cache/cdisc_v* tier=ESS id=B-T4b :: $PY tools/sweeps/isoflop.py --panel 7-17
 # RECOMMENDED tail: D (rgates inserts D-R5*, D-R7*, D-R8*, D-R9b* here), A, B, E
 gate=rgates
-min=10.4 need=tests/tools/test_aug_sweep.py,logs/reg_arms.json tier=REC id=D-R6 :: $A --notes 80e6 --arms fresh_BEST --arm-json logs/reg_arms.json
+min=10.4 need=tests/tools/test_aug_sweep.py,logs/reg_arms.json tier=REC id=D-R6 :: $A --notes 80e6 --arms fresh_BEST --force --arm-json logs/reg_arms.json
 min=8 need=tests/tools/test_aug_sweep.py,logs/reg_arms.json tier=REC id=D-R9a :: $A --size 6M --force --arms BEST --arm-json logs/reg_arms.json
 min=3 need=tests/tools/test_aug_sweep.py tier=REC id=D-R10s :: $A --smoke --arms b16k
 min=20.4 need=tests/tools/test_aug_sweep.py tier=REC id=D-R10 :: $A --arms b16k

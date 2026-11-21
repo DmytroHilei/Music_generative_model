@@ -202,11 +202,12 @@ class Data:
         return max(0.012, 2 * se) if se is not None else 0.012
 
     def slope(self, size):
-        """Fresh CE per doubling of notes seen: B-Gf120 (42M, 120M notes), A-R1 (6M, 80M notes), else the default."""
+        """Fresh CE per doubling of notes seen: B-Gf120 / giga_fresh120 (120M notes), A-R1 (6M, 80M notes), else the
+        default."""
         f = self.m('fresh', size, need=1)
         if f is not None:
-            for notes in (120e6, 80e6):
-                g = self.m('fresh', size, notes=notes, need=1)
+            for arm, notes in (('fresh', 120e6), ('giga_fresh120', 120e6), ('fresh', 80e6)):
+                g = self.m(arm, size, notes=notes, need=1)
                 if g is not None and g > f:
                     return (g - f) / math.log2(NOTES / notes)
         return SLOPE.get(size, 0.416)
@@ -379,7 +380,9 @@ def stack(*flag_lists):
     rest = [f for f in flags if not f.startswith('--hypothesis=')]
     if len(hyps) <= 1:
         return rest + [f'--hypothesis={h}' for h in hyps]
-    return rest + ['--hypothesis=stack:parts=' + ';'.join(h.replace(':', '/') for h in hyps)]
+    parts = [p for h in hyps for p in (h[len('stack:parts='):].split(';') if h.startswith('stack:parts=')
+                                       else [h.replace(':', '/')])]
+    return rest + ['--hypothesis=stack:parts=' + ';'.join(parts)]
 
 
 def wd2x(flags):
@@ -633,7 +636,7 @@ def gate_rgates(d, st):
         fire = c6 - f6 >= 0.04
         decide('rgates', f"D-R9b {'fires' if fire else 'skipped'}: P_6M {c6 - f6:+.4f}")
         if fire:
-            new.append(line(8, 'REC', 'D-R9b', f'$A --size 6M --arms fresh_{B} {AJ}', NEED_RJ))
+            new.append(line(8, 'REC', 'D-R9b', f'$A --size 6M --arms fresh_{B} --force {AJ}', NEED_RJ))
     # D-O1: drop10 <= -T
     e = d.effect('drop10')
     if e and e['n'] >= 2 and once(st, 'D-O1'):
@@ -800,7 +803,7 @@ def gate_discover(d, st):
         elif rho < 0.75 or rho > 1.33:
             decide('discover', f'G1: rho {rho:.2f} (R*_D {rd:.2f} / R*_G {rg:.2f}): per-source R_D*, B-T3 fires')
             new.append(line(61.6, 'REC', 'B-T3', '$A --size 108M --arms disc_control,disc_fresh,disc_fresh120,'
-                                                 'giga_fresh120 --seeds 1337', DISC_NEED))
+                                                 'giga_fresh120 --seeds 1337 --force', DISC_NEED))
         else:
             decide('discover', f'G1: rho {rho:.2f} (R*_D {rd:.2f} / R*_G {rg:.2f}) in the in-between band: B-T1s3')
             new.append(line(17.5, 'OPT', 'B-T1s3', '$A --seeds 3 --arms disc_control,disc_fresh', DISC_NEED))

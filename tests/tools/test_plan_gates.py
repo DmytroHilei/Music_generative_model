@@ -126,6 +126,8 @@ def test_d1_both_pass_stacks_hypotheses_and_prog_guard():
     assert st['wstar'] == 'wd30x_trunk' and st['dstar'] == 'drop10_late' and st['reg_combo']
     assert arms['REG'] == ['--hypothesis=stack:parts=wd_split/muon=3.0;drop_late/p=0.1/start=1266']
     assert arms['REG_wd2x'] == ['--hypothesis=stack:parts=wd_split/muon=6;drop_late/p=0.1/start=1266']
+    assert arms['BEST'] == ['--hypothesis=stack:parts=wd_split/muon=3.0;drop_late/p=0.1/start=1266;aug_dyn/shift=4;'
+                            'aug_family/rows=0.5']  # one flat stack
     assert env.ids()[:3] == ['D-E5', 'gate=d1 :: --resolve', 'D-E6s']
 
 
