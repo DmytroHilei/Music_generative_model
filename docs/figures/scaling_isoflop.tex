@@ -1,0 +1,83 @@
+% Iso-FLOP results of the RTX 5090 scaling runs (20-22 Nov 2026). (a) held-out CE against size per compute budget,
+% the parabola in ln N and its vertex; (b) the optimal size per budget with the bootstrap 10-90% band, the power law
+% through the three vertices, extended to the planned runs. Data: python tools/sweeps/scaling_figs.py
+% (docs/figures/scaling_data/iso_*.dat, from results/isoflop/runs.json).
+% Build: pdflatex scaling_isoflop.tex (TinyTeX: export PATH=$HOME/.local/bin:$PATH; needs pgfplots).
+% Colours: the first three categorical slots of the dataviz reference palette (validated all-pairs, light mode).
+\documentclass[border=4pt]{standalone}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage{amsmath}
+\usepackage{xcolor}
+\usepackage{pgfplots}
+\pgfplotsset{compat=1.18}
+\usepgfplotslibrary{groupplots}
+\definecolor{sA}{HTML}{2A78D6}
+\definecolor{sB}{HTML}{EB6834}
+\definecolor{sC}{HTML}{1BAF7A}
+\definecolor{ink}{HTML}{0B0B0B}
+\definecolor{ink2}{HTML}{52514E}
+\definecolor{gridc}{HTML}{E3E2DE}
+\pgfplotsset{
+  every axis/.append style={font=\footnotesize, axis line style={ink2}, tick style={ink2}, grid=major,
+    major grid style={gridc, line width=0.4pt}, label style={ink}, tick label style={ink2},
+    legend style={draw=none, fill=white, fill opacity=0.85, text opacity=1, font=\scriptsize, cells={anchor=west}}},
+  ser/.style={#1, line width=1.2pt, mark size=2.2pt},
+}
+\newcommand{\dat}[1]{scaling_data/#1}
+\begin{document}
+\begin{tikzpicture}
+\begin{groupplot}[group style={group size=2 by 1, horizontal sep=1.9cm}, height=6.2cm]
+% (a) iso-FLOP curves
+\nextgroupplot[width=8.4cm, xmode=log, xmin=4.5e6, xmax=1.4e8, ymin=1.9, ymax=2.48,
+  xtick={5e6,1e7,2e7,5e7,1e8}, xticklabels={5M,10M,20M,50M,100M}, minor xtick={}, ytick distance=0.1,
+  yticklabel style={/pgf/number format/fixed, /pgf/number format/precision=1, /pgf/number format/fixed zerofill},
+  xlabel={Non-embedding parameters $N$}, ylabel={Held-out CE (nats per note)},
+  title={\textbf{(a)} Iso-FLOP curves}, title style={font=\footnotesize, ink},
+  legend style={at={(0.5,-0.24)}, anchor=north}, legend columns=4, legend cell align=left]
+\addplot[ser=sA, only marks, mark=*] table[x=N, y=ce] {\dat{iso_points_0.dat}};
+\addlegendentry{$3\times10^{16}$ FLOP}
+\addplot[ser=sB, only marks, mark=square*] table[x=N, y=ce] {\dat{iso_points_1.dat}};
+\addlegendentry{$10^{17}$ FLOP}
+\addplot[ser=sC, only marks, mark=triangle*, mark size=2.6pt] table[x=N, y=ce] {\dat{iso_points_2.dat}};
+\addlegendentry{$3\times10^{17}$ FLOP}
+\addplot[only marks, mark=diamond*, mark size=3pt, fill=white, draw=ink, line width=0.8pt]
+  table[x=N, y=ce] {\dat{iso_vertex.dat}};
+\addlegendentry{optimum (vertex)}
+\addplot[sA, line width=0.9pt, forget plot] table[x=N, y=ce] {\dat{iso_curve_0.dat}};
+\addplot[sB, line width=0.9pt, forget plot] table[x=N, y=ce] {\dat{iso_curve_1.dat}};
+\addplot[sC, line width=0.9pt, forget plot] table[x=N, y=ce] {\dat{iso_curve_2.dat}};
+\node[anchor=west, font=\scriptsize, ink] at (axis cs:3.2e7,2.425) {$3\times10^{16}$};
+\node[anchor=west, font=\scriptsize, ink] at (axis cs:5.7e7,2.158) {$10^{17}$};
+\node[anchor=east, font=\scriptsize, ink] at (axis cs:2.3e7,1.958) {$3\times10^{17}$};
+% (b) optimal size against compute
+\nextgroupplot[width=7.6cm, xmode=log, ymode=log, xmin=1e16, xmax=3e21, ymin=5e6, ymax=4e9,
+  xtick={1e16,1e17,1e18,1e19,1e20,1e21}, ytick={1e7,1e8,1e9}, yticklabels={10M,100M,1B},
+  xlabel={Compute $C = 6ND$ (FLOP)}, ylabel={Optimal size $N^*$},
+  title={\textbf{(b)} Optimal size and the planned runs}, title style={font=\footnotesize, ink}]
+\addplot[ink2, line width=1.0pt] table[x=C, y=N] {\dat{iso_trend_fit.dat}};
+\addplot[ink2, line width=1.0pt, dashed] table[x=C, y=N] {\dat{iso_trend_extra.dat}};
+\addplot[ser=sA, only marks, mark=*, error bars/.cd, y dir=both, y explicit, error bar style={sA, line width=0.8pt}]
+  table[x=C, y=N, y error plus expr=\thisrow{hi}-\thisrow{N}, y error minus expr=\thisrow{N}-\thisrow{lo},
+        restrict expr to domain={\coordindex}{0:0}] {\dat{iso_vertex.dat}};
+\addplot[ser=sB, only marks, mark=square*, error bars/.cd, y dir=both, y explicit, error bar style={sB, line width=0.8pt}]
+  table[x=C, y=N, y error plus expr=\thisrow{hi}-\thisrow{N}, y error minus expr=\thisrow{N}-\thisrow{lo},
+        restrict expr to domain={\coordindex}{1:1}] {\dat{iso_vertex.dat}};
+\addplot[ser=sC, only marks, mark=triangle*, mark size=2.6pt, error bars/.cd, y dir=both, y explicit,
+  error bar style={sC, line width=0.8pt}]
+  table[x=C, y=N, y error plus expr=\thisrow{hi}-\thisrow{N}, y error minus expr=\thisrow{N}-\thisrow{lo},
+        restrict expr to domain={\coordindex}{2:2}] {\dat{iso_vertex.dat}};
+\addplot[only marks, mark=diamond, mark size=3.2pt, draw=ink, line width=0.9pt,
+  nodes near coords, point meta=explicit symbolic,
+  every node near coord/.style={anchor=south east, font=\scriptsize, ink},
+  error bars/.cd, x dir=plus, x explicit, error bar style={ink, line width=0.9pt}, error mark=|]
+  table[x=C, y=N, x error plus expr=\thisrow{Chi}-\thisrow{C}, meta=label] {\dat{iso_planned.dat}};
+\addplot[only marks, mark=square*, mark size=2.2pt, ink2, nodes near coords, point meta=explicit symbolic,
+  every node near coord/.style={anchor=north west, font=\scriptsize, ink}]
+  table[x=C, y=N, meta=label] {\dat{iso_musicar.dat}};
+\node[anchor=south east, font=\scriptsize, ink] at (axis cs:2e18,1.1e8) {$N^* \propto C^{0.49}$};
+\node[anchor=north west, font=\scriptsize, ink2, align=left] at (axis cs:1.3e16,3.3e9)
+  {solid: fit to the three optima\\dashed: extrapolation\\XL / XXL bars: range of notes};
+\end{groupplot}
+\end{tikzpicture}
+\end{document}

@@ -1,0 +1,67 @@
+% Repeat penalty in the RTX 5090 scaling runs (20-22 Nov 2026): held-out CE with repeated data minus CE with fresh data,
+% same model and notes seen. (a) against model size at 3.9 passes over 41.5M unique notes: the default recipe with
+% random windows, the tuned recipe (weight decay 1.0 + dynamics + instrument family), even epochs (iso #26 - #24);
+% (b) against passes for the 6M model over the same 41.5M notes, against census fresh data. Error bars: seed
+% noise (none where one side has one seed). Data: python tools/sweeps/scaling_figs.py
+% (docs/figures/scaling_data/rep_*.dat, from results/aug_sweep/runs.json and results/isoflop/runs.json).
+% Build: pdflatex scaling_repeat.tex (TinyTeX: export PATH=$HOME/.local/bin:$PATH; needs pgfplots).
+% Colours: the first three categorical slots of the dataviz reference palette (validated all-pairs, light mode).
+\documentclass[border=4pt]{standalone}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage{amsmath}
+\usepackage{xcolor}
+\usepackage{pgfplots}
+\pgfplotsset{compat=1.18}
+\usepgfplotslibrary{groupplots}
+\definecolor{sA}{HTML}{2A78D6}
+\definecolor{sB}{HTML}{EB6834}
+\definecolor{sC}{HTML}{1BAF7A}
+\definecolor{ink}{HTML}{0B0B0B}
+\definecolor{ink2}{HTML}{52514E}
+\definecolor{gridc}{HTML}{E3E2DE}
+\pgfplotsset{
+  every axis/.append style={font=\footnotesize, axis line style={ink2}, tick style={ink2}, grid=major,
+    major grid style={gridc, line width=0.4pt}, label style={ink}, tick label style={ink2},
+    legend style={draw=none, fill=white, fill opacity=0.85, text opacity=1, font=\scriptsize, cells={anchor=west}},
+    yticklabel style={/pgf/number format/fixed, /pgf/number format/precision=2, /pgf/number format/fixed zerofill}},
+  ser/.style={#1, line width=1.2pt, mark size=2.2pt},
+  bars/.style={error bars/.cd, y dir=both, y explicit, error bar style={#1, line width=0.8pt}},
+}
+\newcommand{\dat}[1]{scaling_data/#1}
+\begin{document}
+\begin{tikzpicture}
+\begin{groupplot}[group style={group size=2 by 1, horizontal sep=1.6cm}, height=6.2cm, ymin=0, ymax=0.28,
+  ytick distance=0.05]
+% (a) against model size
+\nextgroupplot[width=8.4cm, xmode=log, xmin=1.8e6, xmax=5.2e8,
+  xtick={3e6,1e7,3e7,1e8,3e8}, xticklabels={3M,10M,30M,100M,300M}, minor xtick={},
+  xlabel={Non-embedding parameters $N$}, ylabel={Repeat penalty (nats per note)},
+  title={\textbf{(a)} 3.9 passes over 41.5M unique notes}, title style={font=\footnotesize, ink},
+  legend style={at={(0.5,-0.24)}, anchor=north, /tikz/every even column/.append style={column sep=8pt}}, legend columns=3,
+  legend cell align=left]
+\addplot[ser=sA, mark=*, bars=sA] table[x=N, y=P, y error=se] {\dat{rep_size_default.dat}};
+\addlegendentry{default recipe, random windows}
+\addplot[ser=sB, mark=square*, bars=sB] table[x=N, y=P, y error=se] {\dat{rep_size_best.dat}};
+\addlegendentry{tuned recipe}
+\addplot[ser=sC, only marks, mark=triangle*, mark size=3pt] table[x=N, y=P] {\dat{rep_size_epochs.dat}};
+\addlegendentry{even epochs}
+\node[anchor=south east, font=\scriptsize, ink] at (axis cs:1.9e8,0.24) {default recipe};
+\node[anchor=west, font=\scriptsize, ink2] at (axis cs:2.4e8,0.233) {1 seed};
+\node[anchor=north west, font=\scriptsize, ink] at (axis cs:1.3e7,0.027) {tuned recipe};
+\node[anchor=west, font=\scriptsize, ink] at (axis cs:4.7e7,0.056) {even epochs};
+% (b) against passes, 6M
+\nextgroupplot[width=7.6cm, xmode=log, log basis x=2, xmin=2.5, xmax=40, xtick={4,8,16,32},
+  xticklabels={4,8,16,32}, minor xtick={},
+  xlabel={Passes over the unique notes}, ylabel={Repeat penalty (nats per note)},
+  title={\textbf{(b)} 6M model over 41.5M unique notes}, title style={font=\footnotesize, ink}]
+\addplot[ser=sA, mark=*, bars=sA] table[x=passes, y=P, y error=se] {\dat{rep_passes_6m.dat}};
+\draw[ink2, dashed, line width=0.8pt] (axis cs:11.8,0) -- (axis cs:11.8,0.28);
+\draw[ink2, densely dotted, line width=1pt] (axis cs:23.6,0) -- (axis cs:23.6,0.28);
+\node[rotate=90, anchor=south east, font=\scriptsize, ink2] at (axis cs:10.8,0.275) {passes limit};
+\node[rotate=90, anchor=south east, font=\scriptsize, ink2] at (axis cs:21.6,0.275) {first turn-up};
+\node[anchor=north, font=\scriptsize, ink2] at (axis cs:15.4,0.138) {1 seed};
+\node[anchor=north west, font=\scriptsize, ink] at (axis cs:3.7,0.088) {6M, default recipe};
+\end{groupplot}
+\end{tikzpicture}
+\end{document}
