@@ -6,6 +6,7 @@ GPU-side training throughput benchmark on synthetic data (no data loader): forwa
 
 Reports tokens/s, ms per optimizer step (at a fixed tokens-per-step budget) and peak memory.
 --linear_attn '' hybrid4 --gdn_kernel torch fla: Gated DeltaNet layers (musicar/model/linear_attn.py) and their kernel.
+--mem_cap_gb 64: cap the memory torch may use (a 64 GB H100 on an 80 GB card); --out FILE: one JSON line per config.
 --profile: time per phase (forward / backward incl. checkpoint recompute / clip / optimizer) and the top CUDA kernels.
 Steps carry NVTX ranges; for a timeline in Nsight Systems:
     nsys profile --trace=cuda,nvtx --capture-range=cudaProfilerApi -o logs/prof/x python tools/bench/bench.py ... --profile
@@ -64,6 +65,8 @@ def parse_args():
                    help='linear attention kernel (ignored without linear_attn)')
     p.add_argument('--profile', action='store_true', help='profile one config (first of each list): top CUDA kernels')
     p.add_argument('--profile_steps', type=int, default=2, help='steps timed per phase in --profile')
+    p.add_argument('--mem_cap_gb', type=float, default=0, help='cap torch memory at this many GB (0 = whole GPU)')
+    p.add_argument('--out', default='', help='append one JSON line per config to this file')
     return p.parse_args()
 
 
@@ -156,18 +159,35 @@ def bench(args, micro, compiled, attn, fp8, profile=False, act_ckpt=0, linear_at
         torch.cuda.synchronize()
     dt = (time.perf_counter() - t) / args.steps
     tokens = accum * micro * args.block
-    return tokens / dt, dt * 1000, torch.cuda.max_memory_allocated() / 2**30
+    return tokens / dt, dt * 1000, torch.cuda.max_memory_allocated() / 2**30, torch.cuda.max_memory_reserved() / 2**30
+
+
+def record(args, n, **kw):
+    """--out: one JSON line with the shape, the settings and the result of a config."""
+    if not args.out:
+        return
+    import json
+    keys = ('n_layer', 'n_embd', 'n_head', 'block', 'tokens_per_step', 'optim', 'fp8_recipe', 'ckpt_save', 'n_programs',
+            'mem_cap_gb')
+    rec = dict({k: getattr(args, k) for k in keys}, params=n, device=torch.cuda.get_device_name(), **kw)
+    with open(args.out, 'a') as f:
+        f.write(json.dumps(rec) + '\n')
 
 
 def main():
     args = parse_args()
-    n = sum(p.numel() for p in GPT(MusicConfig(n_layer=args.n_layer, n_embd=args.n_embd, n_head=args.n_head,
-                                               n_kv_head=args.n_kv_head, mlp=args.mlp, qk_norm=bool(args.qk_norm))).parameters())
+    if args.mem_cap_gb:
+        total = torch.cuda.get_device_properties(0).total_memory
+        torch.cuda.set_per_process_memory_fraction(min(1.0, args.mem_cap_gb * 2**30 / total))
+    with torch.device('meta'):  # count only: no 7 GB fp32 copy of a 1.8B model on the CPU
+        n = sum(p.numel() for p in GPT(MusicConfig(n_layer=args.n_layer, n_embd=args.n_embd, n_head=args.n_head,
+                                                   n_kv_head=args.n_kv_head, mlp=args.mlp,
+                                                   qk_norm=bool(args.qk_norm))).parameters())
     print(f"model {args.n_layer}L x {args.n_embd} ({n / 1e6:.1f}M), block {args.block} {args.pos_emb}, "
           f"{args.tokens_per_step:,} tokens/step, {torch.cuda.get_device_name()}")
     print(f"optimizer {args.optim}, n_programs {args.n_programs}")
     print(f"{'micro':>6}{'compile':>8}{'attn':>10}{'fp8':>5}{'ckpt':>5}{'linear':>9}{'kernel':>7}{'tok/s':>11}"
-          f"{'ms/step':>9}{'peak GB':>9}")
+          f"{'ms/step':>9}{'peak GB':>9}{'resv GB':>9}")
     if args.profile:
         print(bench(args, args.micro[0], args.compile[0], args.attn[0], args.fp8[0], profile=True,
                     act_ckpt=args.act_ckpt[0], linear_attn=args.linear_attn[0], gdn_kernel=args.gdn_kernel[0]))
@@ -180,13 +200,17 @@ def main():
                     for ck in args.act_ckpt:
                         for la, kernel in variants:
                             head = f"{micro:>6}{compiled:>8}{attn:>10}{fp8:>5}{ck:>5}{la or 'full':>9}{kernel:>7}"
+                            cfg = dict(micro=micro, compile=compiled, attn=attn, fp8=fp8, act_ckpt=ck,
+                                       linear_attn=la, kernel=kernel)
                             try:
-                                tps, ms, mem = bench(args, micro, compiled, attn, fp8, act_ckpt=ck, linear_attn=la,
-                                                     gdn_kernel=kernel)
-                                print(f"{head}{tps:>11,.0f}{ms:>9.0f}{mem:>9.2f}", flush=True)
+                                tps, ms, mem, resv = bench(args, micro, compiled, attn, fp8, act_ckpt=ck,
+                                                           linear_attn=la, gdn_kernel=kernel)
+                                print(f"{head}{tps:>11,.0f}{ms:>9.0f}{mem:>9.2f}{resv:>9.2f}", flush=True)
+                                record(args, n, **cfg, tok_s=tps, ms_step=ms, peak_gb=mem, reserved_gb=resv)
                             except Exception as e:  # OOM, unsupported backend, ...
-                                print(f"{head}   failed: {type(e).__name__}: {str(e).splitlines()[0][:70]}",
-                                      flush=True)
+                                msg = f'{type(e).__name__}: {str(e).splitlines()[0][:70]}'
+                                print(f"{head}   failed: {msg}", flush=True)
+                                record(args, n, **cfg, error=msg)
                             torch.cuda.empty_cache()
 
 

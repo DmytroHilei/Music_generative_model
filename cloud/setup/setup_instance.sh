@@ -8,6 +8,7 @@
 # DATA_STORES=a,b,c: download / verify only those stores (default: all in cloud/sync/hub.py)
 # WEIGHTS=a,b: also released model weights from the Hub (<hf user>/<name> or a full repo id) into checkpoints/<name>/,
 #   sha256-checked (cloud/sync/ckpt.py weights), e.g. WEIGHTS=musicar-L for data_prep/datasets/synth_store.py
+# ENV_ONLY=1: steps 2-4 only (packages, venv, GPU check): no secrets, data or accounts (cloud/run/h100_bench.sh)
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 ROOT=$(pwd)
@@ -15,7 +16,7 @@ step() { echo; echo "=== [setup $(date +%T)] $*"; }
 
 step "1/6 secrets"
 if [ -f cloud/secrets.env ]; then set -a; source cloud/secrets.env; set +a; fi
-[ -n "${HF_TOKEN:-}" ] || { echo "HF_TOKEN missing: put it in cloud/secrets.env (see cloud/secrets.env.example)"; exit 1; }
+[ -n "${HF_TOKEN:-}" ] || [ "${ENV_ONLY:-0}" = 1 ] || { echo "HF_TOKEN missing: put it in cloud/secrets.env (see cloud/secrets.env.example)"; exit 1; }
 [ -n "${WANDB_API_KEY:-}" ] || echo "note: WANDB_API_KEY not set: the run needs --no-wandb or a key"
 echo "ok"
 
@@ -60,6 +61,8 @@ print(f'{p.name}: sm_{p.major}{p.minor}, {p.total_memory / 2**30:.1f} GB, {p.mul
 x = torch.randn(1024, 1024, device='cuda', dtype=torch.bfloat16)
 print('bf16 matmul ok', float((x @ x).float().abs().mean()) > 0)
 EOF
+
+[ "${ENV_ONLY:-0}" = 1 ] && { echo; echo "=== [setup $(date +%T)] ENV_ONLY: done"; exit 0; }
 
 step "5/6 data: download + verify (sha256 of every file)"
 if [ ! -f data/cache/.verified ]; then
