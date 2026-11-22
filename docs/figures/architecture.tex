@@ -70,11 +70,11 @@
 \newsavebox{\embBox}
 \sbox{\embBox}{\begin{tikzpicture}
   \foreach \n/\v [count=\i] in {pitch/130, vel./32, dur./512, $\Delta t$/512} {
-    \node[gbox, minimum width=12mm, font=\scriptsize] (e\i) at (1.45*\i, 0) {\n\ \textcolor{black!70}{(\v)}};
-    \draw[arr] (e\i.north) -- (1.45*\i, 0.62);
+    \node[gbox, minimum width=12mm, font=\scriptsize] (e\i) at (1.45*\i, 0) {\n\\[-2pt] \textcolor{black!70}{$\v\times288$}};
+    \draw[arr] (e\i.north) -- node[right, font=\tiny, inner sep=1pt] {288} (1.45*\i, 0.62);
   }
   \node[gbox, minimum width=56mm] (cat) at (3.625, 0.9) {concat ($4\times288 = 1152$), Linear $1152\to1152$};
-  \draw[arr] (cat.north) -- (3.625, 1.55) node[above, font=\scriptsize] {note vector};
+  \draw[arr] (cat.north) -- (3.625, 1.55) node[above, font=\scriptsize] {note vector: 1152 per note, $T\times1152$};
 \end{tikzpicture}}%
 
 % the sequence, zoomed: file caption, a section caption at its first note and again every 64 notes, the next section's
@@ -230,14 +230,16 @@ multi-hot & a 0/1 vector with a 1 for every instrument present & level & a bin o
 \begin{tikzpicture}
 
 %% ================= title + status =================
-\node[font=\fontsize{20}{22}\selectfont\bfseries, text=tealT] at (1.8, 19.75) {Captioned music model (477M)};
-\node[font=\footnotesize, text=black!85] at (1.8, 19.1) {477M trainable parameters: trunk 446M, cascade heads 16M, two caption adapters 13M, embeddings
+\node[font=\fontsize{20}{22}\selectfont\bfseries, text=tealT] at (1.8, 20.05) {Captioned music model (477M)};
+\node[font=\footnotesize, text=black!85] at (1.8, 19.4) {477M trainable parameters: trunk 446M, cascade heads 16M, two caption adapters 13M, embeddings
   and length tables 2M. The LaBSE text encoder (471M) is frozen and not counted.};
-\node[font=\footnotesize\bfseries, text=tealT, align=center] at (1.8, 18.38) {Status: trained. F1 (31,098 steps, 2.0B notes, one RTX 5090) and its
+\node[font=\footnotesize\bfseries, text=tealT, align=center] at (1.8, 18.68) {Status: trained. F1 (31,098 steps, 2.0B notes, one RTX 5090) and its
   600-step caption phase (f1\_cap) are done; f1\_cap is released as musicar-L-caption.\\ Why each part is there, the training and
   the comparison with other open models: the second sheet, \textit{What was found and tested}. Infilling comes in a later fine-tune.};
-\node[font=\scriptsize, text=black!75, text width=\panelW, align=center, anchor=north] at (1.8, 17.98) {How to read: numbers give the reading order; \textcolor{pinkL}{pink} = captions; grey boxes = linear layers
-  and embedding tables; dashed frame = a module drawn open in place; dotted frame or box = a zoom (white panel) into the dotted part.};
+\node[font=\scriptsize, text=black!75, text width=\panelW, align=center, anchor=north] at (1.8, 18.28) {How to read: numbers give the reading order; \textcolor{pinkL}{pink} = captions; grey boxes = linear layers
+  and embedding tables; dashed frame = a module drawn open in place; dotted frame or box = a zoom (white panel) into the dotted part.\\
+  Shapes leave out the batch: $T$ = notes (2,048 in a training window), $S$ = all positions, notes and caption vectors (2,212),
+  $L$ = caption tokens, $K$ = vectors per caption (16 file, 4 section), $V$ = values of a head; $a \times b$ = $a$ vectors of width $b$.};
 
 %% ================= 3: main column =================
 \node[ptitle] at (-4.3, 17.05) {\sect{3}{Music model}};
@@ -249,19 +251,20 @@ multi-hot & a 0/1 vector with a 1 for every instrument present & level & a bin o
 % input
 \node[box] (inp) at (0, -0.65) {Note tokens {\scriptsize (one position = one note: $\Delta t$, instr., pitch, dur., vel.)}};
 \node[font=\footnotesize, text=black!85] at (0, -1.35) {e.g. 2,048 notes + file caption \capt{loud rock, fast}};
-\draw[arr] (inp) -- (0, 0.67);
+\draw[arr] (inp) -- node[right, font=\scriptsize, inner sep=2pt] {$T\times4$ indices: pitch, vel., dur., $\Delta t$} (0, 0.67);
 
 % embedding + conditions
 \node[gbox, densely dotted, line width=1.1pt] (emb) at (0, 0.95) {Note embedding {\scriptsize ($4\times288$, concat, Linear)}};
 \node[sum] (s0) at (0, 1.85) {$+$};
 \node[gbox, densely dotted, line width=1.1pt, font=\scriptsize] (cond) at (-2.45, 1.95) {Instrument + length\\[-2pt] (per note)\\[-2pt] + instr. set, density\\[-2pt] (per window)};
-\draw[arr] (emb) -- (s0);
-\draw[arr] (cond.east |- s0) -- (s0);
+\draw[arr] (-3.05, -0.37) -- node[left, font=\scriptsize, inner sep=2pt] {instr. ($T$)} (-3.05, 0 |- cond.south);
+\draw[arr] (emb) -- node[right, font=\scriptsize, inner sep=2pt] {$T\times1152$} (s0);
+\draw[arr] (cond.east |- s0) -- node[above, font=\scriptsize, inner sep=1.5pt] {$T\times1152$} (s0);
 % legend
-\node[ptok] at (1.05, 2.2) {};
-\node[note, anchor=north west, inner sep=1pt] at (1.25, 2.33) {caption vector\\(RoPE position, no target)};
-\node[tok] at (1.05, 1.5) {};
-\node[note, anchor=west] at (1.25, 1.5) {note vector};
+\node[ptok] at (1.6, 2.2) {};
+\node[note, anchor=north west, inner sep=1pt] at (1.8, 2.33) {caption vector\\(RoPE position, no target)};
+\node[tok] at (1.6, 1.5) {};
+\node[note, anchor=west] at (1.8, 1.5) {note vector};
 
 % input sequence: [file 16][section 4][64 notes][same section 4 again][64 notes] ... [next section 4][notes]
 \foreach \x in {-3.92, -3.6, -3.28} { \node[ptok] at (\x, 2.85) {}; }
@@ -279,11 +282,12 @@ multi-hot & a 0/1 vector with a 1 for every instrument present & level & a bin o
 \node[text=black!75, font=\tiny, anchor=south] at (-0.58, 3.0) {again};
 \node[text=black!75, font=\tiny, anchor=south] at (1.84, 3.0) {next sect.};
 \draw[densely dotted, line width=1.1pt, rounded corners=3pt] (-4.15, 2.6) rectangle (3.75, 3.3);
-\draw[arr] (s0) -- (0, 2.6);
+\draw[arr] (s0) -- node[right, font=\scriptsize, inner sep=2pt] {$T\times1152$} (0, 2.6);
+\node[font=\scriptsize, anchor=west, inner sep=2pt] at (0, 3.52) {$S\times1152$};
 
 % transformer block
 \node[box, minimum width=26mm] (ln1) at (0, 4.5) {RMSNorm 1};
-\node[box, minimum width=36mm, minimum height=8mm] (att) at (0, 5.55) {Causal self-attention\\[-2pt] {\scriptsize 18 heads}\\[-3pt] {\scriptsize Q, K, V each $1152\to18\times64$}\\[-3pt] {\scriptsize RoPE, QK-norm}};
+\node[box, minimum width=36mm, minimum height=8mm] (att) at (0, 5.55) {Causal self-attention\\[-2pt] {\scriptsize 18 heads, RoPE, QK-norm}\\[-3pt] {\scriptsize Q, K, V each $1152\to18\times64$}\\[-3pt] {\scriptsize heads concat $18{\times}64$, Linear $1152\to1152$}};
 \node[sum] (a1) at (0, 6.95) {$+$};
 \node[box, minimum width=26mm] (ln2) at (0, 8.1) {RMSNorm 2};
 \node[box, minimum width=36mm, minimum height=8mm] (ffn) at (0, 9.2) {SwiGLU feed-forward\\[-2pt] {\scriptsize $1152\to3072\to1152$}};
@@ -294,23 +298,28 @@ multi-hot & a 0/1 vector with a 1 for every instrument present & level & a bin o
 \node[sublab, anchor=south west] at (-2.3, 9.85) {FFN sublayer};
 \draw[arr] (0, 3.3) -- (ln1);
 \draw[arr] (ln1) -- (att);
-\draw[arr] (att) -- (a1);
+\draw[arr] (att) -- node[right, font=\scriptsize, inner sep=2pt, pos=0.45] {$S\times1152$} (a1);
 \draw[arr] (a1) -- (ln2);
 \draw[arr] (ln2) -- (ffn);
-\draw[arr] (ffn) -- (a2);
+\draw[arr] (ffn) -- node[right, font=\scriptsize, inner sep=2pt, pos=0.55] {$S\times1152$} (a2);
 \draw[arr, rounded corners=4pt] (0, 3.75) -- (3.1, 3.75) |- (a1.east);
 \draw[arr, rounded corners=4pt] (0, 7.3) -- (3.1, 7.3) |- (a2.east);
 \fill (0, 3.75) circle (1.4pt);
 \fill (0, 7.3) circle (1.4pt);
+% what the residual connections add: the block input x and the sublayer output, both S x 1152
+\node[font=\scriptsize, rotate=90, inner sep=1pt] at (3.3, 5.35) {residual $x$: $S\times1152$};
+\node[font=\scriptsize, rotate=90, inner sep=1pt] at (3.3, 8.95) {residual $x$: $S\times1152$};
+\node[font=\scriptsize, anchor=east, inner sep=2pt, align=right] at (a1.west) {$x + \mathrm{Attn}(\mathrm{RMSNorm}_1(x))$\\$S\times1152$};
+\node[font=\scriptsize, anchor=east, inner sep=2pt, align=right] at (a2.west) {$x + \mathrm{FFN}(\mathrm{RMSNorm}_2(x))$\\$S\times1152$};
 
 % repeat brace
 \draw[decorate, decoration={brace, amplitude=7pt}, line width=1.2pt, draw=black] (-4.45, 3.45) -- (-4.45, 11.35);
 \node[font=\fontsize{15}{17}\selectfont\bfseries, text=tealT, anchor=east] at (-4.75, 7.4) {28 $\times$};
-\node[sublab, anchor=north west] at (-3.45, 11.2) {width 1152};
+\node[sublab, anchor=north east] at (3.45, 11.2) {width 1152};
 
 % final norm + cascade heads: a running state z (z_0 = h_t, read at the slot just before the next note: the note itself,
 % or the last vector of a section caption inserted before it) read by each head, plus the embedding of each decided value
-\node[box, minimum width=34mm] (lnf) at (0, 11.9) {Final RMSNorm {\scriptsize (the slot before each next note)}};
+\node[box, minimum width=34mm] (lnf) at (0, 11.9) {Final RMSNorm {\scriptsize (read at the slot before each next note: $T\times1152$)}};
 \draw[arr] (a2) -- (lnf);
 \draw[sub] (-4.05, 12.3) rectangle (4.05, 15.25);
 \node[sublab, anchor=south east] at (4.0, 12.33) {Cascade heads};
@@ -329,6 +338,7 @@ multi-hot & a 0/1 vector with a 1 for every instrument present & level & a bin o
 % the state rail, entered from the side of the final norm
 \draw[line width=0.9pt, rounded corners=4pt] (lnf.west) -- (-3.85, 11.9) -- (-3.85, \ry) -- (-3.1, \ry);
 \node[font=\scriptsize, anchor=south, inner sep=1pt] at (-3.48, \ry) {$h_t$};
+\node[font=\scriptsize, anchor=south west, inner sep=1pt] at (-3.75, 12.33) {$h_t$, $z_i$: 1152 per note; $E_i$: tables $V_i\times1152$};
 \draw[arr] (-3.1, \ry) -- (c1.west);
 \foreach \a/\b in {c1/c2, c2/c3, c3/c4} { \draw[arr] (\a.east) -- (\b.west); }
 \draw[line width=0.9pt] (c4.east) -- (3.1, \ry);
@@ -391,10 +401,11 @@ Loss: the sum of the five cross-entropies. Without the chain: $+0.34$ nats / not
 \node[box] (lnx) at (-10.0, 10.75) {LayerNorm};
 \node[box] (P) at (-7.95, 10.75) {Learned queries\\[-2pt] {\scriptsize $K\times768$}};
 \draw[arr] (lnx.north |- tl.south) -- node[right, note, pos=0.4] {token states $L\times768$} (lnx.north);
-\node[box, minimum width=36mm, minimum height=7mm] (xa) at (-9.15, 9.65) {Cross-attention {\scriptsize (16 heads)}};
+\node[box, minimum width=36mm, minimum height=7mm] (xa) at (-9.15, 9.72) {Cross-attention {\scriptsize (16 heads)}\\[-3pt] {\scriptsize out $K\times768$}};
 \draw[arr] (lnx.south) -- node[left, font=\scriptsize] {K, V} (lnx.south |- xa.north);
 \draw[arr] (P.south) -- node[left, font=\scriptsize] {Q} (P.south |- xa.north);
 \node[sum] (b1) at (-9.15, 8.95) {$+$};
+\node[font=\scriptsize, anchor=east, inner sep=2pt, align=right] at (b1.west) {+ queries\\$K\times768$};
 \draw[arr] (xa) -- (b1);
 \fill (-7.95, 10.27) circle (1.4pt);
 \draw[arr, rounded corners=4pt] (-7.95, 10.27) -- (-7.0, 10.27) |- (b1.east);
@@ -402,7 +413,7 @@ Loss: the sum of the five cross-entropies. Without the chain: $+0.34$ nats / not
 \draw[arr] (b1) -- (mlp);
 \node[sum] (g) at (-9.15, 7.3) {$\times$};
 \draw[arr] (mlp) -- (g);
-\node[box, font=\scriptsize] (gate) at (-10.55, 7.3) {gate $g$};
+\node[box, font=\scriptsize] (gate) at (-10.55, 7.3) {gate $g$\\[-2pt] (1152)};
 \draw[arr] (gate) -- (g);
 \node[note, anchor=north west, text width=1.55cm] at (-11.1, 6.95)
   {$g$, one per channel, starts at 0.01, so captions start weak};
@@ -410,23 +421,27 @@ Loss: the sum of the five cross-entropies. Without the chain: $+0.34$ nats / not
 \foreach \i in {0,...,3} { \node[ptok] (cv\i) at (-9.15+0.32*\i, 6.0) {}; }
 \draw[parr] (g.south) -- (cv0.north);
 \node[note, anchor=north west] at (-9.0, 5.8) {$K\times1152$;\\$K{=}16$ file,\\$K{=}4$ section};
-\node[box, font=\scriptsize, inner xsep=4pt] (null) at (-10.35, 4.5) {no caption:\\[-2pt] $K$ learned\\[-2pt] null vectors};
+\node[box, font=\scriptsize, inner xsep=4pt] (null) at (-10.35, 4.55) {no caption:\\[-2pt] $K$ learned\\[-2pt] null vectors\\[-2pt] $K\times1152$};
 \draw[arr] (null.east) -- (-9.22, 4.5);
 \node[font=\scriptsize, anchor=north, inner sep=1pt] at ($(null.east)+(0.3, -0.05)$) {or};
 \node[sublab, anchor=north east] at (-6.85, 11.57) {Caption adapter \rcite{7} {\scriptsize\mdseries ($\times$2)}};
 \draw[parr, rounded corners=5pt] (cv0.south) -- (-9.15, 2.85) -- (-4.07, 2.85);
+\node[font=\scriptsize, text=pinkL, anchor=south, inner sep=1.5pt] at (-6.65, 2.85) {inserted: $16{\times}1152$ file, $4{\times}1152$ per section};
 
 %% ================= 2: input embedding zoom (left, bottom) =================
 \node[anchor=north west, text width=6.2cm, ptext, fill=white] (embz) at (-11.4, 2.0) {%
 \usebox{\embBox}\\[4pt]
-\textbf{+ instrument of this note:} a table of 129 vectors (128 General MIDI programs + drums), added to the
-note vector. The output head \textit{instr.} predicts the next one.\\[3pt]
-\textbf{+ length of the piece,} two more tables per note: the \textbf{seconds left} to the end (33 levels: none, under
-0.5 s, then 31 log steps of $\approx$28\% up to 1,200 s) and the \textbf{share played} (17 levels: none + 16 equal
-steps). Both start at zero; in training the true length is scaled by $e^{0.1\,\varepsilon}$, $\varepsilon \sim \mathcal{N}(0,1)$ (about $\pm$10\%), so a rough request
+\textbf{All added element-wise:} note vector + the four inputs below, each 1152 wide, so the sum is again
+$T\times1152$. Caption vectors are not added: they are inserted between the notes as extra positions (5).\\[3pt]
+\textbf{+ instrument of this note:} a table of 129 vectors ($129\times1152$; 128 General MIDI programs + drums),
+added to the note vector. The output head \textit{instr.} predicts the next one.\\[3pt]
+\textbf{+ length of the piece,} two more tables per note: the \textbf{seconds left} to the end ($33\times1152$; 33
+levels: none, under 0.5 s, then 31 log steps of $\approx$28\% up to 1,200 s) and the \textbf{share played}
+($17\times1152$; 17 levels: none + 16 equal steps). Both start at zero; in training the true length is scaled by $e^{0.1\,\varepsilon}$, $\varepsilon \sim \mathcal{N}(0,1)$ (about $\pm$10\%), so a rough request
 still works, and 15\% of the windows get ``none''. In generation they come from the requested length (6).\\[3pt]
-\textbf{+ window conditions,} the same vector at every note position: the \textbf{instrument set} of the window
-(129-dim multi-hot $\to$ Linear) and its \textbf{density} (notes per second in 15 levels + ``none'' $\to$ a table of 16 vectors).
+\textbf{+ window conditions,} one 1152 vector each, added at every note position: the \textbf{instrument set} of the
+window (129-dim multi-hot $\to$ Linear $129\to1152$, no bias) and its \textbf{density} (notes per second in 15 levels +
+``none'' $\to$ a table of $16\times1152$).
 Both start at zero and are dropped 15\% of the time in training, so ``none'' stays usable; windows with a caption get
 ``none'', so the caption is what describes them. In generation they come from the user or are measured on the prompt.\\[3pt]
 \textbf{Time is absolute:} $\Delta t$ and durations in 20 ms steps, clipped at 10.22 s. There are no bars, beats or
@@ -446,7 +461,8 @@ the last one before a note predicts that note.\\[4pt]
 \textbf{Section captions every 256 notes.} A section's 4 vectors arrive just before its first note and again every
 64 notes, so the caption in force is never far back. Each one describes its own section and names what changed
 since the one before (\capt{drums enter, louder}).\\[4pt]
-\textbf{A training window:} 2,048 notes + 16 + 4 per caption arrival = 2,212 positions (room for 37 section-caption
+\textbf{A training window:} 2,048 notes + 16 + 4 per caption arrival = 2,212 positions; the trunk's input is
+$2{,}212\times1152$ (room for 37 section-caption
 arrivals = 148 vectors, fixed shape; unused ones sit after the notes and are never read). The caption phase f1\_cap trains at 512 notes; generation keeps 2,048 in view.\\[4pt]
 \textbf{Length levels} (2) are added to the note vectors only: seconds left from $L$ down to 0 and the share played
 from 0 to 1, both read from each note's onset.};
