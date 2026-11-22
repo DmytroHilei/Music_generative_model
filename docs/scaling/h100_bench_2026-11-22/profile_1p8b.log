@@ -1,0 +1,42 @@
+model 36L x 2048 (1865.7M), block 2048 rope, 65,536 tokens/step, NVIDIA H100 80GB HBM3
+optimizer muon_bf16, n_programs 129
+ micro compile      attn  fp8 ckpt   linear kernel      tok/s  ms/step  peak GB  resv GB
+W1122 12:32:06.823000 10102 torch/utils/_pytree.py:630] <enum 'KernelPreference'> is an Enum subclass and is now natively supported by torch.compile as an opaque value type. Calling register_constant() on Enum subclasses is deprecated and will be an error in a future release.
+Muon: 180 matrices, 1,821,376,512 params | AdamW: 52,496,896 params
+  time per step by phase (2 steps, synchronized):
+    forward           463 ms   24.4%
+    backward         1171 ms   61.9%
+    clip               11 ms    0.6%
+    optimizer         248 ms   13.1%
+USDT:2026-11-22 12:33:00 10102:10102 SyncActivityProfilerHandler.cpp:39] profiler_start
+USDT:2026-11-22 12:33:02 10102:10102 SyncActivityProfilerHandler.cpp:46] profiler_stop
+  CUDA kernel time 1,852 ms, by kernel group:
+    fp8 scaling/casts         38.8%
+    gemm                      36.0%
+    elementwise/other         13.1%
+    attention                 11.9%
+    layernorm                  0.2%
+    cross-entropy/softmax      0.0%
+    optimizer                  0.0%
+  top kernels:
+      9.6%    720x  nvjet_sm90_qrtst_128x160_128x5_1x2_h_bz_coopA_algo2_TNT
+      8.6%    144x  triton_red_fused__fused_rms_norm__fused_rms_norm_backward__to_copy__unsafe_view_abs_add_arange_
+      7.7%    144x  cudnn_generated_fort_native_sdpa_sm90_flash_bprop_wgmma_f16_knob_2_64x64x64_1x4x1_cga1x1x1_kern
+      6.6%    432x  nvjet_sm90_qrtst_144x128_128x6_1x2_h_bz_coopA_algo2_TNN
+      6.5%    432x  nvjet_sm90_qqtst_192x192_128x4_1x2_h_bz_coopB_TNN
+      6.1%    288x  triton_poi_fused__to_copy_arange_cat_div_mul_neg_pow_sin_slice_unsqueeze_38
+      3.3%    144x  triton_poi_fused__fused_rms_norm__scaled_mm__to_copy_clamp_clone_mul_reciprocal_silu_silu_backw
+      2.8%    144x  cudnn_generated_fort_native_sdpa_sm90_flash_fprop_wgmma_f16_knob_1_64x128x64_4x1x1_cga1x1x1_ker
+      2.8%    288x  nvjet_sm90_qqtst_128x256_128x4_2x1_v_bz_coopA_TNN
+      2.7%     70x  void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_impl_nocast<at::native::CUDA
+      2.2%    144x  nvjet_sm90_qrtst_128x160_128x5_2x1_v_bz_coopA_algo2_TNT
+      2.1%    114x  nvjet_sm90_tst_256x128_64x4_1x2_h_bz_coopA_NTT
+      2.1%    288x  triton_per_fused__fused_rms_norm__fused_rms_norm_backward__to_copy_add_arange_cat_cos_div_mul_n
+      1.9%    144x  triton_red_fused_abs_max_mul_silu_silu_backward_view_24
+      1.8%    123x  nvjet_sm90_tst_256x128_64x4_1x2_h_bz_coopA_TNT
+      1.8%    209x  nvjet_sm90_tst_256x128_64x4_1x2_h_bz_coopA_NNT
+      1.6%    144x  triton_poi_fused__fused_rms_norm__to_copy_add_arange_cat_cos_div_mul_neg_pow_sin_split_split_wi
+      1.6%    144x  triton_poi_fused__fused_rms_norm__to_copy_add_arange_cat_cos_div_mul_neg_pow_sin_split_split_wi
+      1.5%    144x  triton_per_fused__fused_rms_norm_backward__to_copy_abs_add_max_view_33
+      1.3%    540x  void at::native::unrolled_elementwise_kernel<at::native::CUDAFunctor_add<float>, std::array<cha
+(34859.40838022706, 1880.0089572711538, 55.74619197845459, 57.376953125)

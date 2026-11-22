@@ -16,6 +16,7 @@ from pathlib import Path
 RUNS = {  # shape: (run, notes low, notes high) - the request's XL / XXL rows (outline section 6.2)
     '28x1664': ('1B (primary)', 20e9, 27e9), '22x1920': ('1B (wide)', 20e9, 27e9),
     '36x2048': ('1.8B (primary)', 35e9, 49e9), '28x2304': ('1.8B (wide)', 35e9, 49e9),
+    '38x2304': ('2.5B (option)', 51e9, 68e9),
 }
 REF_SHAPE = '28x1152'  # musicar-L
 TRAIN_5090 = 56_000    # musicar-L's measured training rate on the RTX 5090 (8.3B notes / 41 h)
@@ -43,7 +44,8 @@ def main():
     p = argparse.ArgumentParser()
     p.add_argument('files', nargs='+')
     p.add_argument('--ref', help='bench.py --out file of the reference GPU (same musicar-L configuration)')
-    p.add_argument('--eff', type=float, default=0.85, help='multi-GPU efficiency for the run hours')
+    p.add_argument('--eff', type=float, default=0.85, help='multi-GPU efficiency for the run hours (0.95 when the\n'
+                   ' per-GPU rate is measured at tokens_per_step 16,384: only the all-reduce is left)')
     a = p.parse_args()
     recs = load(a.files)
     dev = recs[0]['device'] if recs else '?'
