@@ -91,6 +91,27 @@ def test_form_recovered():
     assert ff.fit_form('a0', pts, S0, 'epoch')['chi2'] > 20 * f['chi2']
 
 
+def test_turnups_and_cap():
+    runs = {
+        'climb': dict(arm='control', size='6M', frac=0.0625, notes=320e6, iters=9766, unique_notes=10.2e6, seed=1,
+                      ce=3.65, curve=[[0, 20.0], [2441, 3.9], [4882, 3.6], [7323, 3.54], [9764, 3.65]]),
+        'flat': dict(arm='control', size='6M', frac=0.25, notes=640e6, iters=19531, unique_notes=41.48e6, seed=1,
+                     ce=2.64, curve=[[0, 20.0], [9764, 2.9], [19528, 2.641], [19530, 2.64]]),
+        'big': dict(arm='control', size='108M', frac=0.125, notes=160e6, iters=4883, unique_notes=20.95e6, seed=1,
+                    ce=3.2, curve=[[0, 20.0], [3660, 3.06], [4880, 3.2]]),
+    }
+    t = ff.turnups(runs)
+    assert [x['size'] for x in t] == ['108M', '6M'], t
+    six = t[1]
+    assert abs(six['passes'] - 7324 * 320e6 / 9766 / 10.2e6) < 1e-6 and abs(six['rise'] - 0.11) < 1e-9
+    pts = [dict(kind='control', N=5.88e6, U=41.48e6, D=640e6)]
+    c = ff.passes_cap(pts, t, 1.8e9, 8.8e9)       # N/U 0.2: the 6M turn-up (0.58 <= 1.05) binds, the 108M one not
+    assert abs(c['turn_up'] - six['passes'] / 2) < 1e-9 and c['cap'] == min(c['fitted'], c['turn_up']), c
+    c = ff.passes_cap(pts, t, 30e9, 8.8e9)        # N/U 3.4: the 108M turn-up (5.1 <= 6.8) binds too
+    assert abs(c['turn_up'] - t[0]['passes'] / 2) < 1e-9 and c['fitted'] is None and c['cap'] == c['turn_up'], c
+    assert ff.passes_cap([], [], 1e9, 8.8e9)['cap'] is None
+
+
 def test_run_on_synthetic_files():
     with tempfile.TemporaryDirectory() as d:
         iso, aug = Path(d) / 'iso.json', Path(d) / 'aug.json'

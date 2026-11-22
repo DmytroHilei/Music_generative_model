@@ -23,6 +23,9 @@ Validation: leave one group out (217M; R_D >= 6.6; the largest U; 3M); a form pa
 0.02. The answer is the envelope of the passing forms. Out-of-sample checks on the iso footing (even epochs, no aug
 offsets): #26 (4 epochs of the replay quarter at 42M) - #24, #34 (2 epochs plan, 1.33 passes), musicar-L.
 Predictions use the epoch basis (the request's runs read the data in even epochs) and the default recipe.
+Turn-ups: a repeated run whose held-out CE ends TURN_RISE above its lowest evaluation overfits; it is not fitted (no
+form here can climb). Passes cap at N/U: the smaller of 1.5x the most passes fitted at a comparable N/U and half the
+earliest turn-up among runs with N/U up to max(2 N/U, 1.05).
 """
 import argparse
 import json
@@ -41,6 +44,7 @@ MUSICAR_L = dict(N=461_070_848, D=8_295_677_952, U=4.5e9, ce=1.641)  # 28x1152; 
 E_CAP = 1.641
 MIN_ITERS = 3000
 TOL = 0.02
+TURN_RISE = 0.02  # held-out CE this far above its lowest evaluation at the end of a run = a turn-up
 K_UN = 27.0  # U_N = U / K_UN: the compute-optimal size for U notes in one pass (r* of the iso fit)
 U_GRID = [2.1e9, 4.5e9, 6.5e9, 7.7e9, 8.8e9, 9.92e9]
 MODELS = {'1B': 1e9, '1.8B': 1.8e9, '2.5B': 2.5e9}
@@ -96,10 +100,32 @@ def aug_points(runs, min_iters=MIN_ITERS):
         out.append(dict(tag=f'{size} {arm} U{U / 1e6:.0f}M D{D / 1e6:.0f}M', size=size, arm=arm,
                         N=float(N_AUG[size]), D=float(D), U=float(U), ce=float(np.mean(ces)), n=len(ces),
                         sigma=sig[size], store=REP_ARMS[arm], kind=kind, use=arm != 'sub168_census'))
+    climbed = {(t['size'], round(t['U']), round(t['D'], -6)) for t in turnups(runs)}
     for p in out:
-        if any(q['size'] == p['size'] and q['U'] == p['U'] and q['D'] < p['D'] and q['ce'] < p['ce'] for q in out):
+        if ((p['size'], round(p['U']), round(p['D'], -6)) in climbed
+                or any(q['size'] == p['size'] and q['U'] == p['U'] and q['D'] < p['D'] and q['ce'] < p['ce'] for q in out)):
             p['use'], p['turn_up'] = False, True
     return out
+
+
+def turnups(runs):
+    """Repeated runs whose held-out CE ended TURN_RISE or more above its lowest evaluation (overfitting):
+    dict(tag, size, N, D, U, nu = N/U, passes at the lowest evaluation, rise)."""
+    out = []
+    for r in runs.values():
+        if r.get('failed') or r.get('arm') not in REP_ARMS or not r.get('curve') or not r.get('iters'):
+            continue
+        U = r.get('unique_notes') or (U_POOL if REP_ARMS[r['arm']] == 'pool' else U_STORE)
+        c = [(s, ce) for s, ce in r['curve'] if s > 0]
+        if len(c) < 2 or r['notes'] <= 1.05 * U:
+            continue
+        s_min, ce_min = min(c, key=lambda x: x[1])
+        if c[-1][1] - ce_min >= TURN_RISE:
+            size = r.get('size', '42M')
+            out.append(dict(tag=f"{size} {r['arm']} U{U / 1e6:.0f}M D{r['notes'] / 1e6:.0f}M s{r['seed']}", size=size,
+                            N=float(N_AUG[size]), D=float(r['notes']), U=float(U), nu=N_AUG[size] / U,
+                            passes=(s_min + 1) * r['notes'] / r['iters'] / U, rise=c[-1][1] - ce_min))
+    return sorted(out, key=lambda t: t['passes'])
 
 
 def arrays(pts):
@@ -323,11 +349,16 @@ def checks(fit, s, iso):
     return out
 
 
-def passes_cap(pts, N, U):
-    """1.5 x the most passes among repeated runs at a comparable N/U (within a factor 2), or None."""
+def passes_cap(pts, turns, N, U):
+    """Passes limit at N/U: the smaller of 1.5 x the most passes fitted at a comparable N/U (within a factor 2) and
+    half the earliest turn-up among runs with N/U up to max(2 N/U, 1.05) (a turn-up at a lower N/U binds every larger
+    one). dict(cap, fitted, turn_up); None where nothing applies."""
     x = N / U
     got = [p['D'] / p['U'] for p in pts if p['kind'] == 'control' and x / 2 <= p['N'] / p['U'] <= 2 * x]
-    return 1.5 * max(got) if got else None
+    t = [q['passes'] for q in turns if q['nu'] <= max(2 * x, 1.05)]
+    fitted, turn = (1.5 * max(got) if got else None), (0.5 * min(t) if t else None)
+    vals = [v for v in (fitted, turn) if v is not None]
+    return dict(cap=min(vals) if vals else None, fitted=fitted, turn_up=turn)
 
 
 # ------------------------------------------------------------------------------------------------------- predictions
@@ -456,17 +487,27 @@ def report(res):
     L.append('## Request table: compute-optimal runs and the repeat penalty\n')
     L.append('D = compute-optimal notes on the fresh surface. Penalty = repeated CE - fresh CE at the same N and D '
              f"(even epochs, default recipe): best-AICc form ({res['best']}), then min..max over the forms used.\n")
-    L.append('| run | N | D | C (6ND) | fresh CE | ' + ' | '.join(f'U {u / 1e9:g}B: passes / penalty' for u in
-                                                            (4.5e9, 8.8e9, 9.92e9)) + ' | passes cap (U 8.8B) |')
-    L.append('|---|---|---|---|---|---|---|---|---|')
+    L.append('Cap = passes limit at that N/U (see Turn-ups); OVER = the run needs more passes than the cap.\n')
+    L.append('| run | N | D | C (6ND) | fresh CE | ' + ' | '.join(f'U {u / 1e9:g}B: passes (cap) / penalty' for u in
+                                                            (4.5e9, 8.8e9, 9.92e9)) + ' |')
+    L.append('|---|---|---|---|---|---|---|---|')
     for row in res['request']:
         cells = []
         for u in ('4.5', '8.8', '9.92'):
             c = row['U'][u]
-            cells.append(f"{c['passes']:.1f} / {c['pen_best']:+.3f} ({c['pen_lo']:+.3f}..{c['pen_hi']:+.3f})")
-        cap = row['cap']
+            cap = c['cap']['cap']
+            over = ' OVER' if cap is not None and c['passes'] > cap else ''
+            cells.append(f"{c['passes']:.1f} ({f'{cap:.1f}' if cap else '-'}){over} / {c['pen_best']:+.3f} "
+                         f"({c['pen_lo']:+.3f}..{c['pen_hi']:+.3f})")
         L.append(f"| {row['run']} | {fmt_n(row['N'])} | {fmt_n(row['D'])} | {row['C']:.2g} | {row['fresh']:.3f} | "
-                 + ' | '.join(cells) + f" | {f'{cap:.0f}' if cap else '-'} |")
+                 + ' | '.join(cells) + ' |')
+    L.append('\n## Turn-ups (held-out CE rising during training)\n')
+    L.append(f'Runs whose final CE is {TURN_RISE} or more above their lowest evaluation; passes at the lowest one. '
+             'They are not fitted. The cap at a target N/U is half the earliest turn-up among runs with N/U up to '
+             'max(2 N/U, 1.05), and at most 1.5x the most passes fitted at a comparable N/U.\n')
+    L.append('| run | N/U | passes at the lowest CE | rise by the end |\n|---|---|---|---|')
+    for t in res['turnups']:
+        L.append(f"| {t['tag']} | {t['nu']:.2f} | {t['passes']:.1f} | +{t['rise']:.3f} |")
     if res.get('boot'):
         L.append('\nBootstrap (10 / 50 / 90%) per passing form:\n')
         L.append('| form | quantity | 10% | 50% | 90% |\n|---|---|---|---|---|')
@@ -474,10 +515,12 @@ def report(res):
             for k, v in q.items():
                 L.append(f'| {name} | {k} | {v[0]:.4g} | {v[1]:.4g} | {v[2]:.4g} |')
     L.append('\n## Data-constrained frontier (per passing form)\n')
-    L.append('| form | C | U | N* | D* | passes | L* | N band (+0.01) |\n|---|---|---|---|---|---|---|---|')
+    L.append('| form | C | U | N* | D* | passes (cap) | L* | N band (+0.01) |\n|---|---|---|---|---|---|---|---|')
     for r in (r for r in res['frontier'] if r['C'] in (2.3e19, 1.2e20, 4.1e20, 1e21) and r['U'] in (4.5e9, 8.8e9)):
+        cap = f"{r['cap']:.1f}" if r['cap'] else '-'
         L.append(f"| {r['form']} | {r['C']:.2g} | {r['U'] / 1e9:g}B | {fmt_n(r['N'])}{' (edge)' if r['edge'] else ''} | "
-                 f"{fmt_n(r['D'])} | {r['passes']:.1f} | {r['L']:.3f} | {fmt_n(r['band'][0])}-{fmt_n(r['band'][1])} |")
+                 f"{fmt_n(r['D'])} | {r['passes']:.1f} ({cap}){' OVER' if r['over_cap'] else ''} | {r['L']:.3f} | "
+                 f"{fmt_n(r['band'][0])}-{fmt_n(r['band'][1])} |")
     L.append('\n## Floor (lowest CE for U unique notes)\n')
     L.append('| form | U | L floor | at N | at D |\n|---|---|---|---|---|')
     for r in (r for r in res['floor'] if r['U'] in (4.5e9, 8.8e9)):
@@ -513,6 +556,7 @@ def run(basis='epoch', draws=200, seed=0, iso_path=ISO_RUNS, aug_path=AUG_RUNS, 
     passing = [n for n, f in fits.items() if f['pass']] or [n for n, f in fits.items() if f['pass_noise']]
     use = {n: fits[n] for n in (passing or fits)}
     best = min(use, key=lambda n: use[n]['aicc'])
+    turns = turnups(aug_runs)
     request = []
     rows = [(m, N, d_opt(s, N)) for m, N in MODELS.items()] + [(k, N, D) for k, (N, D) in PLANNED.items()]
     for lab, N, D in rows:
@@ -521,16 +565,19 @@ def run(basis='epoch', draws=200, seed=0, iso_path=ISO_RUNS, aug_path=AUG_RUNS, 
         for U in (4.5e9, 8.8e9, 9.92e9):
             pen = {n: float(model_ce(f, s, N, D, U)[0]) - fresh for n, f in use.items()}
             cells[f'{U / 1e9:g}'] = dict(passes=D / U, pen_lo=min(pen.values()), pen_hi=max(pen.values()),
-                                         pen_best=pen[best], pen=pen)
-        request.append(dict(run=lab, N=N, D=D, C=6 * N * D, fresh=fresh, U=cells, cap=passes_cap(pts, N, 8.8e9)))
+                                         pen_best=pen[best], pen=pen, cap=passes_cap(pts, turns, N, U))
+        request.append(dict(run=lab, N=N, D=D, C=6 * N * D, fresh=fresh, U=cells))
     front = [dict(form=n, C=C, U=U, **frontier(f, s, C, U)) for n, f in use.items() for C in C_GRID
              for U in (2.1e9, 4.5e9, 8.8e9, 9.92e9)]
+    for r in front:
+        r['cap'] = passes_cap(pts, turns, r['N'], r['U'])['cap']
+        r['over_cap'] = bool(r['cap'] is not None and r['passes'] > r['cap'])
     flo = [dict(form=n, U=U, **floor(f, s, U)) for n, f in use.items() for U in (2.1e9, 4.5e9, 8.8e9, 9.92e9)]
     boot = bootstrap(iso_pts, pts, s, use, basis, draws, seed) if draws else {}
     rule = 'pre-registered (all groups within 0.02)' if any(f['pass'] for f in fits.values()) else (
         'noise-aware (within max(0.02, 2 SE))' if passing else 'none passes: all forms shown')
     return dict(basis=basis, max_nu=max_nu, draws=draws, surface=s, iso=[p['tag'] for p in iso_pts], n_aug=len(pts),
-                n_rep=sum(p['kind'] == 'control' for p in pts), aug=all_pts, fits=fits, passing=passing, rule=rule, best=best, sigma=seed_sigma(aug_runs),
+                n_rep=sum(p['kind'] == 'control' for p in pts), aug=all_pts, fits=fits, passing=passing, rule=rule, best=best, sigma=seed_sigma(aug_runs), turnups=turns,
                 request=request, frontier=front, floor=flo, boot=boot, key=key_numbers(use, s),
                 recipe=recipe_layer(aug_runs))
 
