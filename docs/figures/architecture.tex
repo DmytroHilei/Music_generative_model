@@ -151,18 +151,18 @@
     quarter and the caption vectors are rebuilt in front of it.};
 
   %% row B: instrument choice (head 2)
-  \node[rowtitle] at (-1.0, -3.40) {Choosing the instrument: head 2 of every note};
-  \node[box, text width=24mm, font=\scriptsize] (ib) at (0.25, -4.05) {\textbf{band:} instrument set at every position (a list, the prompt's, or none)};
-  \node[pbox, text width=24mm, font=\scriptsize] (ic) at (0.25, -5.00) {caption names instruments: \capt{drums enter}};
-  \node[box, minimum height=13mm, text width=15mm, densely dotted, line width=1.1pt] (ih) at (2.85, -4.50) {instr. head\\[-1pt] {\scriptsize reads $z_1$ (trunk + $\Delta t$), 129 logits after guidance}};
-  \node[box, minimum height=13mm, text width=58mm, font=\scriptsize] (im) at (7.55, -4.50) {\textbf{mask:} only the allowed instruments: a list, the prompt's, and by default the caption's limits
+  \node[rowtitle] at (-1.0, -2.95) {Choosing the instrument: head 2 of every note};
+  \node[box, text width=24mm, font=\scriptsize] (ib) at (0.25, -3.62) {\textbf{band:} instrument set at every position (a list, the prompt's, or none)};
+  \node[pbox, text width=24mm, font=\scriptsize] (ic) at (0.25, -4.69) {caption names instruments: \capt{drums enter}};
+  \node[box, minimum height=13mm, text width=15mm, densely dotted, line width=1.1pt] (ih) at (2.85, -4.155) {instr. head\\[-1pt] {\scriptsize reads $z_1$ (trunk + $\Delta t$), 129 logits after guidance}};
+  \node[box, minimum height=13mm, text width=58mm, font=\scriptsize] (im) at (7.55, -4.155) {\textbf{mask:} only the allowed instruments: a list, the prompt's, and by default the caption's limits
     (\capt{solo piano}, \capt{no drums}, ...);
     \textbf{lock-instruments:} from note 257 the opening's instruments with $\ge$ 4 notes and $\ge$ 2\% of its notes,
     + the families the caption names that have not played yet};
-  \node[box, minimum height=13mm, text width=10mm] (is) at (11.85, -4.50) {sample\\ $a_2$};
-  \node[box, minimum height=13mm, text width=36mm, font=\scriptsize] (iz) at (15.05, -4.50) {$z_2 = z_1 + E_2(a_2)$: pitch, dur., vel.
+  \node[box, minimum height=13mm, text width=10mm] (is) at (11.85, -4.155) {sample\\ $a_2$};
+  \node[box, minimum height=13mm, text width=36mm, font=\scriptsize] (iz) at (15.05, -4.155) {$z_2 = z_1 + E_2(a_2)$: pitch, dur., vel.
     are chosen for this instrument; drums get duration 0. Next step: the instrument table at the input (2)};
-  \node[box, dashed, text width=58mm, font=\scriptsize] (if) at (7.55, -6.15) {or one fixed instrument (default piano): the head is not sampled};
+  \node[box, dashed, text width=58mm, font=\scriptsize] (if) at (7.55, -5.8) {or one fixed instrument (default piano): the head is not sampled};
   \draw[arr, rounded corners=3pt] (ib.east) -- ++(0.2, 0) |- ([yshift=2mm]ih.west);
   \draw[parr, rounded corners=3pt] (ic.east) -- ++(0.2, 0) |- ([yshift=-2mm]ih.west);
   \draw[arr] (ih) -- (im);
@@ -172,11 +172,11 @@
   \draw[arr, dashed, rounded corners=4pt] (if.east) -| (is.south);
 
   %% row C: length and the end of the piece
-  \node[rowtitle] at (-1.0, -7.50) {Length and the end: the requested length $L$ (seconds)};
-  \node[box, text width=19mm, minimum height=13mm] (len) at (0, -8.60) {length $L$\\[-1pt] {\scriptsize from the user (or none)}};
-  \node[gbox, text width=36mm, minimum height=13mm, font=\scriptsize] (lv) at (3.85, -8.60) {each new note: seconds left $L - $ onset and share played onset$\,/\,L$ $\to$ two levels, added to its note vector (2, 5)};
-  \node[box, minimum height=13mm, text width=26mm, font=\scriptsize] (eh) at (7.95, -8.60) {pitch head: value 129 = \textbf{EOS}, the end of the piece};
-  \node[box, minimum height=13mm, text width=60mm, font=\scriptsize, align=left] (er) at (13.35, -8.60) {%
+  \node[rowtitle] at (-1.0, -6.75) {Length and the end: the requested length $L$ (seconds)};
+  \node[box, text width=19mm, minimum height=13mm] (len) at (0, -7.85) {length $L$\\[-1pt] {\scriptsize from the user (or none)}};
+  \node[gbox, text width=36mm, minimum height=13mm, font=\scriptsize] (lv) at (3.85, -7.85) {each new note: seconds left $L - $ onset and share played onset$\,/\,L$ $\to$ two levels, added to its note vector (2, 5)};
+  \node[box, minimum height=13mm, text width=26mm, font=\scriptsize] (eh) at (7.95, -7.85) {pitch head: value 129 = \textbf{EOS}, the end of the piece};
+  \node[box, minimum height=13mm, text width=60mm, font=\scriptsize, align=left] (er) at (13.35, -7.85) {%
     before $0.85\,L$: EOS blocked (floor)\\
     past $L$: EOS logit $+\,0.5$ per second over (ramp)\\
     at $1.2\,L$: EOS forced, the row fades out (stop)};
@@ -185,12 +185,12 @@
   \draw[arr] (eh) -- (er);
 
   %% row D: style hold
-  \node[rowtitle] at (-1.0, -9.95) {Keep-style: the opening's own description holds the rest of the piece};
-  \node[box, text width=19mm, minimum height=13mm] (op) at (0, -11.05) {BOS + 255 notes\\[-1pt] {\scriptsize written with the requested captions}};
-  \node[pbox, text width=44mm, minimum height=13mm, font=\scriptsize] (hc) at (4.45, -11.05) {their description, in the
+  \node[rowtitle] at (-1.0, -9.2) {Keep-style: the opening's own description holds the rest of the piece};
+  \node[box, text width=24mm, minimum height=13mm] (op) at (0.3, -10.3) {BOS + 255 notes\\[-1pt] {\scriptsize written with the requested captions}};
+  \node[pbox, text width=44mm, minimum height=13mm, font=\scriptsize] (hc) at (4.6, -10.3) {their description, in the
     section-caption words: loudness, pace, register, up to 3 instruments (no \capt{busy} / \capt{dense} above 25 notes / s)};
-  \node[box, text width=24mm, minimum height=13mm, font=\scriptsize] (ha) at (8.75, -11.05) {LaBSE + section caption adapter (1)};
-  \node[pbox, text width=56mm, minimum height=13mm, font=\scriptsize] (hs) at (13.35, -11.05) {the section caption of every
+  \node[box, text width=24mm, minimum height=13mm, font=\scriptsize] (ha) at (8.85, -10.3) {LaBSE + section caption adapter (1)};
+  \node[pbox, text width=56mm, minimum height=13mm, font=\scriptsize] (hs) at (13.35, -10.3) {the section caption of every
     later section: once, at note 257; with lock-instruments, the same moment fixes the instrument mask (row above)};
   \draw[arr] (op) -- (hc);
   \draw[parr] (hc) -- (ha);
@@ -261,10 +261,10 @@ multi-hot & a 0/1 vector with a 1 for every instrument present & level & a bin o
 \draw[arr] (emb) -- node[right, font=\scriptsize, inner sep=2pt] {$T\times1152$} (s0);
 \draw[arr] (cond.east |- s0) -- node[above, font=\scriptsize, inner sep=1.5pt] {$T\times1152$} (s0);
 % legend
-\node[ptok] at (1.6, 2.2) {};
-\node[note, anchor=north west, inner sep=1pt] at (1.8, 2.33) {caption vector\\(RoPE position, no target)};
-\node[tok] at (1.6, 1.5) {};
-\node[note, anchor=west] at (1.8, 1.5) {note vector};
+\node[ptok] at (1.35, 2.28) {};
+\node[note, anchor=north west, inner sep=1pt] at (1.55, 2.41) {caption vector\\(RoPE position,\\no target)};
+\node[tok] at (1.35, 1.35) {};
+\node[note, anchor=west] at (1.55, 1.35) {note vector};
 
 % input sequence: [file 16][section 4][64 notes][same section 4 again][64 notes] ... [next section 4][notes]
 \foreach \x in {-3.92, -3.6, -3.28} { \node[ptok] at (\x, 2.85) {}; }
@@ -286,14 +286,14 @@ multi-hot & a 0/1 vector with a 1 for every instrument present & level & a bin o
 \node[font=\scriptsize, anchor=west, inner sep=2pt] at (0, 3.52) {$S\times1152$};
 
 % transformer block
-\node[box, minimum width=26mm] (ln1) at (0, 4.5) {RMSNorm 1};
-\node[box, minimum width=36mm, minimum height=8mm] (att) at (0, 5.55) {Causal self-attention\\[-2pt] {\scriptsize 18 heads, RoPE, QK-norm}\\[-3pt] {\scriptsize Q, K, V each $1152\to18\times64$}\\[-3pt] {\scriptsize heads concat $18{\times}64$, Linear $1152\to1152$}};
-\node[sum] (a1) at (0, 6.95) {$+$};
+\node[box, minimum width=26mm] (ln1) at (0, 4.42) {RMSNorm 1};
+\node[box, minimum width=36mm, minimum height=8mm] (att) at (0, 5.66) {Causal self-attention\\[-2pt] {\scriptsize 18 heads, RoPE, QK-norm}\\[-3pt] {\scriptsize Q, K, V each $1152\to18\times64$}\\[-3pt] {\scriptsize heads concat $18{\times}64$, Linear $1152\to1152$}};
+\node[sum] (a1) at (0, 7.0) {$+$};
 \node[box, minimum width=26mm] (ln2) at (0, 8.1) {RMSNorm 2};
 \node[box, minimum width=36mm, minimum height=8mm] (ffn) at (0, 9.2) {SwiGLU feed-forward\\[-2pt] {\scriptsize $1152\to3072\to1152$}};
 \node[sum] (a2) at (0, 10.65) {$+$};
-\draw[sub] (-2.3, 4.05) rectangle (2.3, 6.15);
-\node[sublab, anchor=south west] at (-2.3, 6.15) {Attn sublayer};
+\draw[sub] (-2.3, 4.05) rectangle (2.3, 6.38);
+\node[sublab, anchor=south west] at (-2.3, 6.38) {Attn sublayer};
 \draw[sub] (-2.3, 7.6) rectangle (2.3, 9.85);
 \node[sublab, anchor=south west] at (-2.3, 9.85) {FFN sublayer};
 \draw[arr] (0, 3.3) -- (ln1);
@@ -303,14 +303,14 @@ multi-hot & a 0/1 vector with a 1 for every instrument present & level & a bin o
 \draw[arr] (ln2) -- (ffn);
 \draw[arr] (ffn) -- node[right, font=\scriptsize, inner sep=2pt, pos=0.55] {$S\times1152$} (a2);
 \draw[arr, rounded corners=4pt] (0, 3.75) -- (3.1, 3.75) |- (a1.east);
-\draw[arr, rounded corners=4pt] (0, 7.3) -- (3.1, 7.3) |- (a2.east);
+\draw[arr, rounded corners=4pt] (0, 7.42) -- (3.1, 7.42) |- (a2.east);
 \fill (0, 3.75) circle (1.4pt);
-\fill (0, 7.3) circle (1.4pt);
+\fill (0, 7.42) circle (1.4pt);
 % what the residual connections add: the block input x and the sublayer output, both S x 1152
 \node[font=\scriptsize, rotate=90, inner sep=1pt] at (3.3, 5.35) {residual $x$: $S\times1152$};
 \node[font=\scriptsize, rotate=90, inner sep=1pt] at (3.3, 8.95) {residual $x$: $S\times1152$};
-\node[font=\scriptsize, anchor=east, inner sep=2pt, align=right] at (a1.west) {$x + \mathrm{Attn}(\mathrm{RMSNorm}_1(x))$\\$S\times1152$};
-\node[font=\scriptsize, anchor=east, inner sep=2pt, align=right] at (a2.west) {$x + \mathrm{FFN}(\mathrm{RMSNorm}_2(x))$\\$S\times1152$};
+\node[font=\scriptsize, anchor=east, inner sep=2pt, align=right, yshift=1.3mm] at (a1.west) {$x + \mathrm{Attn}(\mathrm{RMSNorm}_1(x))$\\$S\times1152$};
+\node[font=\scriptsize, anchor=east, inner sep=2pt, align=right, yshift=1.3mm] at (a2.west) {$x + \mathrm{FFN}(\mathrm{RMSNorm}_2(x))$\\$S\times1152$};
 
 % repeat brace
 \draw[decorate, decoration={brace, amplitude=7pt}, line width=1.2pt, draw=black] (-4.45, 3.45) -- (-4.45, 11.35);
@@ -319,7 +319,8 @@ multi-hot & a 0/1 vector with a 1 for every instrument present & level & a bin o
 
 % final norm + cascade heads: a running state z (z_0 = h_t, read at the slot just before the next note: the note itself,
 % or the last vector of a section caption inserted before it) read by each head, plus the embedding of each decided value
-\node[box, minimum width=34mm] (lnf) at (0, 11.9) {Final RMSNorm {\scriptsize (read at the slot before each next note: $T\times1152$)}};
+\node[box, minimum width=34mm] (lnf) at (0, 11.88) {Gather $S \to T$ rows, then Final RMSNorm\\[-3pt]
+  {\scriptsize per note, the row just before the next note (5): $T\times1152$}};
 \draw[arr] (a2) -- (lnf);
 \draw[sub] (-4.05, 12.3) rectangle (4.05, 15.25);
 \node[sublab, anchor=south east] at (4.0, 12.33) {Cascade heads};
@@ -338,7 +339,7 @@ multi-hot & a 0/1 vector with a 1 for every instrument present & level & a bin o
 % the state rail, entered from the side of the final norm
 \draw[line width=0.9pt, rounded corners=4pt] (lnf.west) -- (-3.85, 11.9) -- (-3.85, \ry) -- (-3.1, \ry);
 \node[font=\scriptsize, anchor=south, inner sep=1pt] at (-3.48, \ry) {$h_t$};
-\node[font=\scriptsize, anchor=south west, inner sep=1pt] at (-3.75, 12.33) {$h_t$, $z_i$: 1152 per note; $E_i$: tables $V_i\times1152$};
+\node[font=\scriptsize, anchor=south west, inner sep=1pt] at (-3.75, 12.36) {$h_t$, $z_i$: $T\times1152$ (all notes in parallel); $E_i$: $V_i\times1152$};
 \draw[arr] (-3.1, \ry) -- (c1.west);
 \foreach \a/\b in {c1/c2, c2/c3, c3/c4} { \draw[arr] (\a.east) -- (\b.west); }
 \draw[line width=0.9pt] (c4.east) -- (3.1, \ry);
@@ -359,23 +360,40 @@ multi-hot & a 0/1 vector with a 1 for every instrument present & level & a bin o
 %% ================= 4: cascade head zoom + note (right, top) =================
 \draw[zoom] (5.4, 12.2) rectangle (10.6, 16.95);
 \node[ptitle] at (5.4, 17.05) {\sect{4}{One cascade head (the 5 dotted boxes, own weights)}};
-\node[box] (rz) at (7.8, 12.75) {$z_{i-1}$ {\scriptsize (1152)}};
-\node[gbox, minimum width=40mm] (r1) at (7.8, 13.55) {LayerNorm, Linear $1152\to1152$};
-\node[gbox, minimum width=40mm] (r2) at (7.8, 14.3) {GELU, Linear $1152\to1152$};
-\node[sum] (rs) at (7.8, 15.05) {$+$};
-\node[gbox, minimum width=40mm] (ro) at (7.8, 15.75) {LayerNorm, Linear $1152\to V$};
+\node[box] (rz) at (7.8, 12.72) {$z_{i-1}$ {\scriptsize (1152)}};
+\node[gbox, minimum width=40mm] (r1) at (7.8, 13.77) {LayerNorm, Linear $1152\to1152$\\[-2pt] GELU, Linear $1152\to1152$};
+\node[sum] (rs) at (7.8, 14.77) {$+$};
+\node[gbox, minimum width=40mm] (ro) at (7.8, 15.65) {LayerNorm, Linear $1152\to V$};
 \draw[arr] (rz) -- (r1);
-\draw[arr] (r1) -- (r2);
-\draw[arr] (r2) -- (rs);
-\draw[arr] (rs) -- (ro);
-\draw[arr] (ro) -- (7.8, 16.32) node[above, font=\scriptsize, inner sep=1pt] {logits over the $V$ values};
-\fill (7.8, 13.13) circle (1.4pt);
-\draw[arr, rounded corners=4pt] (7.8, 13.13) -- (10.2, 13.13) |- (rs.east);
+\draw[arr] (r1) -- node[left, font=\scriptsize, inner sep=2pt] {1152} (rs);
+\draw[arr] (rs) -- node[left, font=\scriptsize, inner sep=2pt] {1152} (ro);
+\draw[arr] (ro) -- (7.8, 16.3) node[above, font=\scriptsize, inner sep=1pt] {logits over the $V$ values};
+\fill (7.8, 13.18) circle (1.4pt);
+\draw[arr, rounded corners=4pt] (7.8, 13.18) -- (10.2, 13.18) |- (rs.east);
 \node[anchor=north west, text width=4.1cm, font=\footnotesize, text=black!90, align=left] (why) at (10.85, 16.95) {%
 \textbf{Why a cascade.} One position predicts all five values of the next note. Head $i$ reads the running state\\[2pt]\hspace*{0.5cm}$z_0 = h_t,\quad z_i = z_{i-1} + E_i(a_i)$,\\[2pt]the trunk state $h_t$ plus the embeddings $E$ of the values already chosen. So the note's probability follows the chain rule,
 $p(\Delta t)\,p(\text{instr.}\mid\Delta t)\,p(\text{pitch}\mid\Delta t,\text{instr.})\cdots$ (compound tokens as in \rcite{6}).\\[3pt]
-$a_i$ is the true value in training (teacher forcing) and the sampled value in generation.
+$a_i$ is the true value in training (teacher forcing) and the sampled value in generation.\\[3pt]
+\textbf{In parallel.} In training the true values are known, so all $T$ positions pass the five heads at once,
+in one pass. Generation runs the heads one after another, for the newest note only (6). Shapes: the table on the
+left.\\[3pt]
 Loss: the sum of the five cross-entropies. Without the chain: $+0.34$ nats / note at 42M (\textit{What was found and tested}).};
+
+% shapes of one head in training (all notes at once) and in generation (one note, guided: caption / null row)
+\node[anchor=north west, font=\scriptsize, inner sep=0pt, align=left] (shp) at (5.45, 11.85) {%
+  \textbf{Shapes of head $i$: training vs generation}\\
+  {\color{black!75}generation: one piece, 2 rows (caption / null)}\\[3pt]
+  \setlength{\tabcolsep}{3pt}\renewcommand{\arraystretch}{1.2}%
+  \begin{tabular}{@{}lll@{}}
+    & \textbf{training} & \textbf{generation}\\ \hline
+    in: $z_{i-1}$ & $T\times1152$ & $2\times1152$\\
+    logits & $T\times V$ & $2\times V \to$ guided $1\times V$\\
+    value $a_i$ & $T$ true values & 1 sampled\\
+    $+\,E_i(a_i)$ & $T\times1152$ & $1152$, to both rows\\
+    5 heads & at once & one after another\\ \hline
+  \end{tabular}\\[3pt]
+  generation, after the 5th head: the note is appended,\\
+  one trunk step on $2\times1\times1152$ with the KV cache};
 
 %% ================= 1: caption path (left column, flows down) =================
 \begin{scope}[on background layer]
@@ -398,32 +416,32 @@ Loss: the sum of the five cross-entropies. Without the chain: $+0.34$ nats / not
 
 % caption adapter, expanded in place
 \draw[sub] (-11.2, 3.9) rectangle (-6.8, 11.6);
-\node[box] (lnx) at (-10.0, 10.75) {LayerNorm};
-\node[box] (P) at (-7.95, 10.75) {Learned queries\\[-2pt] {\scriptsize $K\times768$}};
+\node[box] (lnx) at (-10.0, 10.88) {LayerNorm};
+\node[box] (P) at (-7.95, 10.88) {Learned queries\\[-2pt] {\scriptsize $K\times768$}};
 \draw[arr] (lnx.north |- tl.south) -- node[right, note, pos=0.4] {token states $L\times768$} (lnx.north);
 \node[box, minimum width=36mm, minimum height=7mm] (xa) at (-9.15, 9.72) {Cross-attention {\scriptsize (16 heads)}\\[-3pt] {\scriptsize out $K\times768$}};
 \draw[arr] (lnx.south) -- node[left, font=\scriptsize] {K, V} (lnx.south |- xa.north);
 \draw[arr] (P.south) -- node[left, font=\scriptsize] {Q} (P.south |- xa.north);
-\node[sum] (b1) at (-9.15, 8.95) {$+$};
+\node[sum] (b1) at (-9.15, 8.79) {$+$};
 \node[font=\scriptsize, anchor=east, inner sep=2pt, align=right] at (b1.west) {+ queries\\$K\times768$};
 \draw[arr] (xa) -- (b1);
-\fill (-7.95, 10.27) circle (1.4pt);
-\draw[arr, rounded corners=4pt] (-7.95, 10.27) -- (-7.0, 10.27) |- (b1.east);
-\node[gbox, minimum width=34mm, minimum height=8mm] (mlp) at (-9.15, 8.15) {LayerNorm, GELU MLP\\[-2pt] {\scriptsize $768\to2048\to1152$}};
+\fill (-7.95, 10.3) circle (1.4pt);
+\draw[arr, rounded corners=4pt] (-7.95, 10.3) -- (-7.0, 10.3) |- (b1.east);
+\node[gbox, minimum width=34mm, minimum height=8mm] (mlp) at (-9.15, 7.86) {LayerNorm, GELU MLP\\[-2pt] {\scriptsize $768\to2048\to1152$}};
 \draw[arr] (b1) -- (mlp);
-\node[sum] (g) at (-9.15, 7.3) {$\times$};
+\node[sum] (g) at (-9.15, 6.93) {$\times$};
 \draw[arr] (mlp) -- (g);
-\node[box, font=\scriptsize] (gate) at (-10.55, 7.3) {gate $g$\\[-2pt] (1152)};
+\node[box, font=\scriptsize] (gate) at (-10.55, 6.93) {gate $g$\\[-2pt] (1152)};
 \draw[arr] (gate) -- (g);
-\node[note, anchor=north west, text width=1.55cm] at (-11.1, 6.95)
-  {$g$, one per channel, starts at 0.01, so captions start weak};
+\node[note, anchor=west, text width=1.9cm] at (-8.8, 6.93)
+  {$g$ per channel, starts at 0.01: captions start weak};
 % output: caption vectors (or the null vectors when there is no caption)
-\foreach \i in {0,...,3} { \node[ptok] (cv\i) at (-9.15+0.32*\i, 6.0) {}; }
+\foreach \i in {0,...,3} { \node[ptok] (cv\i) at (-9.15+0.32*\i, 5.63) {}; }
 \draw[parr] (g.south) -- (cv0.north);
-\node[note, anchor=north west] at (-9.0, 5.8) {$K\times1152$;\\$K{=}16$ file,\\$K{=}4$ section};
+\node[note, anchor=north west] at (-9.0, 5.43) {$K\times1152$;\\$K{=}16$ file,\\$K{=}4$ section};
 \node[box, font=\scriptsize, inner xsep=4pt] (null) at (-10.35, 4.55) {no caption:\\[-2pt] $K$ learned\\[-2pt] null vectors\\[-2pt] $K\times1152$};
-\draw[arr] (null.east) -- (-9.22, 4.5);
-\node[font=\scriptsize, anchor=north, inner sep=1pt] at ($(null.east)+(0.3, -0.05)$) {or};
+\draw[arr] (null.east) -- (-9.22, 4.55);
+\node[font=\scriptsize, anchor=south, inner sep=1.5pt] at ($(null.east)+(0.3, 0)$) {or};
 \node[sublab, anchor=north east] at (-6.85, 11.57) {Caption adapter \rcite{7} {\scriptsize\mdseries ($\times$2)}};
 \draw[parr, rounded corners=5pt] (cv0.south) -- (-9.15, 2.85) -- (-4.07, 2.85);
 \node[font=\scriptsize, text=pinkL, anchor=south, inner sep=1.5pt] at (-6.65, 2.85) {inserted: $16{\times}1152$ file, $4{\times}1152$ per section};
@@ -452,11 +470,15 @@ tempo tokens; the metre has to be read from the timing. 2,048 notes are about 1-
 \draw[zline] (embz.east |- emb) -- (emb.west);
 
 %% ================= 5: the sequence (right, under the cascade head) =================
-\path let \p1 = (why.south), \n1 = {min(\y1 - 0.9cm, 11.25cm)} in coordinate (Rtop) at (5.4, \n1);
+\path let \p1 = (why.south), \p2 = (shp.south), \n1 = {min(\y1 - 0.9cm, \y2 - 0.9cm, 11.25cm)} in coordinate (Rtop) at (5.4, \n1);
 \node[anchor=north west, text width=9.2cm, ptext, inner sep=9pt, fill=white] (seq) at (Rtop) {%
 \usebox{\seqBox}\\[6pt]
 \textbf{Positions.} Every slot has one RoPE position: notes and caption vectors alike. Caption vectors have no target;
 the last one before a note predicts that note.\\[4pt]
+\textbf{From $S$ rows back to $T$.} After the last block, one row per note is kept ($S\times1152 \to T\times1152$,
+a gather): for note $i$, the row of the slot just before note $i+1$, which is note $i$ itself, or the last vector of a
+section caption placed before note $i+1$. The 16 file-caption rows and the other caption rows predict nothing and are
+dropped. These $T$ rows go through the final RMSNorm and become $h_t$.\\[4pt]
 \textbf{File caption first,} 16 vectors in front of the notes (16 null vectors without a caption).\\[4pt]
 \textbf{Section captions every 256 notes.} A section's 4 vectors arrive just before its first note and again every
 64 notes, so the caption in force is never far back. Each one describes its own section and names what changed
@@ -468,7 +490,7 @@ arrivals = 148 vectors, fixed shape; unused ones sit after the notes and are nev
 from 0 to 1, both read from each note's onset.};
 \draw[zoom] (seq.south west) rectangle (seq.north east);
 \node[ptitle] at (seq.north west) {\sect{5}{The sequence: where the caption vectors go}};
-\draw[zline] (3.75, 2.95) -- (seq.south west);
+\draw[zline] (3.75, 2.95) -- (seq.west |- 0, 2.95);
 
 %% ================= 6: generation (centre, under the model) =================
 \path let \p1 = (seq.east) in coordinate (R) at (\x1, 0);
