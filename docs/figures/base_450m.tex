@@ -57,7 +57,7 @@ dur. & 512 & note length (20 ms steps)\\
 \sbox{\embZoom}{\begin{tikzpicture}
   \foreach \n/\v [count=\i] in {pitch/130, vel./32, dur./512, $\Delta t$/512} {
     \node[gbox, minimum width=10.6mm, font=\scriptsize, inner sep=2pt] (e\i) at (1.22*\i-0.62, 0) {\n\\[-3pt] {\tiny\textcolor{black!75}{$\v\times288$}}};
-    \draw[arr] (e\i.north) -- (1.22*\i-0.62, 0.69);
+    \draw[arr] (e\i.north) -- node[right, font=\tiny, inner sep=1pt] {288} (1.22*\i-0.62, 0.69);
   }
   \node[gbox, minimum width=47mm, font=\scriptsize] (cat) at (2.44, 0.97) {concat ($4\times288 = 1152$), Linear $1152\to1152$};
   \def\sx{4.35}
@@ -65,10 +65,10 @@ dur. & 512 & note length (20 ms steps)\\
   \node[sum] (s2) at (\sx, 3.2) {$+$};
   \node[sum] (s3) at (\sx, 4.15) {$+$};
   \draw[arr] (\sx, 1.25) -- (s1);
-  \node[font=\scriptsize, anchor=east, inner sep=2pt] at (\sx, 1.6) {note vector};
+  \node[font=\scriptsize, anchor=east, inner sep=2pt] at (\sx, 1.6) {note vector $T\times1152$};
   \draw[arr] (s1) -- (s2);
   \draw[arr] (s2) -- (s3);
-  \draw[arr] (s3) -- (\sx, 4.8) node[above, font=\scriptsize, inner sep=1pt] {to block 1};
+  \draw[arr] (s3) -- (\sx, 4.8) node[above left, font=\scriptsize, inner sep=1pt, xshift=1.5mm] {to block 1: $T\times1152$};
   \node[gbox, font=\scriptsize, text width=33mm, inner sep=2pt] (b1) at (1.83, 2.25) {instrument of this note\\[-2pt] table $129\times1152$};
   \node[gbox, font=\scriptsize, text width=33mm, inner sep=2pt] (b2) at (1.83, 3.2) {window: instrument set\\[-2pt] multi-hot, Linear $129\to1152$};
   \node[gbox, font=\scriptsize, text width=33mm, inner sep=2pt] (b3) at (1.83, 4.15) {window: notes per second\\[-2pt] level, table $16\times1152$};
@@ -105,7 +105,23 @@ dur. & 512 & note length (20 ms steps)\\
 \opt{-{}-temperature, -{}-top-p}{all heads (T 0.85 by default)}
 \end{tabular}}%
 
-%% ================= 6: pretraining =================
+%% ================= 6: shapes in training and generation =================
+\newsavebox{\shapeTab}%
+\sbox{\shapeTab}{\footnotesize\renewcommand{\arraystretch}{1.22}%
+\begin{tabularx}{14.2cm}{@{\hspace{7pt}}>{\raggedright}p{2.9cm}>{\raggedright}p{4.3cm}>{\raggedright\arraybackslash}X@{\hspace{7pt}}}
+\rowcolor{tealF}\textcolor{tealT}{\textbf{Tensor}} & \textcolor{tealT}{\textbf{Training: one window}} & \textcolor{tealT}{\textbf{Generation: one new note}}\\
+\rowcolor{white}input & $T\times4$ indices, $T$ instruments; per window a 129 multi-hot and a density level & the newest note: 4 indices, 1 instrument; the window's conditions\\
+note vector + conditions & $T\times1152$ & $1\times1152$\\
+\rowcolor{white}each of the 28 blocks & $T\times1152$ in and out; causal attention over the $T$ positions & $1\times1152$ in and out; attention reads the KV cache\\
+KV cache & none & per block K and V, each $18\times2{,}048\times64$ (heads $\times$ positions $\times$ 64), filled up to the newest note\\
+\rowcolor{white}final norm: $h_t$ & $T\times1152$ & $1\times1152$\\
+head $i$: in $z_{i-1}$ & $T\times1152$ & $1\times1152$\\
+\rowcolor{white}head $i$: logits & $T\times V_i$ & $1\times V_i$, then sample $a_i$\\
+$+\,E_i(a_i)$ & $T\times1152$, the true values & $1\times1152$, the sampled value\\
+\rowcolor{white}the five heads & at once & one after another\\
+\end{tabularx}}%
+
+%% ================= 7: pretraining =================
 \newsavebox{\curveBase}%
 \sbox{\curveBase}{\begin{tikzpicture}
 \begin{axis}[cplot, xmin=0, xmax=8.3, ymin=1.6, ymax=2.9, xtick={0,2,4,6,8}, ytick={1.6,1.8,2.0,2.2,2.4,2.6,2.8},
@@ -145,6 +161,8 @@ Hardware & one rented RTX 5090, $\approx$41 h\\
   cascade heads 16.28M, embeddings 1.99M), trained on 8.3B notes.};
 \node[font=\scriptsize, text=black!75] at (-0.2, 18.75) {How to read: numbers give the reading order; teal = the model's structure; grey boxes = linear layers
   and embedding tables; dashed frame = a module drawn open in place; dotted frame or box = a zoom into the dotted part.};
+\node[font=\scriptsize, text=black!75] at (-0.2, 18.35) {Shapes leave out the batch: $T$ = notes (up to 2,048 in a training window), $V$ = values of a head;
+  $a\times b$ = $a$ vectors of width $b$.};
 
 %% ================= 3: main column =================
 \node[ptitle] at (-4.3, 17.35) {\sect{3}{Music model}};
@@ -155,23 +173,24 @@ Hardware & one rented RTX 5090, $\approx$41 h\\
 % input
 \node[box] (inp) at (0, -0.65) {Note tokens {\scriptsize (one position = one note: $\Delta t$, instr., pitch, dur., vel.)}};
 \node[font=\footnotesize, text=black!85] at (0, -1.35) {a window of up to 2,048 notes ($\approx$1--4 min of music)};
-\draw[arr] (inp) -- (0, 0.67);
+\draw[arr] (inp) -- node[right, font=\scriptsize, inner sep=2pt] {$T\times4$ indices: pitch, vel., dur., $\Delta t$} (0, 0.67);
 
 % embedding + conditions
 \node[gbox, densely dotted, line width=1.1pt] (emb) at (0, 0.95) {Note embedding {\scriptsize ($4\times288$, concat, Linear)}};
 \node[sum] (s0) at (0, 1.85) {$+$};
 \node[gbox, densely dotted, line width=1.1pt, font=\scriptsize] (cond) at (-2.5, 1.9) {Instrument (per note)\\[-2pt] + instr. set, density\\[-2pt] (per window)};
-\draw[arr] (emb) -- (s0);
-\draw[arr] (cond.east |- s0) -- (s0);
-\node[tok] at (1.05, 1.85) {};
-\node[note, anchor=west] at (1.25, 1.85) {note vector (1152)};
+\draw[arr] (-3.0, -0.37) -- node[left, font=\scriptsize, inner sep=2pt] {instr. ($T$)} (-3.0, 0 |- cond.south);
+\draw[arr] (emb) -- node[right, font=\scriptsize, inner sep=2pt] {$T\times1152$} (s0);
+\draw[arr] (cond.east |- s0) -- node[above, font=\scriptsize, inner sep=1.5pt] {$T\times1152$} (s0);
+\node[tok] at (1.35, 1.85) {};
+\node[note, anchor=west] at (1.55, 1.85) {note vector (1152)};
 
 % the sequence: one vector per note
 \foreach \k in {-8,...,8} { \node[tok] at (0.32*\k, 2.75) {}; }
 \node[font=\scriptsize] at (2.95, 2.75) {$\cdots$};
 \node[text=black!75, font=\tiny, anchor=south] at (-2.56, 2.9) {note 1};
 \node[text=black!75, font=\tiny, anchor=south] at (2.95, 2.9) {2,048};
-\draw[arr] (s0) -- (0, 2.6);
+\draw[arr] (s0) -- node[right, font=\scriptsize, inner sep=2pt] {$T\times1152$} (0, 2.6);
 
 % transformer block
 \node[box, minimum width=26mm] (ln1) at (0, 4.3) {RMSNorm 1};
@@ -187,23 +206,28 @@ Hardware & one rented RTX 5090, $\approx$41 h\\
 \node[sublab, anchor=south west] at (-2.3, 10.4) {FFN sublayer};
 \draw[arr] (0, 2.9) -- (ln1);
 \draw[arr] (ln1) -- (att);
-\draw[arr] (att) -- (a1);
+\draw[arr] (att) -- node[right, font=\scriptsize, inner sep=2pt, pos=0.75] {$T\times1152$} (a1);
 \draw[arr] (a1) -- (ln2);
 \draw[arr] (ln2) -- (ffn);
-\draw[arr] (ffn) -- (a2);
+\draw[arr] (ffn) -- node[right, font=\scriptsize, inner sep=2pt, pos=0.75] {$T\times1152$} (a2);
 \draw[arr, rounded corners=4pt] (0, 3.55) -- (3.1, 3.55) |- (a1.east);
 \draw[arr, rounded corners=4pt] (0, 7.85) -- (3.1, 7.85) |- (a2.east);
 \fill (0, 3.55) circle (1.4pt);
 \fill (0, 7.85) circle (1.4pt);
+% what the residual connections add: the block input x and the sublayer output, both T x 1152
+\node[font=\scriptsize, rotate=90, inner sep=1pt] at (3.3, 5.5) {residual $x$: $T\times1152$};
+\node[font=\scriptsize, rotate=90, inner sep=1pt] at (3.3, 9.45) {residual $x$: $T\times1152$};
+\node[font=\scriptsize, anchor=east, inner sep=2pt, align=right, yshift=1.3mm] at (a1.west) {$x + \mathrm{Attn}(\mathrm{RMSNorm}_1(x))$\\$T\times1152$};
+\node[font=\scriptsize, anchor=east, inner sep=2pt, align=right, yshift=1.3mm] at (a2.west) {$x + \mathrm{FFN}(\mathrm{RMSNorm}_2(x))$\\$T\times1152$};
 
 % repeat brace
 \draw[decorate, decoration={brace, amplitude=7pt}, line width=1.2pt, draw=black] (-4.45, 3.3) -- (-4.45, 11.6);
 \node[font=\fontsize{15}{17}\selectfont\bfseries, text=tealT, anchor=east] at (-4.75, 7.45) {28 $\times$};
 \node[font=\scriptsize, text=tealT, anchor=north east] at (-4.75, 7.0) {445.98M};
-\node[sublab, anchor=north west] at (-3.45, 11.45) {width 1152};
+\node[sublab, anchor=north east] at (3.45, 11.45) {width 1152};
 
 % final norm + cascade heads: a running state z (z_0 = h_t) read by each head, plus the embedding of each decided value
-\node[box, minimum width=34mm] (lnf) at (0, 12.15) {Final RMSNorm};
+\node[box, minimum width=34mm] (lnf) at (0, 12.15) {Final RMSNorm {\scriptsize ($T\times1152$)}};
 \draw[arr] (a2) -- (lnf);
 \draw[sub] (-4.05, 12.6) rectangle (4.05, 15.55);
 \node[sublab, anchor=south east] at (4.0, 12.63) {Cascade heads {\scriptsize\mdseries (16.28M)}};
@@ -222,6 +246,7 @@ Hardware & one rented RTX 5090, $\approx$41 h\\
 % the state rail, entered from the side of the final norm
 \draw[line width=0.9pt, rounded corners=4pt] (lnf.west) -- (-3.85, 12.15) -- (-3.85, \ry) -- (-3.1, \ry);
 \node[font=\scriptsize, anchor=south, inner sep=1pt] at (-3.48, \ry) {$h_t$};
+\node[font=\scriptsize, anchor=south west, inner sep=1pt] at (-3.75, 12.66) {$h_t$, $z_i$: $T\times1152$; $E_i$: $V_i\times1152$};
 \draw[arr] (-3.1, \ry) -- (c1.west);
 \foreach \a/\b in {c1/c2, c2/c3, c3/c4} { \draw[arr] (\a.east) -- (\b.west); }
 \draw[line width=0.9pt] (c4.east) -- (3.1, \ry);
@@ -258,7 +283,8 @@ tracks are merged into one sequence; for drums the pitch is the drum sound.};
 The instr.\ head predicts the next note's instrument (128 General MIDI programs + drums). The two \textbf{window
 conditions} are added at every position, measured on the window's own notes (density: 15 levels + ``none''). In
 training both are replaced by ``none'' in 15\% of the windows, so ``none'' (unconditional) stays usable; in generation
-they come from the user or the prompt. The instrument table and both conditions start at zero.};
+they come from the user or the prompt. The instrument table and both conditions start at zero. All are added
+element-wise, each 1152 wide, so the sum stays \mbox{$T\times1152$}.};
 \node[ptitle] at (embz.north west) {\sect{2}{Input embedding {\mdseries\footnotesize (1.99M)}}};
 \draw[zline] (embz.east |- cond) -- (cond.west);
 \draw[zline] (embz.east |- emb) -- (emb.west);
@@ -268,14 +294,12 @@ they come from the user or the prompt. The instrument table and both conditions 
 \node[ptitle] at (5.4, 17.35) {\sect{4}{One cascade head {\mdseries\footnotesize (one per dotted box)}}};
 \def\hx{8.3}
 \node[box] (rz) at (\hx, 13.0) {$z_{i-1}$ {\scriptsize (1152)}};
-\node[gbox, minimum width=40mm] (r1) at (\hx, 13.8) {LayerNorm, Linear $1152\to1152$};
-\node[gbox, minimum width=40mm] (r2) at (\hx, 14.55) {GELU, Linear $1152\to1152$};
-\node[sum] (rs) at (\hx, 15.3) {$+$};
-\node[gbox, minimum width=40mm] (ro) at (\hx, 16.0) {LayerNorm, Linear $1152\to V$};
+\node[gbox, minimum width=40mm] (r1) at (\hx, 14.05) {LayerNorm, Linear $1152\to1152$\\[-2pt] GELU, Linear $1152\to1152$};
+\node[sum] (rs) at (\hx, 15.08) {$+$};
+\node[gbox, minimum width=40mm] (ro) at (\hx, 15.98) {LayerNorm, Linear $1152\to V$};
 \draw[arr] (rz) -- (r1);
-\draw[arr] (r1) -- (r2);
-\draw[arr] (r2) -- (rs);
-\draw[arr] (rs) -- (ro);
+\draw[arr] (r1) -- node[left, font=\scriptsize, inner sep=2pt] {1152} (rs);
+\draw[arr] (rs) -- node[left, font=\scriptsize, inner sep=2pt] {1152} (ro);
 \draw[arr] (ro) -- (\hx, 16.57) node[above, font=\scriptsize, inner sep=1pt] {logits over the $V$ values};
 \fill (\hx, 13.38) circle (1.4pt);
 \draw[arr, rounded corners=4pt] (\hx, 13.38) -- (10.75, 13.38) |- (rs.east);
@@ -305,8 +329,25 @@ Start from BOS or from a MIDI prompt; EOS ends the piece. Past 2,048 notes the w
 \end{scope}
 \path let \p1 = (Bot) in [zoom] (embz.north west) rectangle (embz.east |- 0, \y1);
 
-%% ================= 6: pretraining (bottom strip) =================
-\path let \p1 = (Bot) in coordinate (C) at (-12.0, \y1 - 1.0cm);
+%% ================= 6: shapes in training and generation (strip) =================
+\path let \p1 = (Bot) in coordinate (Sh) at (-12.0, \y1 - 1.0cm);
+\node[anchor=north west, inner sep=0pt] (shtab) at ($(Sh)+(0.35, -0.4)$) {\usebox{\shapeTab}};
+\node[anchor=north west, text width=8.1cm, ptext, inner sep=0pt] (shtxt) at ($(shtab.north east)+(0.45, 0)$) {%
+\textbf{In parallel.} In training every true value is known (teacher forcing), so all $T$ notes of a window pass
+the trunk and the five heads at once, in one pass. The loss is the sum of the five cross-entropies, averaged over
+the notes.\\[4pt]
+\textbf{One note at a time.} Generation reads a MIDI prompt in one pass (prefill: its keys and values fill the cache),
+then runs one trunk step per note: the newest note's keys and values are added to the cache, and its attention reads
+all earlier ones. On that one row the heads run one after another, each sampling its value before the next head
+reads it (5).};
+\path let \p1 = (shtab.south), \p2 = (shtxt.south), \n1 = {min(\y1, \y2) - 10pt} in coordinate (Shs) at (11.6, \n1);
+\begin{scope}[on background layer]
+  \draw[panel] (Sh) rectangle (Shs);
+\end{scope}
+\node[ptitle] at (Sh) {\sect{6}{Shapes in training and generation}};
+
+%% ================= 7: pretraining (bottom strip) =================
+\path let \p1 = (Shs) in coordinate (C) at (-12.0, \y1 - 1.0cm);
 \node[anchor=north west, text width=7.6cm, font=\scriptsize, text=black!85, align=left, inner sep=10pt] (cv) at (C) {%
   {\footnotesize\bfseries Clean GigaMIDI validation (8.3B notes)}\\[3pt]
   \usebox{\curveBase}\\[2pt]
@@ -318,7 +359,7 @@ Start from BOS or from a MIDI prompt; EOS ends the piece. Past 2,048 notes the w
 \begin{scope}[on background layer]
   \draw[panel] (C) rectangle (Cs);
 \end{scope}
-\node[ptitle] at (C) {\sect{6}{Pretraining}};
+\node[ptitle] at (C) {\sect{7}{Pretraining}};
 
 \end{tikzpicture}
 \end{document}

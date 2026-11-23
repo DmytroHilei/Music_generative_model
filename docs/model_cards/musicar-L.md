@@ -195,7 +195,7 @@ its training split. The window conditions are measured on each validation window
 | End of training, both window conditions "none" | 1.681 |
 | Instrument head, end of training | 0.117 |
 
-The diagram (section 6) shows every evaluation of the run, one every 2,000 steps.
+The diagram (section 7) shows every evaluation of the run, one every 2,000 steps.
 
 ### Comparison with other open models
 
