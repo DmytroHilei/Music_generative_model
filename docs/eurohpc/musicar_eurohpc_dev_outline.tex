@@ -376,13 +376,13 @@ the same loss within 0.011.
 \subsubsection{Predicted repeat cost for the planned runs}
 Even epochs, default recipe; best-fitting form (its bootstrap 10--90\%; highest form); passes limit 11.8.
 
-\begin{tabularx}{\textwidth}{|L{4.2cm}|X|X|}
+\begin{tabularx}{\textwidth}{|L{5.6cm}|L{2.4cm}|X|}
 \hline
-\textbf{Run} & \textbf{Over 8.8B unique notes: passes, penalty} & \textbf{Over 4.5B: passes, penalty}\\ \hline
-1B run, 20.6B notes & 2.3, +0.001 (0.000--0.002; highest form 0.004) & 4.6, +0.005\\ \hline
-2B run, 41.5B notes & 4.7, +0.004 (0.002--0.007; highest form 0.032) & 9.2, +0.015\\ \hline
-2B run at 27 notes per parameter, 54.8B & 6.2, +0.005 & 12.2, above the passes limit\\ \hline
-2.5B, 50.1B notes & 5.7, +0.005 & 11.1, +0.018\\ \hline
+\textbf{Run} & \textbf{Passes over 8.84B} & \textbf{Penalty}\\ \hline
+1B run, 20.6B notes & 2.3 & +0.001 (0.000--0.002; highest form 0.004)\\ \hline
+2B run, 41.5B notes & 4.7 & +0.004 (0.002--0.007; highest form 0.032)\\ \hline
+2B run at 27 notes per parameter, 54.8B & 6.2 & +0.005\\ \hline
+2.5B, 50.1B notes & 5.7 & +0.005\\ \hline
 \end{tabularx}
 \vspace{4pt}
 \begin{itemize}
@@ -392,8 +392,7 @@ form 2.27B, 10--90\% 2.17--2.43B); $\pm0.01$ band about 0.8--6.6B. The 2.03B sha
 predicts 4--8$\times$ more; all forms over-predict the even-epoch penalty 1.7--3.6$\times$ (\#26).
 \end{itemize}
 Over the 8.84B unique notes the best-fitting form gives almost no loss to repetition: 0.001 for the 1B run and 0.004 for
-the 2B run, against 0.029 gained from 1B to 2B; only the Chai \& Xiong form (+0.032 for the 2B run) puts it at that size. With only the 4.5B notes of the current stores the 2B run's cost rises to 0.015, and
-the upper end of its notes would pass the limit, so the runs use the full census corpus. The forms disagree at many
+the 2B run, against 0.029 gained from 1B to 2B; only the Chai \& Xiong form (+0.032 for the 2B run) puts it at that size. All runs stay well under the 11.8-pass limit. The forms disagree at many
 passes and none passes the strict leave-one-group-out check; the real cost at 1--2B is one of the things the
 allocation measures.
 
@@ -673,7 +672,6 @@ Section~\ref{sec:scal}); data parallel is enough for the paper runs.
 
 \subsection{Storage and I/O}
 \begin{itemize}
-\item Training data now: about 41 GB of token stores (Discover 27\% subset).
 \item Full stores for 21--26B / 41--55B notes seen (one copy of the corpus, read in even epochs): 89.7 GB for all
 9.92B notes (9 bytes per note), about 80 GB for the 8.84B left after near-duplicate removal at Jaccard 0.8.
 \item Checkpoints: bf16 weights about 2 GB (1B) and 4.1 GB (2B); full resumable state about 6 GB and 12.5 GB by
