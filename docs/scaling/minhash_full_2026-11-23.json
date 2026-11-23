@@ -1,0 +1,575 @@
+{
+ "what": "census level 5, full pass: near-duplicates over every file of the exported loose stores",
+ "method": {
+  "order": "gigamidi > discover > aria > pianocore > piast > beat > irishman; train < validation < test; store order",
+  "lsh": "42 bands x 3 rows; per band each file vs its 8 previous key-group members and the group first",
+  "dup_rule": "dropped at t if some earlier file has J >= t",
+  "raw": "signature-estimated Jaccard",
+  "calibrated": "20000 exact checks, est bins of 0.05 from 0.4; below that = kept"
+ },
+ "params": {
+  "cache": "/media/dmytro-hilei/40B0-A677/census_work/cache",
+  "work": "/home/dmytro-hilei/minhash_full_work",
+  "out": "/media/dmytro-hilei/40B0-A677/census_work/minhash_full.json",
+  "sample_json": "/media/dmytro-hilei/40B0-A677/census_work/census/minhash.json",
+  "workers": 12,
+  "ngram": 4,
+  "cap": 4000,
+  "bands": 42,
+  "rows": 3,
+  "lags": 8,
+  "min_est": 0.4,
+  "verify": 20000,
+  "seed": 20261123,
+  "chunk": 4000,
+  "chunk_notes": 2000000,
+  "signatures_only": false
+ },
+ "stores": [
+  "gigamidi_train",
+  "gigamidi_validation",
+  "gigamidi_test",
+  "discover_train",
+  "discover_validation",
+  "aria_train",
+  "aria_validation",
+  "pianocore_train",
+  "pianocore_validation",
+  "piast_train",
+  "beat_train",
+  "beat_validation",
+  "irishman_train"
+ ],
+ "population": {
+  "files": 7147652,
+  "notes": 9919897351,
+  "files_without_shingles": 14401
+ },
+ "lsh": {
+  "pairs_compared": 347282064,
+  "files_with_est_ge_min": 1524166
+ },
+ "calibration": {
+  "0.5": {
+   "bins": [
+    0.4,
+    0.45,
+    0.5,
+    0.55,
+    0.6,
+    0.65,
+    0.7,
+    0.75,
+    0.8,
+    0.85,
+    0.9,
+    0.95
+   ],
+   "n": [
+    1636,
+    1554,
+    1635,
+    1433,
+    1676,
+    1444,
+    1498,
+    1576,
+    1386,
+    1783,
+    1603,
+    2776
+   ],
+   "share_exact_ge_t": [
+    0.0685,
+    0.2381,
+    0.5333,
+    0.7983,
+    0.9153,
+    0.973,
+    0.986,
+    0.9949,
+    0.9971,
+    0.9983,
+    0.9994,
+    1.0
+   ]
+  },
+  "0.8": {
+   "bins": [
+    0.4,
+    0.45,
+    0.5,
+    0.55,
+    0.6,
+    0.65,
+    0.7,
+    0.75,
+    0.8,
+    0.85,
+    0.9,
+    0.95
+   ],
+   "n": [
+    1636,
+    1554,
+    1635,
+    1433,
+    1676,
+    1444,
+    1498,
+    1576,
+    1386,
+    1783,
+    1603,
+    2776
+   ],
+   "share_exact_ge_t": [
+    0.0,
+    0.0,
+    0.0,
+    0.0007,
+    0.0036,
+    0.0069,
+    0.0367,
+    0.224,
+    0.5794,
+    0.8867,
+    0.9794,
+    0.9971
+   ]
+  },
+  "0.9": {
+   "bins": [
+    0.4,
+    0.45,
+    0.5,
+    0.55,
+    0.6,
+    0.65,
+    0.7,
+    0.75,
+    0.8,
+    0.85,
+    0.9,
+    0.95
+   ],
+   "n": [
+    1636,
+    1554,
+    1635,
+    1433,
+    1676,
+    1444,
+    1498,
+    1576,
+    1386,
+    1783,
+    1603,
+    2776
+   ],
+   "share_exact_ge_t": [
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0063,
+    0.0159,
+    0.1722,
+    0.69,
+    0.9787
+   ]
+  }
+ },
+ "results": {
+  "gigamidi": {
+   "files": 1725193,
+   "notes": 2096867946,
+   "thresholds": {
+    "0.5": {
+     "raw_drop_files": 498874,
+     "raw_drop_notes": 289149832,
+     "raw_note_rate": 0.13789606186292477,
+     "cal_drop_files": 469728.04946158297,
+     "cal_drop_notes": 277153805.02068084,
+     "cal_note_rate": 0.132175135563201,
+     "unique_notes_raw": 1807718114,
+     "unique_notes_cal": 1819714140.979319
+    },
+    "0.8": {
+     "raw_drop_files": 190452,
+     "raw_drop_notes": 154105946,
+     "raw_note_rate": 0.07349339584973559,
+     "cal_drop_files": 179986.16006220994,
+     "cal_drop_notes": 147976054.14681378,
+     "cal_note_rate": 0.07057003967707835,
+     "unique_notes_raw": 1942762000,
+     "unique_notes_cal": 1948891891.8531861
+    },
+    "0.9": {
+     "raw_drop_files": 99955,
+     "raw_drop_notes": 107817644,
+     "raw_note_rate": 0.05141842346613848,
+     "cal_drop_files": 95383.26445954895,
+     "cal_drop_notes": 102848757.00113118,
+     "cal_note_rate": 0.04904875254415815,
+     "unique_notes_raw": 1989050302,
+     "unique_notes_cal": 1994019188.998869
+    }
+   }
+  },
+  "discover": {
+   "files": 5206033,
+   "notes": 7564874065,
+   "thresholds": {
+    "0.5": {
+     "raw_drop_files": 742038,
+     "raw_drop_notes": 1441874954,
+     "raw_note_rate": 0.19060131624279722,
+     "cal_drop_files": 707159.668765811,
+     "cal_drop_notes": 1392982316.1267495,
+     "cal_note_rate": 0.18413820298365396,
+     "unique_notes_raw": 6122999111,
+     "unique_notes_cal": 6171891748.873251
+    },
+    "0.8": {
+     "raw_drop_files": 350209,
+     "raw_drop_notes": 892297766,
+     "raw_note_rate": 0.11795275880775684,
+     "cal_drop_files": 332542.9867060818,
+     "cal_drop_notes": 864507079.6983688,
+     "cal_note_rate": 0.11427911056684177,
+     "unique_notes_raw": 6672576299,
+     "unique_notes_cal": 6700366985.301631
+    },
+    "0.9": {
+     "raw_drop_files": 213163,
+     "raw_drop_notes": 687652844,
+     "raw_note_rate": 0.09090076557672346,
+     "cal_drop_files": 203160.2268976387,
+     "cal_drop_notes": 660470807.6726537,
+     "cal_note_rate": 0.08730757471937554,
+     "unique_notes_raw": 6877221221,
+     "unique_notes_cal": 6904403257.327347
+    }
+   }
+  },
+  "aria": {
+   "files": 7599,
+   "notes": 5806015,
+   "thresholds": {
+    "0.5": {
+     "raw_drop_files": 3569,
+     "raw_drop_notes": 4156946,
+     "raw_note_rate": 0.7159723149182357,
+     "cal_drop_files": 3538.6383175658984,
+     "cal_drop_notes": 4135123.4714186415,
+     "cal_note_rate": 0.7122137079250814,
+     "unique_notes_raw": 1649069,
+     "unique_notes_cal": 1670891.5285813585
+    },
+    "0.8": {
+     "raw_drop_files": 3090,
+     "raw_drop_notes": 3831774,
+     "raw_note_rate": 0.6599662591295407,
+     "cal_drop_files": 3006.975881736902,
+     "cal_drop_notes": 3759473.8899639384,
+     "cal_note_rate": 0.6475136371442268,
+     "unique_notes_raw": 1974241,
+     "unique_notes_cal": 2046541.1100360616
+    },
+    "0.9": {
+     "raw_drop_files": 2623,
+     "raw_drop_notes": 3452377,
+     "raw_note_rate": 0.5946207510659204,
+     "cal_drop_files": 2489.2283875019048,
+     "cal_drop_notes": 3328251.0708217123,
+     "cal_note_rate": 0.573241900136619,
+     "unique_notes_raw": 2353638,
+     "unique_notes_cal": 2477763.9291782877
+    }
+   }
+  },
+  "pianocore": {
+   "files": 51082,
+   "notes": 134621859,
+   "thresholds": {
+    "0.5": {
+     "raw_drop_files": 19224,
+     "raw_drop_notes": 57273051,
+     "raw_note_rate": 0.42543648873545864,
+     "cal_drop_files": 19111.48122290424,
+     "cal_drop_notes": 57012613.87161508,
+     "cal_note_rate": 0.42350190596918647,
+     "unique_notes_raw": 77348808,
+     "unique_notes_cal": 77609245.12838492
+    },
+    "0.8": {
+     "raw_drop_files": 18126,
+     "raw_drop_notes": 54664770,
+     "raw_note_rate": 0.4060616188638429,
+     "cal_drop_files": 17614.54741695299,
+     "cal_drop_notes": 53420062.73577066,
+     "cal_note_rate": 0.39681566673188384,
+     "unique_notes_raw": 79957089,
+     "unique_notes_cal": 81201796.26422934
+    },
+    "0.9": {
+     "raw_drop_files": 15472,
+     "raw_drop_notes": 48462691,
+     "raw_note_rate": 0.3599912477809417,
+     "cal_drop_files": 13719.32380547507,
+     "cal_drop_notes": 43128977.24825661,
+     "cal_note_rate": 0.32037127973590535,
+     "unique_notes_raw": 86159168,
+     "unique_notes_cal": 91492881.75174339
+    }
+   }
+  },
+  "piast": {
+   "files": 5,
+   "notes": 5652,
+   "thresholds": {
+    "0.5": {
+     "raw_drop_files": 5,
+     "raw_drop_notes": 5652,
+     "raw_note_rate": 1.0,
+     "cal_drop_files": 4.961114468918445,
+     "cal_drop_notes": 5616.394741434117,
+     "cal_note_rate": 0.9937004142664752,
+     "unique_notes_raw": 0,
+     "unique_notes_cal": 35.60525856588265
+    },
+    "0.8": {
+     "raw_drop_files": 2,
+     "raw_drop_notes": 3343,
+     "raw_note_rate": 0.5914720452937013,
+     "cal_drop_files": 1.4561461719593036,
+     "cal_drop_notes": 2155.865809893545,
+     "cal_note_rate": 0.3814341489549796,
+     "unique_notes_raw": 2309,
+     "unique_notes_cal": 3496.134190106455
+    },
+    "0.9": {
+     "raw_drop_files": 0,
+     "raw_drop_notes": 0,
+     "raw_note_rate": 0.0,
+     "cal_drop_files": 0.03809120941100636,
+     "cal_drop_notes": 57.61298444927886,
+     "cal_note_rate": 0.01019338012195309,
+     "unique_notes_raw": 5652,
+     "unique_notes_cal": 5594.387015550721
+    }
+   }
+  },
+  "beat": {
+   "files": 157452,
+   "notes": 117670101,
+   "thresholds": {
+    "0.5": {
+     "raw_drop_files": 27658,
+     "raw_drop_notes": 19261825,
+     "raw_note_rate": 0.1636934517460812,
+     "cal_drop_files": 26859.644395202566,
+     "cal_drop_notes": 18598292.36697958,
+     "cal_note_rate": 0.15805452879639817,
+     "unique_notes_raw": 98408276,
+     "unique_notes_cal": 99071808.63302042
+    },
+    "0.8": {
+     "raw_drop_files": 17148,
+     "raw_drop_notes": 11241699,
+     "raw_note_rate": 0.09553573001522281,
+     "cal_drop_files": 15940.075233136415,
+     "cal_drop_notes": 10541083.826896273,
+     "cal_note_rate": 0.08958166719765348,
+     "unique_notes_raw": 106428402,
+     "unique_notes_cal": 107129017.17310372
+    },
+    "0.9": {
+     "raw_drop_files": 9617,
+     "raw_drop_notes": 6620659,
+     "raw_note_rate": 0.056264581603444025,
+     "cal_drop_files": 8935.310710057884,
+     "cal_drop_notes": 6201271.430106053,
+     "cal_note_rate": 0.05270048531789782,
+     "unique_notes_raw": 111049442,
+     "unique_notes_cal": 111468829.56989394
+    }
+   }
+  },
+  "irishman": {
+   "files": 288,
+   "notes": 51713,
+   "thresholds": {
+    "0.5": {
+     "raw_drop_files": 244,
+     "raw_drop_notes": 42410,
+     "raw_note_rate": 0.8201032622358014,
+     "cal_drop_files": 241.18233317089118,
+     "cal_drop_notes": 41961.737796241454,
+     "cal_note_rate": 0.8114349930625075,
+     "unique_notes_raw": 9303,
+     "unique_notes_cal": 9751.262203758546
+    },
+    "0.8": {
+     "raw_drop_files": 190,
+     "raw_drop_notes": 32451,
+     "raw_note_rate": 0.6275211262158451,
+     "cal_drop_files": 178.25402569541157,
+     "cal_drop_notes": 30521.220061443873,
+     "cal_note_rate": 0.5902040117851193,
+     "unique_notes_raw": 19262,
+     "unique_notes_cal": 21191.779938556127
+    },
+    "0.9": {
+     "raw_drop_files": 126,
+     "raw_drop_notes": 22550,
+     "raw_note_rate": 0.4360605650416723,
+     "cal_drop_files": 114.525891473372,
+     "cal_drop_notes": 20512.335069342786,
+     "cal_note_rate": 0.3966572248630477,
+     "unique_notes_raw": 29163,
+     "unique_notes_cal": 31200.664930657214
+    }
+   }
+  },
+  "total": {
+   "files": 7147652,
+   "notes": 9919897351,
+   "thresholds": {
+    "0.5": {
+     "raw_drop_files": 1291612,
+     "raw_drop_notes": 1811764670,
+     "raw_note_rate": 0.18263945743524862,
+     "cal_drop_files": 1226643.6256107064,
+     "cal_drop_notes": 1749929728.9899814,
+     "cal_note_rate": 0.17640603194483412,
+     "unique_notes_raw": 8108132681,
+     "unique_notes_cal": 8169967622.010018
+    },
+    "0.8": {
+     "raw_drop_files": 579217,
+     "raw_drop_notes": 1116177749,
+     "raw_note_rate": 0.11251908255759127,
+     "cal_drop_files": 549270.4554719855,
+     "cal_drop_notes": 1080236431.3836849,
+     "cal_note_rate": 0.10889592837115285,
+     "unique_notes_raw": 8803719602,
+     "unique_notes_cal": 8839660919.616316
+    },
+    "0.9": {
+     "raw_drop_files": 340956,
+     "raw_drop_notes": 854028765,
+     "raw_note_rate": 0.08609250023276778,
+     "cal_drop_files": 323801.91824290535,
+     "cal_drop_notes": 815998634.371023,
+     "cal_note_rate": 0.0822587780395494,
+     "unique_notes_raw": 9065868586,
+     "unique_notes_cal": 9103898716.628977
+    }
+   }
+  }
+ },
+ "vs_sample": {
+  "gigamidi": {
+   "0.5": {
+    "sample_note_rate": 0.14181995311260281,
+    "sample_ci95": [
+     0.13515855397081553,
+     0.1487184582683655
+    ],
+    "full_raw": 0.13789606186292477,
+    "full_cal": 0.132175135563201
+   },
+   "0.8": {
+    "sample_note_rate": 0.07657837853035507,
+    "sample_ci95": [
+     0.07107486531690009,
+     0.08159775450496687
+    ],
+    "full_raw": 0.07349339584973559,
+    "full_cal": 0.07057003967707835
+   },
+   "0.9": {
+    "sample_note_rate": 0.05610214795219748,
+    "sample_ci95": [
+     0.051333029681844174,
+     0.061168361117819446
+    ],
+    "full_raw": 0.05141842346613848,
+    "full_cal": 0.04904875254415815
+   }
+  },
+  "discover": {
+   "0.5": {
+    "sample_note_rate": 0.19422273338980792,
+    "sample_ci95": [
+     0.18646646648358506,
+     0.20237676168860372
+    ],
+    "full_raw": 0.19060131624279722,
+    "full_cal": 0.18413820298365396
+   },
+   "0.8": {
+    "sample_note_rate": 0.12251923263727181,
+    "sample_ci95": [
+     0.11595282898239315,
+     0.13001669084414744
+    ],
+    "full_raw": 0.11795275880775684,
+    "full_cal": 0.11427911056684177
+   },
+   "0.9": {
+    "sample_note_rate": 0.09634820750706401,
+    "sample_ci95": [
+     0.0897729100745442,
+     0.10322090283248431
+    ],
+    "full_raw": 0.09090076557672346,
+    "full_cal": 0.08730757471937554
+   }
+  },
+  "aria": {
+   "0.5": {
+    "sample_note_rate": 0.7462088043860188,
+    "sample_ci95": [
+     0.6548212586722226,
+     0.8155918763824443
+    ],
+    "full_raw": 0.7159723149182357,
+    "full_cal": 0.7122137079250814
+   },
+   "0.8": {
+    "sample_note_rate": 0.688003703352538,
+    "sample_ci95": [
+     0.5721276963678578,
+     0.7678704207934073
+    ],
+    "full_raw": 0.6599662591295407,
+    "full_cal": 0.6475136371442268
+   },
+   "0.9": {
+    "sample_note_rate": 0.6551252949017552,
+    "sample_ci95": [
+     0.5272553669147936,
+     0.7425366502413939
+    ],
+    "full_raw": 0.5946207510659204,
+    "full_cal": 0.573241900136619
+   }
+  }
+ },
+ "runtime_s": {
+  "signatures": 915.4,
+  "lsh": 164.3,
+  "verify": 575.4,
+  "total": 1657.5
+ },
+ "peak_rss_mb": {
+  "main": 6963.3984375,
+  "largest_worker": 2060.51171875
+ }
+}
