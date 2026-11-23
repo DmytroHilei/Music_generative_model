@@ -22,7 +22,9 @@ from tools.sweeps.isoflop_fit import budget_fit, drift, main_arms, parabola  # n
 
 OUT = ROOT / 'docs/figures/scaling_data'
 Q_NOTES = 160_006_144
-PLANNED = [('XL', 1e9, 1.2e20, 1.62e20), ('XXL', 1.8e9, 3.78e20, 5.29e20)]
+# final shapes (isoflop.n_ne): XL 28x1664, XXL 37x2112; C = 6 N D from the compute-optimal D to 27 notes per parameter
+# (results/frontier/2026-11-23: XL 20.59-26.10B notes, XXL 41.48-54.77B)
+PLANNED = [('XL', 966_734_336.0, 1.194e20, 1.514e20), ('XXL', 2_028_593_408.0, 5.049e20, 6.666e20)]
 MUSICAR_L = ('musicar-L', 461_070_848, 2.3e19)
 
 
@@ -58,7 +60,7 @@ def isoflop():
     write('iso_trend_extra.dat', 'C N', [(C, line(C)) for C in np.geomspace(3e17, 1e21, 20)])
     write('iso_planned.dat', 'C N Chi label', [(c, n, chi, lab) for lab, n, c, chi in PLANNED])
     write('iso_musicar.dat', 'C N label', [(MUSICAR_L[2], float(MUSICAR_L[1]), MUSICAR_L[0])])
-    print(f'N* ~ C^{a:.3f}; on the trend: XL budget {line(1.2e20) / 1e9:.2f}B, XXL {line(3.78e20) / 1e9:.2f}B, '
+    print(f'N* ~ C^{a:.3f}; on the trend: XL budget {line(1.194e20) / 1e9:.2f}B, XXL {line(5.049e20) / 1e9:.2f}B, '
           f'musicar-L budget {line(2.3e19) / 1e6:.0f}M')
 
 

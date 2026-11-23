@@ -46,10 +46,16 @@ MIN_ITERS = 3000
 TOL = 0.02
 TURN_RISE = 0.02  # held-out CE this far above its lowest evaluation at the end of a run = a turn-up
 K_UN = 27.0  # U_N = U / K_UN: the compute-optimal size for U notes in one pass (r* of the iso fit)
-U_GRID = [2.1e9, 4.5e9, 6.5e9, 7.7e9, 8.8e9, 9.92e9]
-MODELS = {'1B': 1e9, '1.8B': 1.8e9, '2.5B': 2.5e9}
-PLANNED = {'XL 1B / 20B': (1e9, 20e9), 'XXL 1.8B / 35B': (1.8e9, 35e9)}
-C_GRID = [1e18, 3e18, 1e19, 2.3e19, 1.2e20, 3.78e20, 4.1e20, 1e21, 1e22]
+U_C = 8.84e9   # census unique notes after near-duplicate removal (full MinHash pass 2026-11-23, Jaccard >= 0.8)
+U_GRID = [2.1e9, 4.5e9, 6.5e9, 7.7e9, U_C, 9.92e9]
+# the request's shapes, N = isoflop.n_ne (non-embedding incl. the heads): 28x1664, 37x2112, 38x2304
+N_XL, N_XXL, N_25 = 966_734_336, 2_028_593_408, 2_477_551_360
+MODELS = {'1B 28x1664': N_XL, '2B 37x2112': N_XXL, '2.5B 38x2304': N_25}
+# planned runs: (N, notes per parameter); None = the compute-optimal D of the fitted surface (the low end), 27 = the
+# high end of the request
+PLANNED = {'XL 1B, D opt': (N_XL, None), 'XL 1B, 27 notes/param': (N_XL, 27.0),
+           'XXL 2B, D opt': (N_XXL, None), 'XXL 2B, 27 notes/param': (N_XXL, 27.0)}
+C_GRID = [1e18, 3e18, 1e19, 2.3e19, 1.2e20, 3.78e20, 4.1e20, 5e20, 1e21, 1e22]
 REP_ARMS = {'control': 'replay', 'fresh': 'replay', 'full': 'replay', 'fresh_census': 'pool', 'sub168_census': 'pool'}
 LG = np.array([math.lgamma(k + 1) for k in range(4001)])
 
@@ -381,20 +387,26 @@ def floor(fit, s, U):
     return dict(L=float(L[i, j]), N=float(N[i, 0]), D=float(D[0, j]), edge=bool(i == L.shape[0] - 1))
 
 
+def planned_rows(s):
+    """(label, N, D) of the planned runs on the fitted surface s."""
+    return [(k, N, d_opt(s, N) if r is None else r * N) for k, (N, r) in PLANNED.items()]
+
+
 def key_numbers(fits, s):
-    """The numbers the bootstrap tracks: per form, per model at U 8.8B and 4.5B: penalty at the compute-optimal D;
-    the planned rows' penalties; N* at 4.1e20 over 8.8B."""
+    """The numbers the bootstrap tracks: per form, per model at U 8.84B and 4.5B: penalty at the compute-optimal D;
+    the planned rows' penalties; N* at the XXL budget (6 N D at the compute-optimal D) over 8.84B."""
     out = {}
+    c_xxl = 6 * N_XXL * d_opt(s, N_XXL)
     for name, f in fits.items():
         row = {}
         for m, N in MODELS.items():
             D = d_opt(s, N)
             fresh = float(surf(s, N, D))
-            for U in (4.5e9, 8.8e9):
+            for U in (4.5e9, U_C):
                 row[f'{m} pen U{U / 1e9:g}'] = float(model_ce(f, s, N, D, U)[0]) - fresh
-        for lab, (N, D) in PLANNED.items():
-            row[f'{lab} pen U8.8'] = float(model_ce(f, s, N, D, 8.8e9)[0] - surf(s, N, D))
-        row['N* 4.1e20 U8.8'] = frontier(f, s, 4.1e20, 8.8e9)['N']
+        for lab, N, D in planned_rows(s):
+            row[f'{lab} pen U{U_C / 1e9:g}'] = float(model_ce(f, s, N, D, U_C)[0] - surf(s, N, D))
+        row[f'N* XXL budget U{U_C / 1e9:g}'] = frontier(f, s, c_xxl, U_C)['N']
         out[name] = row
     for m, N in MODELS.items():
         out.setdefault('surface', {})[f'{m} D_opt'] = d_opt(s, N)
@@ -489,11 +501,11 @@ def report(res):
              f"(even epochs, default recipe): best-AICc form ({res['best']}), then min..max over the forms used.\n")
     L.append('Cap = passes limit at that N/U (see Turn-ups); OVER = the run needs more passes than the cap.\n')
     L.append('| run | N | D | C (6ND) | fresh CE | ' + ' | '.join(f'U {u / 1e9:g}B: passes (cap) / penalty' for u in
-                                                            (4.5e9, 8.8e9, 9.92e9)) + ' |')
+                                                            (4.5e9, U_C, 9.92e9)) + ' |')
     L.append('|---|---|---|---|---|---|---|---|')
     for row in res['request']:
         cells = []
-        for u in ('4.5', '8.8', '9.92'):
+        for u in ('4.5', f'{U_C / 1e9:g}', '9.92'):
             c = row['U'][u]
             cap = c['cap']['cap']
             over = ' OVER' if cap is not None and c['passes'] > cap else ''
@@ -516,14 +528,14 @@ def report(res):
                 L.append(f'| {name} | {k} | {v[0]:.4g} | {v[1]:.4g} | {v[2]:.4g} |')
     L.append('\n## Data-constrained frontier (per passing form)\n')
     L.append('| form | C | U | N* | D* | passes (cap) | L* | N band (+0.01) |\n|---|---|---|---|---|---|---|---|')
-    for r in (r for r in res['frontier'] if r['C'] in (2.3e19, 1.2e20, 4.1e20, 1e21) and r['U'] in (4.5e9, 8.8e9)):
+    for r in (r for r in res['frontier'] if r['C'] in (2.3e19, 1.2e20, 5e20, 1e21) and r['U'] in (4.5e9, U_C)):
         cap = f"{r['cap']:.1f}" if r['cap'] else '-'
         L.append(f"| {r['form']} | {r['C']:.2g} | {r['U'] / 1e9:g}B | {fmt_n(r['N'])}{' (edge)' if r['edge'] else ''} | "
                  f"{fmt_n(r['D'])} | {r['passes']:.1f} ({cap}){' OVER' if r['over_cap'] else ''} | {r['L']:.3f} | "
                  f"{fmt_n(r['band'][0])}-{fmt_n(r['band'][1])} |")
     L.append('\n## Floor (lowest CE for U unique notes)\n')
     L.append('| form | U | L floor | at N | at D |\n|---|---|---|---|---|')
-    for r in (r for r in res['floor'] if r['U'] in (4.5e9, 8.8e9)):
+    for r in (r for r in res['floor'] if r['U'] in (4.5e9, U_C)):
         L.append(f"| {r['form']} | {r['U'] / 1e9:g}B | {r['L']:.3f} | {fmt_n(r['N'])}{' (still falling)' if r['edge'] else ''}"
                  f" | {fmt_n(r['D'])} |")
     L.append('\n## Recipe layer (BEST = wd 1.0 + dyn + family)\n')
@@ -558,21 +570,21 @@ def run(basis='epoch', draws=200, seed=0, iso_path=ISO_RUNS, aug_path=AUG_RUNS, 
     best = min(use, key=lambda n: use[n]['aicc'])
     turns = turnups(aug_runs)
     request = []
-    rows = [(m, N, d_opt(s, N)) for m, N in MODELS.items()] + [(k, N, D) for k, (N, D) in PLANNED.items()]
+    rows = [(m, N, d_opt(s, N)) for m, N in MODELS.items()] + planned_rows(s)
     for lab, N, D in rows:
         fresh = float(surf(s, N, D))
         cells = {}
-        for U in (4.5e9, 8.8e9, 9.92e9):
+        for U in (4.5e9, U_C, 9.92e9):
             pen = {n: float(model_ce(f, s, N, D, U)[0]) - fresh for n, f in use.items()}
             cells[f'{U / 1e9:g}'] = dict(passes=D / U, pen_lo=min(pen.values()), pen_hi=max(pen.values()),
                                          pen_best=pen[best], pen=pen, cap=passes_cap(pts, turns, N, U))
         request.append(dict(run=lab, N=N, D=D, C=6 * N * D, fresh=fresh, U=cells))
     front = [dict(form=n, C=C, U=U, **frontier(f, s, C, U)) for n, f in use.items() for C in C_GRID
-             for U in (2.1e9, 4.5e9, 8.8e9, 9.92e9)]
+             for U in (2.1e9, 4.5e9, U_C, 9.92e9)]
     for r in front:
         r['cap'] = passes_cap(pts, turns, r['N'], r['U'])['cap']
         r['over_cap'] = bool(r['cap'] is not None and r['passes'] > r['cap'])
-    flo = [dict(form=n, U=U, **floor(f, s, U)) for n, f in use.items() for U in (2.1e9, 4.5e9, 8.8e9, 9.92e9)]
+    flo = [dict(form=n, U=U, **floor(f, s, U)) for n, f in use.items() for U in (2.1e9, 4.5e9, U_C, 9.92e9)]
     boot = bootstrap(iso_pts, pts, s, use, basis, draws, seed) if draws else {}
     rule = 'pre-registered (all groups within 0.02)' if any(f['pass'] for f in fits.values()) else (
         'noise-aware (within max(0.02, 2 SE))' if passing else 'none passes: all forms shown')
