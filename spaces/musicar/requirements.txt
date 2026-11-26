@@ -1,0 +1,6 @@
+# gradio comes from sdk_version in README.md; spaces (ZeroGPU) is preinstalled on Spaces, listed for local runs
+# ZeroGPU supports torch 2.8.0 to 2.13.0
+torch==2.13.0
+spaces
+musicar[text] @ git+https://github.com/DmytroHilei/Music_generative_model@009aa1fc62478d250abdbc8594e7e242d59c705d
+matplotlib

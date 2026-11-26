@@ -43,6 +43,8 @@ notes of public MIDI data.
 
 ## Quick start
 
+[![Open in Spaces](https://huggingface.co/datasets/huggingface/badges/resolve/main/open-in-hf-spaces-sm.svg)](https://huggingface.co/spaces/Dimitri-206265/musicar) (in the browser, nothing to install; ZeroGPU gives each visitor a few GPU minutes a day)
+
 [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/DmytroHilei/Music_generative_model/blob/transformer-v2/notebooks/musicar_colab.ipynb) (free GPU, plays the result in the browser)
 
 ```bash

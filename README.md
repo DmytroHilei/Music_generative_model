@@ -424,6 +424,9 @@ MP3 rendering needs `fluidsynth`, `ffmpeg` and a General MIDI soundfont (`fluid-
 
 ### The released models without the repo
 
+In the browser: the [musicar Space](https://huggingface.co/spaces/Dimitri-206265/musicar) (all four models on ZeroGPU, a few free GPU minutes a day) and the
+[Colab notebook](https://colab.research.google.com/github/DmytroHilei/Music_generative_model/blob/transformer-v2/notebooks/musicar_colab.ipynb) (a free GPU for longer sessions). From Python or the command line:
+
 ```bash
 pip install "git+https://github.com/DmytroHilei/Music_generative_model"                 # inference only
 pip install "musicar[text] @ git+https://github.com/DmytroHilei/Music_generative_model"  # + LaBSE for musicar-L-caption
