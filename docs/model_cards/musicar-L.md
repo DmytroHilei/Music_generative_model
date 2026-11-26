@@ -41,6 +41,34 @@ notes of public MIDI data.
 
 ![Architecture of musicar-L](https://huggingface.co/Dimitri-206265/musicar-L/resolve/main/diagram.png)
 
+## Quick start
+
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/DmytroHilei/Music_generative_model/blob/transformer-v2/notebooks/musicar_colab.ipynb) (free GPU, plays the result in the browser)
+
+```bash
+pip install "git+https://github.com/DmytroHilei/Music_generative_model"
+```
+
+```python
+import musicar
+model = musicar.from_pretrained("musicar-L")   # downloaded once; bf16 on recent GPUs, else float32
+musicar.generate(model, prompt="band.mid", n_notes=1000).write("continued.mid")   # keeps the prompt's band going
+musicar.generate(model, prompt="band.mid", instruments=[0, 33, 128], seed=1).write("trio.mid")   # piano, bass, drums
+musicar.generate(model, n_notes=1000).write("solo.mid")   # from the start: usually one instrument
+```
+
+From the command line:
+
+```bash
+musicar-generate --model musicar-L --sample-instruments --prompt band.mid --max-new-tokens 1000 --output continued.mid
+```
+
+Started without a prompt the model usually stays with one instrument, even with an instrument list; for a band, continue
+a band MIDI file. In Python each call draws a random seed and prints it (pass `seed=` to get the same piece again); the
+command line uses seed 42 unless `--seed` is given. `generate()` takes `generate.py`'s sampling, prompt and length
+options as keywords (`temperature=0.9`, `top_p=0.9`; see "How to use" below). A GPU with 2 GB is enough in bf16 (Ampere
+or newer; older GPUs such as the T4 run float32 and need about 3 GB); a CPU works, more slowly ("Hardware and speed").
+
 ## Model summary
 
 musicar-L is the project's pretrained multi-instrument model. Each sequence position is one whole note, and
@@ -70,9 +98,9 @@ Smaller bases of the same family: [musicar-S-piano](https://huggingface.co/Dimit
 | License | CC BY-NC-SA 4.0 |
 | Code | https://github.com/DmytroHilei/Music_generative_model |
 
-## How to use
+## How to use from the code repository
 
-From a clone of the code repository, with its environment installed (README, "Setup"):
+For training, evaluation and the options that read the project's data, from a clone with its environment installed (README, "Setup"):
 
 ```bash
 hf download Dimitri-206265/musicar-L --local-dir checkpoints/musicar-L
@@ -91,26 +119,14 @@ list, `prompt` or `none`; by default the prompt's instruments when the prompt ha
 Past 2,048 notes the KV cache is rebuilt from the most recent notes every `--slide` notes (default 512). `generate.py`
 also renders an MP3 unless `--no-mp3` is given (needs fluidsynth, ffmpeg and a General MIDI soundfont).
 
-Loading the pickle-free files directly:
-
-```python
-import json
-from safetensors.torch import load_file
-from musicar.model.gpt import GPT, MusicConfig
-
-cfg = json.load(open("checkpoints/musicar-L/config.json"))
-model = GPT(MusicConfig(**cfg["model_args"]))
-model.load_state_dict(load_file("checkpoints/musicar-L/model.safetensors"))
-model.eval()
-```
-
-`MusicConfig` defaults to training settings (dropout 0.2), so call `model.eval()` before inference;
-`musicar.model.checkpoint.load_model` does this for `model_bf16.pt`. Sampling with the KV cache is
+`musicar.from_pretrained("musicar-L")` downloads and reads only `model.safetensors` + `config.json` (no pickle); given a
+local folder it takes `model_bf16.pt` first (pass the folder's `model.safetensors` path to avoid the pickle); the raw
+network is `model.model` (a `musicar.model.gpt.GPT` in eval mode) and sampling with the KV cache is
 `musicar.generation.sampling.generate`.
 
 ## Hardware and speed
 
-**Minimum.** Any CUDA GPU with 2 GB of memory (peak 1.09 GiB measured, bf16, one row), or a CPU with about 3 GB of free RAM (fp32 weights 1.86 GB). PyTorch 2.7 or newer and the code repository's `generate.py` / `musicar` package.
+**Minimum.** Any CUDA GPU with 2 GB of memory in bf16 (peak 1.09 GiB measured, one row; GPUs with compute capability 8.0+, Ampere and newer); older GPUs such as Colab's T4 load float32 and need about 3 GB. Or a CPU with about 3 GB of free RAM (fp32 weights 1.86 GB). Python 3.10+, PyTorch 2.7 or newer and the `musicar` package (Quick start).
 
 At one row, generating a note reads every weight once plus the cached keys and values of the notes in view, so
 the speed is capped by memory bandwidth B:

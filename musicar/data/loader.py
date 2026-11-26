@@ -10,7 +10,6 @@ import os
 import random
 
 import numpy as np
-import pandas as pd
 import pretty_midi
 import torch
 import torch.nn.functional as F
@@ -545,6 +544,7 @@ class NoteWindowDataset(Dataset):
         meta_csv = Path("data/aria") / f"{name}.csv"
         if not meta_csv.exists():
             return [DEFAULT_STORE_STYLE] * n_files
+        import pandas as pd  # training-side only: generation runs without pandas
         df = pd.read_csv(meta_csv, dtype=str, keep_default_na=False)
         return list(df.loc[df["split"] == self.split, "genre"])
 
@@ -552,6 +552,7 @@ class NoteWindowDataset(Dataset):
         """(MIDI paths, styles, multi-track?) of one CSV's rows in this split."""
         if not csv_path.exists():
             raise FileNotFoundError(f"CSV file not found: {csv_path}")
+        import pandas as pd
         df = pd.read_csv(csv_path)
         if "split" not in df.columns or "midi_filename" not in df.columns:
             raise ValueError(f"{csv_path} must contain 'split' and 'midi_filename' columns.")

@@ -31,7 +31,6 @@ import argparse
 from pathlib import Path
 
 import numpy as np
-import pandas as pd
 import torch
 
 from musicar.data.loader import BOS_PITCH, EOS_PITCH, load_styles, tokenize_midi
@@ -152,6 +151,7 @@ def pick_style(model, cfg, prefs):
 
 
 def real_pieces(csvs):
+    import pandas as pd  # musicar.data.features imports this module on the generation path, which has no pandas
     pieces = []
     for csv in csvs:
         df = pd.read_csv(csv)

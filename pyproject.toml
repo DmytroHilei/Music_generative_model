@@ -7,10 +7,34 @@ name = "musicar"
 version = "0.2.0"
 description = "Autoregressive symbolic-music transformer: piano / multi-instrument pretraining, Ukrainian fine-tunes"
 requires-python = ">=3.10"
-dynamic = ["dependencies"]
+# inference only: load a released model (Hugging Face Hub) or a checkpoint and generate MIDI
+dependencies = [
+    "torch>=2.7",
+    "numpy",
+    "pretty_midi",
+    "mido",
+    "tqdm",
+    "huggingface_hub>=0.24",
+    "safetensors",
+    "tomli>=1.1; python_version < '3.11'",
+]
 
-[tool.setuptools.dynamic]
-dependencies = { file = ["requirements.txt"] }
+[project.optional-dependencies]
+# LaBSE captions: musicar-L-caption, --text, --retrieve, section captions
+text = ["transformers>=4.56"]
+# for a clone of the repo: train.py, data preparation, eval scripts (pip install -e ".[train]"; requirements.txt =
+# everything)
+train = ["pandas", "wandb", "rich", "torchao", "spylls"]
+# the app engine (python -m musicar.serve, from a clone of the repo) and its tests
+serve = ["musicar[text]", "fastapi", "uvicorn", "httpx"]
+all = ["musicar[text,train,serve]"]
+
+[project.scripts]
+musicar-generate = "musicar.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["musicar*"]
+
+[tool.setuptools.package-data]
+"musicar.generation" = ["presets/*.toml"]
+"musicar.eval" = ["*.json"]

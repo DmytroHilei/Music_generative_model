@@ -16,10 +16,6 @@ tags:
 - transformer
 - decoder-only
 - autoregressive
-- rope
-- swiglu
-- rmsnorm
-- qk-norm
 - pytorch
 - piano
 - solo-piano
@@ -37,6 +33,31 @@ A 107M-parameter autoregressive transformer that writes solo-piano MIDI one note
 | 106.84M | 512 notes | piano only | 2.33B | CC BY-NC-SA 4.0 |
 
 ![Architecture of musicar-S-piano](https://huggingface.co/Dimitri-206265/musicar-S-piano/resolve/main/diagram.png)
+
+## Quick start
+
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/DmytroHilei/Music_generative_model/blob/transformer-v2/notebooks/musicar_colab.ipynb) (free GPU, plays the result in the browser)
+
+```bash
+pip install "git+https://github.com/DmytroHilei/Music_generative_model"
+```
+
+```python
+import musicar
+model = musicar.from_pretrained("musicar-S-piano")   # downloaded once; bf16 on recent GPUs, else float32
+musicar.generate(model, n_notes=1000).write("piano.mid")
+musicar.generate(model, prompt="theme.mid", n_notes=1000, seed=1).write("continued.mid")
+```
+
+From the command line:
+
+```bash
+musicar-generate --model musicar-S-piano --max-new-tokens 1000 --output piano.mid
+```
+
+In Python each call draws a random seed and prints it (pass `seed=` to get the same piece again); the command line uses
+seed 42 unless `--seed` is given. On a laptop CPU (float32) it writes about 45-50 notes per second (1,000 notes in about
+22 s, about 2.5 minutes of music in one test).
 
 ## Model summary
 
@@ -64,9 +85,9 @@ captioned fine-tune [musicar-L-caption](https://huggingface.co/Dimitri-206265/mu
 | License | CC BY-NC-SA 4.0 |
 | Code | https://github.com/DmytroHilei/Music_generative_model |
 
-## How to use
+## How to use from the code repository
 
-From a clone of the code repository, with its environment installed (README, "Setup"):
+For training, evaluation and the options that read the project's data, from a clone with its environment installed (README, "Setup"):
 
 ```bash
 hf download Dimitri-206265/musicar-S-piano --local-dir checkpoints/musicar-S-piano
@@ -79,26 +100,14 @@ seed note, which is out of distribution; `--prompt file.mid` continues the first
 a MIDI file. Past 512 notes the KV cache is rebuilt from the most recent notes every `--slide` notes (default 128).
 `generate.py` also renders an MP3 unless `--no-mp3` is given (needs fluidsynth, ffmpeg and a General MIDI soundfont).
 
-Loading the pickle-free files directly:
-
-```python
-import json
-from safetensors.torch import load_file
-from musicar.model.gpt import GPT, MusicConfig
-
-cfg = json.load(open("checkpoints/musicar-S-piano/config.json"))
-model = GPT(MusicConfig(**cfg["model_args"]))
-model.load_state_dict(load_file("checkpoints/musicar-S-piano/model.safetensors"))
-model.eval()
-```
-
-`MusicConfig` defaults to training settings (dropout 0.2), so call `model.eval()` before inference;
-`musicar.model.checkpoint.load_model` does this for `model_bf16.pt`. Sampling with the KV cache is in
-`musicar/generation/sampling.py`.
+`musicar.from_pretrained("musicar-S-piano")` downloads and reads only `model.safetensors` + `config.json` (no pickle);
+given a local folder it takes `model_bf16.pt` first (pass the folder's `model.safetensors` path to avoid the pickle);
+the raw network is `model.model` (a `musicar.model.gpt.GPT` in eval mode) and sampling with the KV cache is
+`musicar.generation.sampling.generate`.
 
 ## Hardware and speed
 
-**Minimum.** Any CUDA GPU with 1 GB of memory (peak 0.33 GiB measured, bf16, one row), or a CPU with about 1 GB of free RAM. PyTorch 2.7 or newer and the code repository's `generate.py` / `musicar` package.
+**Minimum.** Any CUDA GPU with 1 GB of memory (peak 0.33 GiB measured, bf16, one row), or a CPU with about 1 GB of free RAM. Python 3.10+, PyTorch 2.7 or newer and the `musicar` package (Quick start).
 
 At one row, generating a note reads every weight once plus the cached keys and values of the notes in view, so
 the speed is capped by memory bandwidth B:

@@ -50,6 +50,32 @@ MIDI one note at a time.
 
 ![Architecture of musicar-L-caption](https://huggingface.co/Dimitri-206265/musicar-L-caption/resolve/main/diagram.png)
 
+## Quick start
+
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/DmytroHilei/Music_generative_model/blob/transformer-v2/notebooks/musicar_colab.ipynb) (free GPU, plays the result in the browser)
+
+```bash
+pip install "musicar[text] @ git+https://github.com/DmytroHilei/Music_generative_model"
+```
+
+```python
+import musicar
+model = musicar.from_pretrained("musicar-L-caption")   # downloaded once; bf16 on recent GPUs, else float32
+midi = musicar.generate(model, text="a calm jazz piano trio", preset="f1", length_seconds=60)
+midi.write("calm_jazz.mid")
+musicar.generate(model, text="сумна повільна балада для фортепіано", preset="f1", length_seconds=90).write("ua.mid")
+```
+
+From the command line:
+
+```bash
+musicar-generate --model musicar-L-caption --config f1 --text "a calm jazz piano trio" --length-seconds 60 --output calm_jazz.mid
+```
+
+`preset="f1"` is the decoding setup tuned for this model (see "How to use"); it needs the `[text]` extra, and the first
+caption downloads the LaBSE text encoder (about 1.9 GB). In Python each call draws a random seed and prints it (pass
+`seed=` to get the same piece again); the command line uses seed 42 unless `--seed` is given. A GPU is recommended.
+
 ## Model summary
 
 The trunk, heads and note tokens are musicar-L's (each sequence position is one whole note; five cascade output heads
@@ -95,9 +121,9 @@ base), [musicar-S](https://huggingface.co/Dimitri-206265/musicar-S),
 | License | CC BY-NC-SA 4.0 |
 | Code | https://github.com/DmytroHilei/Music_generative_model |
 
-## How to use
+## How to use from the code repository
 
-From a clone of the code repository, with its environment installed (README, "Setup"):
+For training, evaluation and the options that read the project's data, from a clone with its environment installed (README, "Setup"):
 
 ```bash
 hf download Dimitri-206265/musicar-L-caption --local-dir checkpoints/musicar-L-caption
@@ -116,28 +142,16 @@ Starting from a real opening (the project's best setting, see Evaluation) needs 
 which is not part of this repository: `--retrieve gigamidi_replay_train --retrieve-strict genre,mood` picks the first
 128 notes of a training song whose caption matches, and the model continues it.
 
-Loading the pickle-free files directly:
-
-```python
-import json
-from safetensors.torch import load_file
-from musicar.model.gpt import GPT, MusicConfig
-
-cfg = json.load(open("checkpoints/musicar-L-caption/config.json"))
-model = GPT(MusicConfig(**cfg["model_args"]))
-model.load_state_dict(load_file("checkpoints/musicar-L-caption/model.safetensors"))
-model.eval()
-```
-
-`MusicConfig` defaults to training settings (dropout 0.2), so call `model.eval()` before inference;
-`musicar.model.checkpoint.load_model` does this for `model_bf16.pt`. The caption vectors come from
-`musicar.text.encoder.text_encoder(device).encode([caption], tokens=True)`; sampling with the KV cache and guidance is
-`musicar.generation.sampling.generate`, the whole path (caption, length, best-of, retrieval) is
+`musicar.from_pretrained("musicar-L-caption")` downloads and reads only `model.safetensors` + `config.json` (no pickle);
+given a local folder it takes `model_bf16.pt` first (pass the folder's `model.safetensors` path to avoid the pickle);
+the raw network is `model.model` (a `musicar.model.gpt.GPT` in eval mode). The caption vectors come from
+`musicar.generation.piece.text_encoder(device).encode([caption], tokens=True)`; sampling with the KV cache and guidance
+is `musicar.generation.sampling.generate`, the whole path (caption, length, best-of, retrieval) is
 `musicar.generation.piece.Generator`.
 
 ## Hardware and speed
 
-**Minimum.** Any CUDA GPU with 4 GB of memory (peak 3.04 GiB measured with the f1 preset: guidance, DRY and the fp32 LaBSE encoder on the GPU), or a CPU with about 6 GB of free RAM. PyTorch 2.7 or newer, `transformers` for LaBSE (downloaded on first use) and the code repository's `generate.py` / `musicar` package.
+**Minimum.** Any CUDA GPU with 4 GB of memory in bf16 (peak 3.04 GiB measured with the f1 preset: guidance, DRY and the fp32 LaBSE encoder on the GPU; compute capability 8.0+, Ampere and newer); older GPUs such as Colab's T4 load the model in float32 and need about 5 GB. Or a CPU with about 6 GB of free RAM. Python 3.10+, PyTorch 2.7 or newer and the `musicar[text]` package (Quick start; LaBSE is downloaded on first use).
 
 At one row, generating a note reads every weight once plus the cached keys and values of the notes in view, so
 the speed is capped by memory bandwidth B:

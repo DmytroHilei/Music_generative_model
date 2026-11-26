@@ -34,6 +34,7 @@ import subprocess
 import sys
 import time
 import traceback
+import zipfile
 from pathlib import Path
 
 import numpy as np
@@ -295,6 +296,36 @@ def config_keys(s):
     if bad:
         raise Fail('not train.py settings: ' + ', '.join(bad))
     return f'{len(files)} configs, {len(known)} settings'
+
+
+@test('package')
+def package(s):
+    """The wheel pip / uv build from this checkout (what 'pip install git+...' installs; built from a copy of
+    pyproject.toml + musicar/ with the venv's setuptools): the generation presets and the musicar-generate script in
+    it, and only the inference packages required (pandas, wandb, transformers, ... in the extras)."""
+    uv = shutil.which('uv')
+    if not uv:
+        raise Skip('no uv on PATH')
+    src, out = s.work / 'package', s.work / 'dist'
+    shutil.copytree(ROOT / 'musicar', src / 'musicar', ignore=shutil.ignore_patterns('__pycache__'))
+    shutil.copy(ROOT / 'pyproject.toml', src)
+    s.run([uv, 'build', '--wheel', '--no-build-isolation', '--python', PY, '--out-dir', out, src])
+    with zipfile.ZipFile(next(out.glob('musicar-*.whl'))) as z:
+        names = z.namelist()
+        info = {Path(n).name: z.read(n).decode() for n in names if '.dist-info/' in n}
+    presets = sorted(Path(n).stem for n in names if n.startswith('musicar/generation/presets/'))
+    shipped = sorted(p.stem for p in (ROOT / 'musicar' / 'generation' / 'presets').glob('*.toml'))
+    core = [ln.split(':', 1)[1].strip() for ln in info['METADATA'].splitlines()
+            if ln.startswith('Requires-Dist:') and 'extra ==' not in ln]
+    heavy = [r for r in core if re.match(r'(pandas|wandb|rich|torchao|transformers|spylls|fastapi|uvicorn|httpx)\b', r)]
+    script = 'musicar-generate = musicar.cli:main' in info.get('entry_points.txt', '')
+    problems = ([f'presets {presets} vs {shipped}'] if presets != shipped or not shipped else []) + \
+        ([] if script else ['no musicar-generate']) + \
+        [f'{f} missing' for f in ('musicar/hub.py', 'musicar/cli.py', 'musicar/eval/sample_reference.json')
+         if f not in names] + ([f'core requires {heavy}'] if heavy else [])
+    if problems:
+        raise Fail('; '.join(problems))
+    return f'{len(names)} files, presets {", ".join(presets)}, requires {", ".join(core)}'
 
 
 def unit_tests(s, env=None):
@@ -771,7 +802,9 @@ def perf(s):
     """tools/bench/bench.py on its default 12 x 512 model (~42M), micro 12, compile + fp8, 8 steps: OpenCV's perf
     tests in sanity mode (must run; the speed is recorded in logs/ci/perf.jsonl, not judged)."""
     out = s.run([PY, 'tools/bench/bench.py', '--micro', 12, '--compile', 1, '--fp8', 1, '--steps', 8])
-    m = re.search(r'^\s*12\s+1\s+\S+\s+1\s+\S+\s+\S+\s+\S+\s+([\d,]+)\s+(\d+)\s+([\d.]+)\s*$', out, re.M)
+    # the row's last columns: tok/s, ms/step, peak GB (and resv GB since 2026-11-22)
+    m = re.search(r'^\s*12\s+1\s+\S+\s+1\s+\S+\s+\S+\s+\S+\s+([\d,]+)\s+(\d+)\s+([\d.]+)(?:\s+[\d.]+)?\s*$', out,
+                  re.M)
     if not m:
         raise Fail('no result row (out of memory?)')
     tps, peak = int(m.group(1).replace(',', '')), float(m.group(3))

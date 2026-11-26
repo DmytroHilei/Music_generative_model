@@ -75,7 +75,7 @@ def test_caption_instrument_mask():
 
 def test_config_presets():
     # --config: TOML presets (dashes or underscores), later presets over earlier ones, the command line over both;
-    # every shipped preset in config/generate/ parses
+    # every shipped preset (musicar/generation/presets/ = config/generate/) parses
     with tempfile.TemporaryDirectory() as d:
         a, b = Path(d) / 'a.toml', Path(d) / 'b.toml'
         a.write_text('checkpoint = "ck"\ndry-multiplier = 3\ndry_key = "pitch_class"\nbest-of = 4\n')
@@ -89,7 +89,7 @@ def test_config_presets():
                 raise AssertionError(f'accepted {text!r}')
             except SystemExit:
                 pass
-    for path in sorted(generate.PRESETS.glob('*.toml')):
+    for path in sorted(piece.PRESETS.glob('*.toml')):
         assert generate.parse_args(['--config', path.stem]).checkpoint
 
 

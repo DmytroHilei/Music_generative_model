@@ -1,3 +1,5 @@
+# the full dev environment (training, data preparation, eval, app engine); pyproject.toml has the same split into
+# the inference core and the extras [train], [text], [serve]
 torch>=2.7.0
 numpy
 pandas
@@ -9,6 +11,8 @@ rich
 torchao
 transformers
 spylls
+huggingface_hub
+safetensors
 # app engine (musicar/serve) and its tests
 fastapi
 uvicorn

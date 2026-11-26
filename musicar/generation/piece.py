@@ -9,21 +9,26 @@ as a library, so the command line and the app engine run the same code.
     pieces[0].midi().write('x.mid')
 
 Options are generate.py's (build_parser) in an argparse.Namespace: settings() fills one from the parser defaults,
-presets in config/generate/ and keyword overrides. Options the checkpoint can't follow raise GenerationError.
+presets (musicar/generation/presets/, shipped with the package; config/generate links there) and keyword overrides.
+Options the checkpoint can't follow raise GenerationError.
 """
 
 import argparse
 import functools
+import importlib.util
 import random
 import time
-import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
-import pandas as pd
 import pretty_midi
 import torch
+
+try:
+    import tomllib
+except ModuleNotFoundError:  # Python 3.10
+    import tomli as tomllib
 
 from musicar.model.checkpoint import load_model, resolve_checkpoint
 from musicar.data.loader import (BOS_PITCH, DRUM_PROGRAM, EOS_PITCH, density_level, load_styles, tokenize_midi,
@@ -36,7 +41,9 @@ from musicar.text.captions import hold_caption
 
 
 COPY_MIN, COPY_FREE = 16, 0.25  # best-of: copies of >= 16 chords; real GigaMIDI band songs: 0-74% of notes, median ~13%
-PRESETS = Path(__file__).resolve().parents[2] / "config" / "generate"
+PRESETS = Path(__file__).resolve().parent / "presets"  # package data; config/generate is a link to it
+DTYPES = {"fp32": torch.float32, "float32": torch.float32, "bf16": torch.bfloat16, "bfloat16": torch.bfloat16,
+          "fp16": torch.float16, "float16": torch.float16}
 NOTES_EVERY = 16  # on_notes: notes per call
 SECTION_TOKENS = 48  # encoder tokens per section caption (train.py section_max_length)
 
@@ -51,10 +58,14 @@ def build_parser():
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument("--config", action="append", default=[],
-                        help="generation preset (repeatable): a TOML file of options, or its name in config/generate/ "
-                             "(e.g. --config caption); options given on the command line override it")
-    parser.add_argument("--checkpoint", type=str, default=None,
-                        help="checkpoint file, or a run directory (uses model_bf16.pt, else best.pt, else ckpt.pt)")
+                        help="generation preset (repeatable): a TOML file of options, or its name in "
+                             "musicar/generation/presets/ = config/generate/ (e.g. --config caption); options given on "
+                             "the command line override it")
+    parser.add_argument("--checkpoint", "--model", type=str, default=None,
+                        help="checkpoint file, or a run directory (uses model_bf16.pt, else best.pt, ckpt.pt, "
+                             "model.safetensors + config.json), or a released model on the Hugging Face Hub: "
+                             "musicar-L, musicar-S, musicar-S-piano, musicar-L-caption or any user/repo id "
+                             "(downloaded once, then cached)")
     parser.add_argument("--output", type=str, default="generated.mid",
                         help="output MIDI; with --num-samples > 1 a _<i> suffix is added")
     parser.add_argument("--num-samples", type=int, default=1, help="samples to generate")
@@ -62,7 +73,8 @@ def build_parser():
                         help="samples generated together in one batch (default: all of them). A batch costs about "
                              "as much as one sample on GPU. Batch k uses seed + k, so results depend on the batching")
     parser.add_argument("--dtype", choices=["auto", "fp32", "bf16"], default="auto",
-                        help="auto = bf16 on CUDA, fp32 on CPU")
+                        help="auto = bf16 on CUDA GPUs with compute capability 8.0+ (Ampere and newer), fp32 on "
+                             "older GPUs (e.g. Colab's T4) and the CPU")
     parser.add_argument("--no-cuda-graph", action="store_true",
                         help="decode eagerly on CUDA instead of replaying a captured CUDA graph (same notes)")
     parser.add_argument("--device", choices=["auto", "cpu", "cuda"], default="auto",
@@ -227,7 +239,7 @@ def option_name(parser, key, value, where):
 
 def preset_defaults(parser, names):
     """Option defaults from generation presets: TOML files of option names (dashes or underscores) and values, as a
-    path or a name in config/generate/; later presets override earlier ones."""
+    path or a name in PRESETS; later presets override earlier ones."""
     out = {}
     for name in names:
         path = Path(name) if Path(name).is_file() else PRESETS / f"{name.removesuffix('.toml')}.toml"
@@ -253,6 +265,10 @@ def settings(presets=(), **options):
 def val_pieces(source, genre=None):
     """Validation pieces as a list of (label, loader); loader() returns an (n, 4) int array of tokens, or for
     'gigamidi' a tuple (tokens, programs (n,))."""
+    need = {"gigamidi": "data/cache/gigamidi_clean_validation", "combined": "data/combined.csv",
+            "aria": "data/cache/aria_validation"}[source]
+    if not Path(need).exists():
+        raise GenerationError(f"--val-prompt {source} reads {need} of the training repo: run it from the repo root")
     if source == "gigamidi":
         store = Path("data/cache/gigamidi_clean_validation")
         offsets = np.load(store / "offsets.npy")
@@ -263,6 +279,7 @@ def val_pieces(source, genre=None):
                  lambda a=offsets[i], b=offsets[i + 1]: (np.asarray(tokens[a:b], dtype=np.int64),
                                                          np.asarray(programs[a:b], dtype=np.int64)))
                 for i in range(len(offsets) - 1)]
+    import pandas as pd
     if source == "combined":
         df = pd.read_csv("data/combined.csv")
         paths = [Path(f) for f in df.loc[df["split"] == "validation", "midi_filename"] if Path(f).exists()]
@@ -339,14 +356,37 @@ class NoteStream:
         return len(self.ended) == notes[0].size(0)
 
 
+def pick_device(device="auto"):
+    """'auto' = CUDA when available, else the CPU."""
+    return ("cuda" if torch.cuda.is_available() else "cpu") if device in (None, "auto") else str(device)
+
+
+def pick_dtype(device, dtype="auto"):
+    """'auto' = bf16 on CUDA GPUs with native bf16 (compute capability 8.0+, Ampere and newer), float32 elsewhere
+    (older GPUs such as Colab's T4, CPU, MPS); else a torch dtype or a name in DTYPES."""
+    if isinstance(dtype, torch.dtype):
+        return dtype
+    if dtype in (None, "auto"):
+        if not str(device).startswith("cuda"):
+            return torch.float32
+        try:
+            if torch.cuda.is_available() and torch.cuda.get_device_capability(torch.device(str(device)))[0] < 8:
+                return torch.float32
+        except (AssertionError, RuntimeError, ValueError):  # no such device: loading the model reports it
+            pass
+        return torch.bfloat16
+    if dtype not in DTYPES:
+        raise ValueError(f"dtype {dtype!r}: 'auto', a torch dtype or one of {', '.join(DTYPES)}")
+    return DTYPES[dtype]
+
+
 class Generator:
     """A checkpoint loaded once; run() is one generate.py call on it (the options' checkpoint, device and dtype are
-    ignored: the constructor's count)."""
+    ignored: the constructor's count). device / dtype: pick_device / pick_dtype."""
 
     def __init__(self, checkpoint, device="auto", dtype="auto"):
-        self.device = ("cuda" if torch.cuda.is_available() else "cpu") if device == "auto" else device
-        self.dtype = {"fp32": torch.float32, "bf16": torch.bfloat16}.get(
-            dtype, torch.bfloat16 if self.device == "cuda" else torch.float32)
+        self.device = pick_device(device)
+        self.dtype = pick_dtype(self.device, dtype)
         self.model, self.iter = load_model(checkpoint, self.device, self.dtype)
         self.config = self.model.config
         self.block_size = self.config.block_size  # the checkpoint's; --block-size sets it per run
@@ -427,6 +467,9 @@ def retrieved_pieces(args, device):
     """--retrieve: the openings of the --retrieve-top files best matching --text, as (label, loader) pieces in a
     seeded random order (row i of the run takes piece i, so the rows get distinct files)."""
     store = Path(args.retrieve) if Path(args.retrieve).is_dir() else Path("data/cache") / args.retrieve
+    if not store.is_dir():
+        raise GenerationError(f"--retrieve {args.retrieve}: no token store {store} (retrieval needs a captioned store "
+                              "of the training data, as in the repo's data/cache)")
     index = caption_index(str(store), args.labels_dir, args.retrieve_files, args.retrieve_min_notes, device)
     strict = tuple(c.strip() for c in args.retrieve_strict.split(',') if c.strip())
     hits = index.search(args.text, k=args.retrieve_top, only=args.caption_allowed, strict=strict)
@@ -574,9 +617,12 @@ def generate_batch(model, config, args, pieces, seed, n_rows, device, progress=N
         raise GenerationError("--sample-instruments needs a multi-instrument checkpoint (n_programs > 0)")
     allowed = None
     if args.instruments == 'prompt':
-        if len({tuple(sorted(set(r.tolist()))) for r in prompt_programs}) > 1:
+        real = pitch < BOS_PITCH  # the BOS row (instrument 0) is not one of the prompt's instruments
+        if len({tuple(sorted(set(p[m].tolist()))) for p, m in zip(prompt_programs, real)}) > 1:
             raise GenerationError("--instruments prompt needs rows with the same instrument set: use --batch-size 1")
-        allowed = sorted(set(prompt_programs[0].tolist()))
+        allowed = sorted(set(prompt_programs[0][real[0]].tolist()))
+        if not allowed:
+            raise GenerationError("--instruments prompt needs a prompt with notes")
     elif args.instruments:
         allowed = [int(x) for x in args.instruments.split(',')]
     sample_instruments = args.sample_instruments
@@ -714,6 +760,14 @@ def style_hold(config, args, device):
 @functools.cache
 def text_encoder(device):
     """LaBSE on `device`, loaded once per process (a server reuses it for every request)."""
+    if importlib.util.find_spec("transformers") is None:
+        raise GenerationError("captions need the LaBSE text encoder from the transformers package: "
+                              "pip install 'musicar[text]'")
+    from importlib.metadata import version
+    have = version("transformers")
+    if tuple(int(x) for x in have.split(".")[:2] if x.isdigit()) < (4, 56):
+        raise GenerationError(f"captions need transformers >= 4.56 (installed: {have}): "
+                              "pip install -U 'musicar[text]'")
     from musicar.text.encoder import TextEncoder
     return TextEncoder(device=device)
 
@@ -724,6 +778,9 @@ def style_id(config, name):
         if name:
             raise GenerationError("this checkpoint was trained without styles")
         return None
+    if not Path("data/styles.json").is_file():
+        raise GenerationError("this checkpoint was trained with styles, named in data/styles.json of the training "
+                              "repo: run it from the repo root")
     names = load_styles()
     name = name or 'none'
     if name not in names:

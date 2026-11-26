@@ -1,5 +1,6 @@
 """Checkpoint paths, model args, loading and saving."""
 
+import json
 import os
 from pathlib import Path
 
@@ -32,13 +33,29 @@ def torch_load(path, **kw):
 
 
 def resolve_checkpoint(path):
+    """A checkpoint file, or the one in a run directory: model_bf16.pt, else best.pt, ckpt.pt, model.safetensors
+    (the Hugging Face Hub format, with its config.json)."""
     path = Path(path)
     if path.is_dir():
-        for name in ("model_bf16.pt", "best.pt", "ckpt.pt"):
+        for name in ("model_bf16.pt", "best.pt", "ckpt.pt", "model.safetensors"):
             if (path / name).exists():
                 return path / name
-        raise FileNotFoundError(f"no model_bf16.pt / best.pt / ckpt.pt in {path}")
+        raise FileNotFoundError(f"no model_bf16.pt / best.pt / ckpt.pt / model.safetensors in {path}")
     return path
+
+
+def read_checkpoint(path):
+    """A checkpoint as a dict with 'model' (the state dict), 'model_args' and 'iter_num': a .pt file (torch_load), or
+    a .safetensors file with the config.json next to it (the Hub repos: no pickle; config.json = model_args, iter_num,
+    dtype)."""
+    path = resolve_checkpoint(path)
+    if path.suffix != '.safetensors':
+        return torch_load(path)
+    from safetensors.torch import load_file
+    config = path.parent / 'config.json'
+    if not config.is_file():
+        raise FileNotFoundError(f"{config}: a .safetensors checkpoint needs its config.json (model_args) next to it")
+    return dict(json.loads(config.read_text()), model=load_file(str(path)))
 
 
 def load_expanded(model, state_dict):
@@ -137,13 +154,16 @@ def merge_model_args(saved, wanted, finetune, block_size):
 
 
 def load_model(path, device='cpu', dtype=torch.float32, quant=None):
-    """A trained GPT for inference from a checkpoint file or run dir (resolve_checkpoint): dropout 0, eval mode, on
-    `device` in `dtype`. Keys a checkpoint predates take MusicConfig's defaults. quant: a musicar.model.quant spec
-    (e.g. 'w4g32-a8-kv8'), applied in float32 before the cast to `dtype`. Returns (model, iter_num or None)."""
+    """A trained GPT for inference from a checkpoint file or run dir (resolve_checkpoint, read_checkpoint): dropout 0,
+    eval mode, on `device` in `dtype`. Keys a checkpoint predates take MusicConfig's defaults. quant: a
+    musicar.model.quant spec (e.g. 'w4g32-a8-kv8'), applied in float32 before the cast to `dtype`. Returns (model,
+    iter_num or None)."""
     from musicar.model.gpt import GPT, MusicConfig
-    ck = torch_load(resolve_checkpoint(path))
+    ck = read_checkpoint(path)
     fields = MusicConfig.__dataclass_fields__
-    model = GPT(MusicConfig(**{k: v for k, v in ck['model_args'].items() if k in fields}, dropout=0.0))
+    # the Hub's config.json keeps dropout in model_args; inference sets it to 0
+    model = GPT(MusicConfig(**{k: v for k, v in ck['model_args'].items() if k in fields and k != 'dropout'},
+                            dropout=0.0))
     state = strip_compile_prefix(ck['model'])
     model.load_state_dict({k: v for k, v in state.items() if not k.startswith('aux_')})  # training-only heads
     if quant:

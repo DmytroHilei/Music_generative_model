@@ -20,9 +20,6 @@ tags:
 - decoder-only
 - autoregressive
 - rope
-- swiglu
-- rmsnorm
-- qk-norm
 - pytorch
 - multi-instrument
 - general-midi
@@ -39,6 +36,32 @@ A 108M-parameter autoregressive transformer that writes multi-instrument MIDI on
 | 107.93M | 2,048 notes | 129 (128 General MIDI programs + drums) | 197M (band stage), after the piano model's 2.33B | CC BY-NC-SA 4.0 |
 
 ![Architecture of musicar-S](https://huggingface.co/Dimitri-206265/musicar-S/resolve/main/diagram.png)
+
+## Quick start
+
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/DmytroHilei/Music_generative_model/blob/transformer-v2/notebooks/musicar_colab.ipynb) (free GPU, plays the result in the browser)
+
+```bash
+pip install "git+https://github.com/DmytroHilei/Music_generative_model"
+```
+
+```python
+import musicar
+model = musicar.from_pretrained("musicar-S")   # downloaded once (216 MB); bf16 on recent GPUs, else float32
+musicar.generate(model, prompt="song.mid", n_notes=1000).write("continued.mid")   # continue a MIDI file
+musicar.generate(model, prompt="song.mid", instruments=[0, 33, 128], seed=1).write("trio.mid")   # piano, bass, drums
+```
+
+From the command line:
+
+```bash
+musicar-generate --model musicar-S --sample-instruments --prompt song.mid --max-new-tokens 1000 --output continued.mid
+```
+
+In Python each call draws a random seed and prints it (pass `seed=` to get the same piece again); the command line uses
+seed 42 unless `--seed` is given. The model has no start-of-piece token, so without a prompt it starts from one
+artificial note and can write very dense passages; a MIDI prompt gives better results. On a laptop CPU (float32) it
+writes about 36-47 notes per second.
 
 ## Model summary
 
@@ -66,9 +89,9 @@ and, for generation from text, by [musicar-L-caption](https://huggingface.co/Dim
 | License | CC BY-NC-SA 4.0 |
 | Code | https://github.com/DmytroHilei/Music_generative_model |
 
-## How to use
+## How to use from the code repository
 
-From a clone of the code repository, with its environment installed (README, "Setup"):
+For training, evaluation and the options that read the project's data, from a clone with its environment installed (README, "Setup"):
 
 ```bash
 hf download Dimitri-206265/musicar-S --local-dir checkpoints/musicar-S
@@ -85,26 +108,14 @@ starts from a single artificial seed note, which is out of distribution; `--prom
 every `--slide` notes (default 512). `generate.py` also renders an MP3 unless `--no-mp3` is given (needs fluidsynth,
 ffmpeg and a General MIDI soundfont).
 
-Loading the pickle-free files directly:
-
-```python
-import json
-from safetensors.torch import load_file
-from musicar.model.gpt import GPT, MusicConfig
-
-cfg = json.load(open("checkpoints/musicar-S/config.json"))
-model = GPT(MusicConfig(**cfg["model_args"]))
-model.load_state_dict(load_file("checkpoints/musicar-S/model.safetensors"))
-model.eval()
-```
-
-`MusicConfig` defaults to training settings (dropout 0.2), so call `model.eval()` before inference;
-`musicar.model.checkpoint.load_model` does this for `model_bf16.pt`. Sampling with the KV cache is in
-`musicar/generation/sampling.py`.
+`musicar.from_pretrained("musicar-S")` downloads and reads only `model.safetensors` + `config.json` (no pickle); given a
+local folder it takes `model_bf16.pt` first (pass the folder's `model.safetensors` path to avoid the pickle); the raw
+network is `model.model` (a `musicar.model.gpt.GPT` in eval mode) and sampling with the KV cache is
+`musicar.generation.sampling.generate`.
 
 ## Hardware and speed
 
-**Minimum.** Any CUDA GPU with 1 GB of memory (peak 0.35 GiB measured, bf16, one row), or a CPU with about 1 GB of free RAM. PyTorch 2.7 or newer and the code repository's `generate.py` / `musicar` package.
+**Minimum.** Any CUDA GPU with 1 GB of memory (peak 0.35 GiB measured, bf16, one row), or a CPU with about 1 GB of free RAM. Python 3.10+, PyTorch 2.7 or newer and the `musicar` package (Quick start).
 
 At one row, generating a note reads every weight once plus the cached keys and values of the notes in view, so
 the speed is capped by memory bandwidth B:

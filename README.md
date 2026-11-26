@@ -422,6 +422,33 @@ uv pip install --python .venv/bin/python --no-deps -e .     # the musicar packag
 
 MP3 rendering needs `fluidsynth`, `ffmpeg` and a General MIDI soundfont (`fluid-soundfont-gm`).
 
+### The released models without the repo
+
+```bash
+pip install "git+https://github.com/DmytroHilei/Music_generative_model"                 # inference only
+pip install "musicar[text] @ git+https://github.com/DmytroHilei/Music_generative_model"  # + LaBSE for musicar-L-caption
+```
+
+```python
+import musicar
+model = musicar.from_pretrained("musicar-S")   # musicar-L, musicar-S, musicar-S-piano, musicar-L-caption, user/repo
+musicar.generate(model, n_notes=1000, seed=0).write("x.mid")      # a pretty_midi.PrettyMIDI
+musicar.generate(model, prompt="song.mid", instruments=[0, 33, 128], num_samples=4, seed=1)   # a list of 4
+caption = musicar.from_pretrained("musicar-L-caption")
+musicar.generate(caption, text="a sad slow piano ballad", preset="f1", length_seconds=60, n_notes=2048)
+```
+
+The weights come from the Hub (`model.safetensors` + `config.json`, cached by `huggingface_hub`). `generate()` takes
+`generate.py`'s sampling, prompt and length options as keywords (`cfg_scale=2.5`); device and dtype go to
+`from_pretrained`, `--config` is `preset=`, and the file options (`--output`, `--no-mp3`, `--soundfont`, `--threads`)
+are command-line only. Its defaults: a random seed (printed with the run; pass `seed=` to repeat a piece), the preset's
+length else 1000 notes, and `instruments="sample"`; `generate.py` keeps seed 42, 512 notes and piano unless
+`--sample-instruments`. The command line is installed as `musicar-generate` (= `generate.py`, all options; `--model` =
+`--checkpoint`), e.g. `musicar-generate --model musicar-S --max-new-tokens 1000 --output x.mid`; it renders an MP3 next
+to the MIDI when fluidsynth, ffmpeg and the soundfont are installed and skips it otherwise (`--no-mp3`). Extra `[text]`:
+LaBSE for musicar-L-caption and `--text`. `[train]`, `[serve]` and `[all]` are for a clone of the repo (`pip install -e
+".[all]"`, the same packages as `requirements.txt`); `--retrieve` and `--val-prompt` read the repo's data.
+
 ## Usage
 
 ```bash
@@ -449,6 +476,7 @@ MP3 rendering needs `fluidsynth`, `ffmpeg` and a General MIDI soundfont (`fluid-
 `generate.py --config NAME` loads `config/generate/NAME.toml`, a file of generate.py options (dashes or underscores),
 so the long sampling settings don't have to be typed each time. Presets stack (`--config a --config b`, the later one
 wins) and any flag given on the command line overrides them, e.g. `--config s50 --cfg-scale 2 --best-of 8`.
+`config/generate` is a link to `musicar/generation/presets/`, so the installed package has them too (`preset="f1"`).
 
 | | `f1` | `caption` | `s50` | `piano` |
 |---|---|---|---|---|

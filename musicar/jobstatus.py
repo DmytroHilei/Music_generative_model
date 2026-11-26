@@ -6,7 +6,7 @@ Progress of sampling jobs (generate.py, sample_sweep.py) for the dashboard: one 
     job.finish('saved samples/x.mid')
 
 status.py lists these files: running while the pid is alive, 'done' after finish(), 'died' if the process is gone
-without finishing.
+without finishing. An installed package (no repo checkout around it, e.g. pip install) writes none.
 """
 
 import json
@@ -14,13 +14,16 @@ import os
 import time
 from pathlib import Path
 
-JOBS_DIR = Path(__file__).resolve().parent.parent / 'logs' / 'jobs'
+ROOT = Path(__file__).resolve().parent.parent
+JOBS_DIR = ROOT / 'logs' / 'jobs'
 
 
 class JobStatus:
     def __init__(self, name, total, detail=''):
-        JOBS_DIR.mkdir(parents=True, exist_ok=True)
-        self.path = JOBS_DIR / f'{name}_{os.getpid()}.json'
+        # a repo checkout (train.py next to the package); in site-packages the job file would land there
+        self.path = JOBS_DIR / f'{name}_{os.getpid()}.json' if (ROOT / 'train.py').is_file() else None
+        if self.path is not None:
+            JOBS_DIR.mkdir(parents=True, exist_ok=True)
         self.state = dict(name=name, pid=os.getpid(), total=int(total), done=0, detail=detail, result='',
                           started=time.time(), updated=time.time(), finished=False)
         self._last_write = 0.0
@@ -40,6 +43,8 @@ class JobStatus:
 
     def _write(self):
         self.state['updated'] = self._last_write = time.time()
+        if self.path is None:
+            return
         tmp = self.path.with_suffix('.tmp')
         tmp.write_text(json.dumps(self.state))
         os.replace(tmp, self.path)  # the dashboard never reads a half-written file
